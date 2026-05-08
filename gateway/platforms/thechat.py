@@ -43,8 +43,8 @@ class TheChatAdapter(BasePlatformAdapter):
         self.token = str(
             config.token
             or config.extra.get("token")
-            or os.getenv("THECHAT_HERMES_PLATFORM_TOKEN")
-            or os.getenv("THECHAT_PLATFORM_TOKEN")
+            or os.getenv("THECHAT_BOT_TOKEN")
+            or os.getenv("THECHAT_HERMES_BOT_TOKEN")
             or ""
         )
         self.poll_interval = float(config.extra.get("poll_interval") or os.getenv("THECHAT_POLL_INTERVAL", "1.0"))
@@ -58,7 +58,7 @@ class TheChatAdapter(BasePlatformAdapter):
             logger.error("TheChat: THECHAT_BASE_URL is required")
             return False
         if not self.token:
-            logger.error("TheChat: THECHAT_HERMES_PLATFORM_TOKEN is required")
+            logger.error("TheChat: THECHAT_BOT_TOKEN is required")
             return False
 
         self._client = httpx.AsyncClient(

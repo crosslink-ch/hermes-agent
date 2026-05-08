@@ -1097,7 +1097,7 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
         Platform.MATTERMOST: "MATTERMOST_TOKEN",
         Platform.MATRIX: "MATRIX_ACCESS_TOKEN",
         Platform.WEIXIN: "WEIXIN_TOKEN",
-        Platform.THECHAT: "THECHAT_HERMES_PLATFORM_TOKEN",
+        Platform.THECHAT: "THECHAT_BOT_TOKEN",
     }
     for platform, pconfig in config.platforms.items():
         if not pconfig.enabled:
@@ -1415,8 +1415,8 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # TheChat platform bridge
     thechat_base_url = os.getenv("THECHAT_BASE_URL", "").strip()
     thechat_token = (
-        os.getenv("THECHAT_HERMES_PLATFORM_TOKEN", "").strip()
-        or os.getenv("THECHAT_PLATFORM_TOKEN", "").strip()
+        os.getenv("THECHAT_BOT_TOKEN", "").strip()
+        or os.getenv("THECHAT_HERMES_BOT_TOKEN", "").strip()
     )
     if thechat_base_url and thechat_token:
         if Platform.THECHAT not in config.platforms:
