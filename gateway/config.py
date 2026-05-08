@@ -108,6 +108,7 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    THECHAT = "thechat"
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -389,6 +390,9 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     ),
     Platform.YUANBAO: lambda cfg: bool(
         cfg.extra.get("app_id") and cfg.extra.get("app_secret")
+    ),
+    Platform.THECHAT: lambda cfg: bool(
+        cfg.extra.get("base_url") and (cfg.token or cfg.extra.get("token"))
     ),
     Platform.DINGTALK: lambda cfg: bool(
         (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))
@@ -1093,6 +1097,7 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
         Platform.MATTERMOST: "MATTERMOST_TOKEN",
         Platform.MATRIX: "MATRIX_ACCESS_TOKEN",
         Platform.WEIXIN: "WEIXIN_TOKEN",
+        Platform.THECHAT: "THECHAT_HERMES_PLATFORM_TOKEN",
     }
     for platform, pconfig in config.platforms.items():
         if not pconfig.enabled:
@@ -1406,6 +1411,31 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
                 pass
         if webhook_secret:
             config.platforms[Platform.WEBHOOK].extra["secret"] = webhook_secret
+
+    # TheChat platform bridge
+    thechat_base_url = os.getenv("THECHAT_BASE_URL", "").strip()
+    thechat_token = (
+        os.getenv("THECHAT_HERMES_PLATFORM_TOKEN", "").strip()
+        or os.getenv("THECHAT_PLATFORM_TOKEN", "").strip()
+    )
+    if thechat_base_url and thechat_token:
+        if Platform.THECHAT not in config.platforms:
+            config.platforms[Platform.THECHAT] = PlatformConfig()
+        config.platforms[Platform.THECHAT].enabled = True
+        config.platforms[Platform.THECHAT].token = thechat_token
+        config.platforms[Platform.THECHAT].extra.update({
+            "base_url": thechat_base_url.rstrip("/"),
+            "token": thechat_token,
+            "poll_interval": _coerce_float(os.getenv("THECHAT_POLL_INTERVAL"), 1.0),
+        })
+        thechat_home = os.getenv("THECHAT_HOME_CHANNEL", "").strip()
+        if thechat_home:
+            config.platforms[Platform.THECHAT].home_channel = HomeChannel(
+                platform=Platform.THECHAT,
+                chat_id=thechat_home,
+                name=os.getenv("THECHAT_HOME_CHANNEL_NAME", "TheChat"),
+                thread_id=os.getenv("THECHAT_HOME_CHANNEL_THREAD_ID") or None,
+            )
 
     # DingTalk
     dingtalk_client_id = os.getenv("DINGTALK_CLIENT_ID")

@@ -392,6 +392,11 @@ PLATFORM_HINTS = {
         "attachments, audio as file attachments. You can also include image URLs "
         "in markdown format ![alt](url) and they will be uploaded as attachments."
     ),
+    "thechat": (
+        "You are in TheChat, a workspace chat app. Respond conversationally in "
+        "plain markdown. In channels, users may address different Hermes bots "
+        "by name; only answer for the bot/session that received this message."
+    ),
     "signal": (
         "You are on a text messaging communication platform, Signal. "
         "Please do not use markdown as it does not render. "
