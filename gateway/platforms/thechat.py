@@ -99,7 +99,7 @@ class TheChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        context = self._contexts.get(chat_id)
+        context = self._context_for_send(chat_id, reply_to=reply_to, metadata=metadata)
         if not context:
             return SendResult(success=False, error=f"No TheChat context for chat {chat_id}")
         if not self._client:
@@ -119,10 +119,32 @@ class TheChatAdapter(BasePlatformAdapter):
             response = await self._client.post("/hermes-platform/messages", json=payload)
             response.raise_for_status()
             data = response.json()
+            context["delivered"] = True
             return SendResult(success=True, message_id=str(data.get("messageId") or ""), raw_response=data)
         except Exception as exc:
             logger.error("TheChat: failed to send response: %s", exc)
             return SendResult(success=False, error=str(exc), retryable=True)
+
+    def _context_for_send(
+        self,
+        chat_id: str,
+        *,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        candidate_ids = [reply_to]
+        if metadata:
+            candidate_ids.extend([
+                metadata.get("message_id"),
+                metadata.get("reply_to_message_id"),
+            ])
+        for candidate in candidate_ids:
+            if candidate is None:
+                continue
+            context = self._event_contexts.get(str(candidate))
+            if context:
+                return context
+        return self._contexts.get(chat_id)
 
     def _is_gateway_operational_notice(self, content: str) -> bool:
         text = content.strip()
@@ -163,7 +185,12 @@ class TheChatAdapter(BasePlatformAdapter):
         context = self._event_contexts.pop(str(event.message_id or ""), None)
         if not context:
             return
-        if outcome == ProcessingOutcome.FAILURE and self._client:
+        active_context = self._contexts.get(event.source.chat_id)
+        if active_context is context:
+            self._contexts.pop(event.source.chat_id, None)
+        if not self._client:
+            return
+        if outcome == ProcessingOutcome.FAILURE:
             try:
                 await self._client.post(
                     f"/hermes-platform/invocations/{context['invocation_id']}/failed",
@@ -171,6 +198,22 @@ class TheChatAdapter(BasePlatformAdapter):
                 )
             except Exception:
                 logger.debug("TheChat: failed to report processing failure", exc_info=True)
+        elif outcome == ProcessingOutcome.CANCELLED:
+            try:
+                await self._client.post(
+                    f"/hermes-platform/invocations/{context['invocation_id']}/cancelled",
+                    json={"reason": "Hermes gateway cancelled the message"},
+                )
+            except Exception:
+                logger.debug("TheChat: failed to report processing cancellation", exc_info=True)
+        elif outcome == ProcessingOutcome.SUCCESS and not context.get("delivered"):
+            try:
+                await self._client.post(
+                    f"/hermes-platform/invocations/{context['invocation_id']}/completed",
+                    json={"reason": "Hermes gateway completed without a chat response"},
+                )
+            except Exception:
+                logger.debug("TheChat: failed to report silent completion", exc_info=True)
 
     async def _poll_loop(self) -> None:
         assert self._client is not None
