@@ -1427,6 +1427,10 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             "base_url": thechat_base_url.rstrip("/"),
             "token": thechat_token,
             "poll_interval": _coerce_float(os.getenv("THECHAT_POLL_INTERVAL"), 1.0),
+            "webhook_host": os.getenv("THECHAT_WEBHOOK_HOST", "127.0.0.1"),
+            "webhook_port": _coerce_int(os.getenv("THECHAT_WEBHOOK_PORT"), 8765),
+            "webhook_path": os.getenv("THECHAT_WEBHOOK_PATH", "/thechat/webhook"),
+            "webhook_url": os.getenv("THECHAT_WEBHOOK_URL", "").strip(),
         })
         thechat_home = os.getenv("THECHAT_HOME_CHANNEL", "").strip()
         if thechat_home:
