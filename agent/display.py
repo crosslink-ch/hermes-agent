@@ -14,6 +14,7 @@ from difflib import unified_diff
 from pathlib import Path
 
 from utils import safe_json_loads
+from agent.tool_result_classification import file_mutation_result_landed
 
 # ANSI escape codes for coloring tool failure indicators
 _RED = "\033[31m"
@@ -810,6 +811,8 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
     """
     if result is None:
         return False, ""
+    if file_mutation_result_landed(tool_name, result):
+        return False, ""
 
     if tool_name == "terminal":
         data = safe_json_loads(result)
@@ -827,6 +830,10 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
                 return True, " [full]"
 
     # Generic heuristic for non-terminal tools
+    # Multimodal tool results (dicts with _multimodal=True) are not strings —
+    # treat them as successes since failures would be JSON-encoded strings.
+    if not isinstance(result, str):
+        return False, ""
     lower = result[:500].lower()
     if '"error"' in lower or '"failed"' in lower or result.startswith("Error"):
         return True, " [error]"
