@@ -24,6 +24,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional release tag to publish and promote to :latest"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -243,11 +248,15 @@ jobs:
       - name: Compute tag
         id: tag
         run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
+          if [ -n "${MANUAL_RELEASE_TAG}" ]; then
+            echo "tag=${MANUAL_RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "release" ]; then
             echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
           else
             echo "tag=sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
           fi
+        env:
+          MANUAL_RELEASE_TAG: ${{ inputs.release_tag || '' }}
 
       - name: Create manifest list and push
         working-directory: /tmp/digests
@@ -279,13 +288,16 @@ jobs:
       # releases set pushed_release_tag instead.
       - name: Mark SHA tag pushed
         id: mark_pushed
-        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+        if: |
+          github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' ||
+           (github.event_name == 'workflow_dispatch' && inputs.release_tag == ''))
         run: echo "pushed=true" >> "$GITHUB_OUTPUT"
 
       # Signal to move-latest that the release tag is live.
       - name: Mark release tag pushed
         id: mark_release_pushed
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
         run: echo "pushed=true" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
@@ -314,7 +326,7 @@ jobs:
   move-main:
     if: |
       contains(fromJSON('["NousResearch/hermes-agent","crosslink-ch/hermes-agent"]'), github.repository)
-      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_tag == ''))
       && github.ref == 'refs/heads/main'
       && needs.merge.outputs.pushed_sha_tag == 'true'
     needs: merge
@@ -436,7 +448,7 @@ jobs:
   move-latest:
     if: |
       contains(fromJSON('["NousResearch/hermes-agent","crosslink-ch/hermes-agent"]'), github.repository)
-      && github.event_name == 'release'
+      && (github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != ''))
       && needs.merge.outputs.pushed_release_tag == 'true'
     needs: merge
     runs-on: ubuntu-latest
