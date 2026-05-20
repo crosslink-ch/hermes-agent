@@ -28,6 +28,7 @@ import urllib.parse
 from typing import Any, Dict, Optional
 
 from gateway.config import Platform, PlatformConfig
+from gateway.http_routes import loopback_route
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -75,6 +76,11 @@ class SmsAdapter(BasePlatformAdapter):
         self._webhook_url: str = os.getenv("SMS_WEBHOOK_URL", "").strip()
         self._runner = None
         self._http_session: Optional["aiohttp.ClientSession"] = None
+
+    def public_http_routes(self) -> list[dict]:
+        return [
+            loopback_route("sms-twilio-webhook", path="/webhooks/twilio", port=self._webhook_port),
+        ]
 
     def _basic_auth_header(self) -> str:
         """Build HTTP Basic auth header value for Twilio."""

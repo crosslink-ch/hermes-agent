@@ -1537,6 +1537,15 @@ class BasePlatformAdapter(ABC):
         Returns True if connection was successful.
         """
         pass
+
+    def public_http_routes(self) -> list[dict]:
+        """Return public HTTP routes exposed by this adapter, if any.
+
+        Managed deployments can publish these routes to a local reverse proxy
+        sidecar. Most adapters do not run an HTTP listener, so the default is
+        an empty list.
+        """
+        return []
     
     @abstractmethod
     async def disconnect(self) -> None:

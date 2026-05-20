@@ -1291,6 +1291,7 @@ class GatewayRunner:
         # Track platforms that failed to connect for background reconnection.
         # Key: Platform enum, Value: {"config": platform_config, "attempts": int, "next_retry": float}
         self._failed_platforms: Dict[Platform, Dict[str, Any]] = {}
+        self._http_route_manifest_signature: Optional[str] = None
 
         # Track pending /update prompt responses per session.
         # Key: session_key, Value: True when a prompt is waiting for user input.
@@ -1668,6 +1669,55 @@ class GatewayRunner:
                 f"{platform.value} connect timed out after {timeout:g}s"
             ) from exc
 
+    def _collect_public_http_routes(self) -> list[dict]:
+        """Return public HTTP routes for currently connected adapters."""
+        routes: list[dict] = []
+        for platform, adapter in list(self.adapters.items()):
+            provider = getattr(adapter, "public_http_routes", None)
+            if not callable(provider):
+                continue
+            try:
+                adapter_routes = provider() or []
+            except Exception as exc:
+                logger.warning(
+                    "Failed to collect HTTP routes from %s: %s",
+                    platform.value,
+                    exc,
+                )
+                continue
+            if adapter_routes:
+                routes.extend(adapter_routes)
+        return routes
+
+    def _publish_http_route_manifest(self, *, force: bool = False) -> None:
+        """Write the live public HTTP route manifest for managed deployments."""
+        try:
+            from gateway.http_routes import write_route_manifest
+
+            routes = self._collect_public_http_routes()
+            signature = json.dumps(
+                sorted(routes, key=lambda route: str(route.get("id", ""))),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if (
+                not force
+                and signature == getattr(self, "_http_route_manifest_signature", None)
+            ):
+                return
+            path = write_route_manifest(routes)
+            self._http_route_manifest_signature = signature
+            logger.debug("Published HTTP route manifest to %s", path)
+        except Exception as exc:
+            logger.warning("Failed to publish HTTP route manifest: %s", exc)
+
+    async def _http_route_manifest_watcher(self) -> None:
+        """Periodically republish routes in case an adapter changes live config."""
+        interval = max(1.0, _float_env("HERMES_HTTP_ROUTES_PUBLISH_INTERVAL", 5.0))
+        while self._running:
+            await asyncio.sleep(interval)
+            self._publish_http_route_manifest()
+
     @property
     def should_exit_cleanly(self) -> bool:
         return self._exit_cleanly
@@ -1964,6 +2014,7 @@ class GatewayRunner:
             finally:
                 self.adapters.pop(adapter.platform, None)
                 self.delivery_router.adapters = self.adapters
+                self._publish_http_route_manifest()
 
         # Queue retryable failures for background reconnection
         if adapter.fatal_error_retryable:
@@ -3237,6 +3288,7 @@ class GatewayRunner:
             self._gateway_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._gateway_loop = None
+        self._publish_http_route_manifest(force=True)
         logger.info("Session storage: %s", self.config.sessions_dir)
 
         # Sanity-check that systemd's TimeoutStopSec covers our drain
@@ -3641,9 +3693,13 @@ class GatewayRunner:
         # Update delivery router with adapters
         self.delivery_router.adapters = self.adapters
         self._wire_teams_pipeline_runtime()
+        self._publish_http_route_manifest()
 
         self._running = True
         self._update_runtime_status("running")
+        route_manifest_task = asyncio.create_task(self._http_route_manifest_watcher())
+        self._background_tasks.add(route_manifest_task)
+        route_manifest_task.add_done_callback(self._background_tasks.discard)
         
         # Emit gateway:startup hook
         hook_count = len(self.hooks.loaded_hooks)
@@ -4797,6 +4853,7 @@ class GatewayRunner:
                         self.adapters[platform] = adapter
                         self._sync_voice_mode_state_to_adapter(adapter)
                         self.delivery_router.adapters = self.adapters
+                        self._publish_http_route_manifest()
                         del self._failed_platforms[platform]
                         self._update_platform_runtime_status(
                             platform.value,
@@ -5062,6 +5119,7 @@ class GatewayRunner:
             self._background_tasks.clear()
 
             self.adapters.clear()
+            self._publish_http_route_manifest(force=True)
             self._running_agents.clear()
             self._running_agents_ts.clear()
             self._pending_messages.clear()

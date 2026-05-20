@@ -45,6 +45,7 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.http_routes import loopback_route
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -130,6 +131,11 @@ class WebhookAdapter(BasePlatformAdapter):
         self._max_body_bytes: int = int(
             config.extra.get("max_body_bytes", 1_048_576)
         )  # 1MB
+
+    def public_http_routes(self) -> list[dict]:
+        return [
+            loopback_route("generic-webhooks", path_prefix="/webhooks", port=self._port),
+        ]
 
     # ------------------------------------------------------------------
     # Lifecycle

@@ -36,6 +36,7 @@ except ImportError:
     HTTPX_AVAILABLE = False
 
 from gateway.config import Platform, PlatformConfig
+from gateway.http_routes import loopback_route
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.platforms.wecom_crypto import WXBizMsgCrypt, WeComCryptoError
 
@@ -69,6 +70,11 @@ class WecomCallbackAdapter(BasePlatformAdapter):
         self._seen_messages: Dict[str, float] = {}
         self._user_app_map: Dict[str, str] = {}
         self._access_tokens: Dict[str, Dict[str, Any]] = {}
+
+    def public_http_routes(self) -> list[dict]:
+        return [
+            loopback_route("wecom-callback", path=self._path, port=self._port),
+        ]
 
     # ------------------------------------------------------------------
     # App normalisation

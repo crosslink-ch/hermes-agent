@@ -20,6 +20,7 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.http_routes import loopback_route
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -71,6 +72,11 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         self._seen_receipt_order: deque[str] = deque()
         self._accepted_count = 0
         self._duplicate_count = 0
+
+    def public_http_routes(self) -> list[dict]:
+        return [
+            loopback_route("msgraph-webhook", path=self._webhook_path, port=self._port),
+        ]
 
     @staticmethod
     def _string_or_none(value: Any) -> Optional[str]:

@@ -63,6 +63,7 @@ from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
+from gateway.http_routes import loopback_route
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -381,6 +382,8 @@ class TelegramAdapter(BasePlatformAdapter):
         self._app: Optional[Application] = None
         self._bot: Optional[Bot] = None
         self._webhook_mode: bool = False
+        self._webhook_path: str = "/telegram"
+        self._webhook_port: int = 8443
         self._mention_patterns = self._compile_mention_patterns()
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
         self._disable_link_previews: bool = self._coerce_bool_extra("disable_link_previews", False)
@@ -439,6 +442,17 @@ class TelegramAdapter(BasePlatformAdapter):
         # "all"       — every message triggers a push notification (legacy
         #               behavior; opt-in via display.platforms.telegram.notifications).
         self._notifications_mode: str = "important"
+
+    def public_http_routes(self) -> list[dict]:
+        if not self._webhook_mode:
+            return []
+        return [
+            loopback_route(
+                "telegram-webhook",
+                path=self._webhook_path,
+                port=self._webhook_port,
+            ),
+        ]
 
     def _notification_kwargs(
         self, metadata: Optional[Dict[str, Any]]
@@ -1340,6 +1354,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     )
                 from urllib.parse import urlparse
                 webhook_path = urlparse(webhook_url).path or "/telegram"
+                self._webhook_path = webhook_path
+                self._webhook_port = webhook_port
 
                 await self._app.updater.start_webhook(
                     listen="0.0.0.0",

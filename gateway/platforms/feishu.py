@@ -127,6 +127,7 @@ FEISHU_WEBSOCKET_AVAILABLE = websockets is not None
 FEISHU_WEBHOOK_AVAILABLE = aiohttp is not None
 
 from gateway.config import Platform, PlatformConfig
+from gateway.http_routes import loopback_route
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -1468,6 +1469,13 @@ class FeishuAdapter(BasePlatformAdapter):
         # by create, so we cache it per message_id.
         self._pending_processing_reactions: "OrderedDict[str, str]" = OrderedDict()
         self._load_seen_message_ids()
+
+    def public_http_routes(self) -> list[dict]:
+        if self._connection_mode != "webhook":
+            return []
+        return [
+            loopback_route("feishu-webhook", path=self._webhook_path, port=self._webhook_port),
+        ]
 
     @staticmethod
     def _load_settings(extra: Dict[str, Any]) -> FeishuAdapterSettings:

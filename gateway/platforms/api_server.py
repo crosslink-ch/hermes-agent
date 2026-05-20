@@ -45,6 +45,7 @@ except ImportError:
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.http_routes import loopback_route
 from gateway.platforms.base import (
     BasePlatformAdapter,
     SendResult,
@@ -616,6 +617,12 @@ class APIServerAdapter(BasePlatformAdapter):
         # in-flight run by run_id.
         self._run_approval_sessions: Dict[str, str] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+
+    def public_http_routes(self) -> list[dict]:
+        return [
+            loopback_route("api-server-v1", path_prefix="/v1", port=self._port),
+            loopback_route("api-server-jobs", path_prefix="/api/jobs", port=self._port),
+        ]
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:

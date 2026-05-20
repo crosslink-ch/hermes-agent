@@ -21,6 +21,7 @@ from urllib.parse import quote
 import httpx
 
 from gateway.config import Platform, PlatformConfig
+from gateway.http_routes import loopback_route
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -129,6 +130,15 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self._private_api_enabled: Optional[bool] = None
         self._helper_connected: bool = False
         self._guid_cache: Dict[str, str] = {}
+
+    def public_http_routes(self) -> list[dict]:
+        return [
+            loopback_route(
+                "bluebubbles-webhook",
+                path=self.webhook_path,
+                port=self.webhook_port,
+            ),
+        ]
 
     # ------------------------------------------------------------------
     # API helpers
@@ -934,4 +944,3 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             asyncio.create_task(self.mark_read(session_chat_id))
 
         return web.Response(text="ok")
-

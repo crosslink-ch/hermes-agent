@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover - exercised by check_thechat_requirement
     web = None  # type: ignore[assignment]
 
 from gateway.config import Platform, PlatformConfig
+from gateway.http_routes import loopback_route
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -95,6 +96,17 @@ class TheChatAdapter(BasePlatformAdapter):
         self._webhook_tasks: set[asyncio.Task] = set()
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self._event_contexts: Dict[str, Dict[str, Any]] = {}
+
+    def public_http_routes(self) -> list[dict]:
+        if not self.webhook_url:
+            return []
+        return [
+            loopback_route(
+                "thechat-webhook",
+                path=self.webhook_path,
+                port=self.webhook_port,
+            ),
+        ]
 
     async def connect(self) -> bool:
         if not self.base_url:
