@@ -3781,6 +3781,8 @@ class GatewayRunner:
 
         self._running = True
         self._update_runtime_status("running")
+        if not hasattr(self, "_background_tasks"):
+            self._background_tasks = set()
         route_manifest_task = asyncio.create_task(self._http_route_manifest_watcher())
         self._background_tasks.add(route_manifest_task)
         route_manifest_task.add_done_callback(self._background_tasks.discard)
@@ -5206,14 +5208,17 @@ class GatewayRunner:
                 _phase_elapsed(),
             )
 
-            for _task in list(self._background_tasks):
+            background_tasks = getattr(self, "_background_tasks", set())
+            for _task in list(background_tasks):
                 if _task is self._stop_task:
                     continue
                 _task.cancel()
-            self._background_tasks.clear()
+            background_tasks.clear()
 
             self.adapters.clear()
-            self._publish_http_route_manifest(force=True)
+            publish_http_routes = getattr(self, "_publish_http_route_manifest", None)
+            if callable(publish_http_routes):
+                publish_http_routes(force=True)
             self._running_agents.clear()
             self._running_agents_ts.clear()
             self._pending_messages.clear()
