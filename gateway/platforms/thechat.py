@@ -266,6 +266,38 @@ class TheChatAdapter(BasePlatformAdapter):
         except Exception:
             logger.debug("TheChat: typing update failed", exc_info=True)
 
+    async def send_invocation_progress(
+        self,
+        chat_id: str,
+        event: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        context = self._context_for_send(chat_id, metadata=metadata)
+        if not context:
+            return SendResult(
+                success=False, error=f"No TheChat context for chat {chat_id}"
+            )
+        if not self._client:
+            return SendResult(
+                success=False, error="TheChat client is not connected", retryable=True
+            )
+
+        payload = {
+            "botId": context["bot_id"],
+            "conversationId": context["conversation_id"],
+            **event,
+        }
+        try:
+            response = await self._client.post(
+                f"/hermes-platform/invocations/{context['invocation_id']}/progress",
+                json=payload,
+            )
+            response.raise_for_status()
+            return SendResult(success=True, raw_response=response.json())
+        except Exception as exc:
+            logger.debug("TheChat: failed to send invocation progress", exc_info=True)
+            return SendResult(success=False, error=str(exc), retryable=True)
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         context = self._contexts.get(chat_id) or {}
         return {

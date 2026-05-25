@@ -1580,6 +1580,20 @@ class BasePlatformAdapter(ABC):
         """
         pass
 
+    async def send_invocation_progress(
+        self,
+        chat_id: str,
+        event: Dict[str, Any],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a structured in-progress event for a platform invocation.
+
+        This is for first-party platforms that can render tool progress outside
+        the chat message history. Most chat platforms only support messages and
+        edits, so the default is unsupported.
+        """
+        return SendResult(success=False, error="Not supported")
+
     # Default: the adapter treats ``finalize=True`` on edit_message as a
     # no-op and is happy to have the stream consumer skip redundant final
     # edits.  Subclasses that *require* an explicit finalize call to close

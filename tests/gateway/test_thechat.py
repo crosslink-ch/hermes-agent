@@ -167,6 +167,42 @@ async def test_processing_success_after_delivery_does_not_complete_twice():
 
 
 @pytest.mark.asyncio
+async def test_send_invocation_progress_posts_structured_event():
+    adapter = _make_adapter()
+    context = _context("invocation-first")
+    adapter._contexts["chat-1"] = context
+
+    result = await adapter.send_invocation_progress(
+        "chat-1",
+        {
+            "type": "tool.started",
+            "status": "running",
+            "toolCallId": "call-1",
+            "toolName": "shell",
+            "label": "Shell: pytest",
+            "payload": {"args": {"command": "pytest"}},
+        },
+    )
+
+    assert result.success is True
+    assert adapter._client.posts == [
+        {
+            "path": "/hermes-platform/invocations/invocation-first/progress",
+            "json": {
+                "botId": "bot-1",
+                "conversationId": "conversation-1",
+                "type": "tool.started",
+                "status": "running",
+                "toolCallId": "call-1",
+                "toolName": "shell",
+                "label": "Shell: pytest",
+                "payload": {"args": {"command": "pytest"}},
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_connect_defaults_to_polling_without_webhook_url(monkeypatch):
     fake_client = _FakeClient()
     monkeypatch.setattr(thechat.httpx, "AsyncClient", lambda **_kwargs: fake_client)
