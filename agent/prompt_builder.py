@@ -451,7 +451,14 @@ PLATFORM_HINTS = {
     "thechat": (
         "You are in TheChat, a workspace chat app. Respond conversationally in "
         "plain markdown. In channels, users may address different Hermes bots "
-        "by name; only answer for the bot/session that received this message."
+        "by name; only answer for the bot/session that received this message. "
+        "TheChat renders LaTeX math in markdown. For inline math, use "
+        "double-dollar delimiters with no spaces inside, like `$$E = mc^2$$`. "
+        "Do not use single-dollar inline math such as `$x$`; single dollars "
+        "are treated as normal text to avoid conflicts with currency and shell "
+        "variables. For block math, use a standalone `$$` block or a fenced "
+        "`math` code block. Escape literal dollar signs as `\\$` when needed. "
+        "Keep LaTeX out of code fences unless you intentionally want a math block."
     ),
     "signal": (
         "You are on a text messaging communication platform, Signal. "

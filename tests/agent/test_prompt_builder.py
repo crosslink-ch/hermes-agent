@@ -827,6 +827,13 @@ class TestPromptBuilderConstants:
         assert "MEDIA:" in hint
         assert "Markdown" in hint
 
+    def test_platform_hints_thechat_latex_math(self):
+        hint = PLATFORM_HINTS["thechat"]
+        assert "TheChat renders LaTeX math in markdown" in hint
+        assert "double-dollar delimiters" in hint
+        assert "$$E = mc^2$$" in hint
+        assert "single-dollar inline math" in hint
+
     def test_platform_hints_webui(self):
         hint = PLATFORM_HINTS["webui"]
         assert "WebUI" in hint
@@ -1186,6 +1193,5 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
 
 
