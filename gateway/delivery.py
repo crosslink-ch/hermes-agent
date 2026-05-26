@@ -74,8 +74,20 @@ class DeliveryTarget:
         # Check for platform:chat_id or platform:chat_id:thread_id format
         # Use the original case for chat_id/thread_id to preserve case-sensitive IDs
         if ":" in target_stripped:
+            platform_part, rest = target_stripped.split(":", 1)
+            platform_str = platform_part.lower()  # Platform names are case-insensitive
+            if platform_str == "thechat":
+                try:
+                    platform = Platform(platform_str)
+                    return cls(
+                        platform=platform,
+                        chat_id=rest or None,
+                        thread_id=None,
+                        is_explicit=True,
+                    )
+                except ValueError:
+                    return cls(platform=Platform.LOCAL)
             parts = target_stripped.split(":", 2)
-            platform_str = parts[0].lower()  # Platform names are case-insensitive
             chat_id = parts[1] if len(parts) > 1 else None
             thread_id = parts[2] if len(parts) > 2 else None
             try:
@@ -252,7 +264,6 @@ class DeliveryRouter:
         if target.thread_id and "thread_id" not in send_metadata:
             send_metadata["thread_id"] = target.thread_id
         return await adapter.send(target.chat_id, content, metadata=send_metadata or None)
-
 
 
 

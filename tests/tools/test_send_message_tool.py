@@ -111,6 +111,46 @@ class TestSendMessageTool:
         assert send_mock.await_args.args[0] == Platform.THECHAT
         assert send_mock.await_args.args[2] == chat_id
 
+    def test_cron_thechat_duplicate_home_target_is_skipped(self):
+        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+        thechat_cfg = SimpleNamespace(
+            enabled=True,
+            token="bot-token",
+            extra={"base_url": "http://thechat.test"},
+        )
+        home = SimpleNamespace(chat_id=chat_id)
+        config = SimpleNamespace(
+            platforms={Platform.THECHAT: thechat_cfg},
+            get_home_channel=lambda platform: home if platform == Platform.THECHAT else None,
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "thechat",
+                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": chat_id,
+            },
+            clear=False,
+        ), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "thechat",
+                        "message": "cron says hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        assert result["skipped"] is True
+        assert result["reason"] == "cron_auto_delivery_duplicate_target"
+        send_mock.assert_not_awaited()
+
     def test_cron_duplicate_target_is_skipped_and_explained(self):
         home = SimpleNamespace(chat_id="-1001")
         config, _telegram_cfg = _make_config()

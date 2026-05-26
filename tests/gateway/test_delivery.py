@@ -64,6 +64,16 @@ class TestTargetToStringRoundtrip:
         assert reparsed.platform == Platform.TELEGRAM
         assert reparsed.chat_id == "999"
 
+    def test_thechat_colon_chat_id_roundtrip(self):
+        original = "thechat:thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+        target = DeliveryTarget.parse(original)
+
+        assert target.platform == Platform.THECHAT
+        assert target.chat_id == "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+        assert target.thread_id is None
+        assert target.is_explicit is True
+        assert DeliveryTarget.parse(target.to_string()).chat_id == target.chat_id
+
 
 class TestCaseSensitiveChatIdParsing:
     """Test that chat IDs preserve their original case (issue #11768)."""
@@ -121,6 +131,5 @@ class TestPlatformNameCaseInsensitivity:
         target = DeliveryTarget.parse("TeleGram:12345")
         assert target.platform == Platform.TELEGRAM
         assert target.chat_id == "12345"
-
 
 

@@ -100,6 +100,11 @@ class TestResolveDeliveryTarget:
             ("wecom", "WECOM_HOME_CHANNEL", "wecom-home"),
             ("weixin", "WEIXIN_HOME_CHANNEL", "wxid_home"),
             ("qqbot", "QQ_HOME_CHANNEL", "group-openid-home"),
+            (
+                "thechat",
+                "THECHAT_HOME_CHANNEL",
+                "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1",
+            ),
         ],
     )
     def test_origin_delivery_without_origin_falls_back_to_supported_home_channels(
@@ -121,6 +126,7 @@ class TestResolveDeliveryTarget:
             "WECOM_HOME_CHANNEL",
             "WEIXIN_HOME_CHANNEL",
             "QQ_HOME_CHANNEL",
+            "THECHAT_HOME_CHANNEL",
         ):
             monkeypatch.delenv(fallback_env, raising=False)
         monkeypatch.setenv(env_var, chat_id)
@@ -278,6 +284,25 @@ class TestResolveDeliveryTarget:
             "thread_id": None,
         }
 
+    def test_bare_thechat_delivery_uses_thechat_home_channel(self, monkeypatch):
+        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+        monkeypatch.setenv("THECHAT_HOME_CHANNEL", chat_id)
+
+        assert _resolve_delivery_target({"deliver": "thechat"}) == {
+            "platform": "thechat",
+            "chat_id": chat_id,
+            "thread_id": None,
+        }
+
+    def test_explicit_thechat_delivery_preserves_colon_chat_id(self):
+        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+
+        assert _resolve_delivery_target({"deliver": f"thechat:{chat_id}"}) == {
+            "platform": "thechat",
+            "chat_id": chat_id,
+            "thread_id": None,
+        }
+
     def test_explicit_discord_topic_target_with_thread_id(self):
         """deliver: 'discord:chat_id:thread_id' parses correctly."""
         job = {
@@ -361,6 +386,7 @@ class TestRoutingIntents:
         monkeypatch.setenv("TELEGRAM_HOME_CHANNEL", "-111")
         monkeypatch.setenv("DISCORD_HOME_CHANNEL", "-222")
         monkeypatch.setenv("SLACK_HOME_CHANNEL", "C333")
+        monkeypatch.setenv("THECHAT_HOME_CHANNEL", "11111111-1111-4111-8111-111111111111")
         # Sanity: platforms without the env var must NOT appear in the expansion.
         monkeypatch.delenv("SIGNAL_HOME_CHANNEL", raising=False)
         monkeypatch.delenv("MATRIX_HOME_ROOM", raising=False)
@@ -371,6 +397,7 @@ class TestRoutingIntents:
         assert "telegram" in platforms
         assert "discord" in platforms
         assert "slack" in platforms
+        assert "thechat" in platforms
         assert "signal" not in platforms
         assert "matrix" not in platforms
 
@@ -401,7 +428,8 @@ class TestRoutingIntents:
                     "SIGNAL_HOME_CHANNEL", "MATRIX_HOME_ROOM", "MATTERMOST_HOME_CHANNEL",
                     "SMS_HOME_CHANNEL", "EMAIL_HOME_ADDRESS", "DINGTALK_HOME_CHANNEL",
                     "FEISHU_HOME_CHANNEL", "WECOM_HOME_CHANNEL", "WEIXIN_HOME_CHANNEL",
-                    "BLUEBUBBLES_HOME_CHANNEL", "QQBOT_HOME_CHANNEL", "QQ_HOME_CHANNEL"):
+                    "BLUEBUBBLES_HOME_CHANNEL", "QQBOT_HOME_CHANNEL", "QQ_HOME_CHANNEL",
+                    "THECHAT_HOME_CHANNEL"):
             monkeypatch.delenv(var, raising=False)
 
         assert _resolve_delivery_targets({"deliver": "all", "origin": None}) == []
@@ -1261,6 +1289,59 @@ class TestRunJobSessionPersistence:
         assert os.getenv("HERMES_CRON_AUTO_DELIVER_PLATFORM") is None
         assert os.getenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID") is None
         assert os.getenv("HERMES_CRON_AUTO_DELIVER_THREAD_ID") is None
+        fake_db.close.assert_called_once()
+
+    def test_run_job_sets_auto_delivery_env_from_dotenv_thechat_home_channel(self, tmp_path, monkeypatch):
+        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+        job = {
+            "id": "test-job",
+            "name": "test",
+            "prompt": "hello",
+            "deliver": "thechat",
+        }
+        fake_db = MagicMock()
+        seen = {}
+
+        (tmp_path / ".env").write_text(f"THECHAT_HOME_CHANNEL={chat_id}\n")
+        monkeypatch.delenv("THECHAT_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("HERMES_CRON_AUTO_DELIVER_PLATFORM", raising=False)
+        monkeypatch.delenv("HERMES_CRON_AUTO_DELIVER_CHAT_ID", raising=False)
+        monkeypatch.delenv("HERMES_CRON_AUTO_DELIVER_THREAD_ID", raising=False)
+
+        class FakeAgent:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def run_conversation(self, *args, **kwargs):
+                from gateway.session_context import get_session_env
+                seen["platform"] = get_session_env("HERMES_CRON_AUTO_DELIVER_PLATFORM") or None
+                seen["chat_id"] = get_session_env("HERMES_CRON_AUTO_DELIVER_CHAT_ID") or None
+                seen["thread_id"] = get_session_env("HERMES_CRON_AUTO_DELIVER_THREAD_ID") or None
+                return {"final_response": "ok"}
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "***",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent", FakeAgent):
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert error is None
+        assert final_response == "ok"
+        assert "ok" in output
+        assert seen == {
+            "platform": "thechat",
+            "chat_id": chat_id,
+            "thread_id": None,
+        }
         fake_db.close.assert_called_once()
 
     def test_run_job_clears_stale_auto_delivery_thread_id_between_jobs(self, tmp_path, monkeypatch):
