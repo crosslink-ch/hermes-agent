@@ -78,6 +78,39 @@ def _ensure_slack_mock(monkeypatch):
 
 
 class TestSendMessageTool:
+    def test_explicit_thechat_target_routes_without_directory_resolution(self):
+        thechat_cfg = SimpleNamespace(
+            enabled=True,
+            token="bot-token",
+            extra={"base_url": "http://thechat.test"},
+        )
+        config = SimpleNamespace(
+            platforms={Platform.THECHAT: thechat_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("gateway.channel_directory.resolve_channel_name") as resolve_mock, \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": f"thechat:{chat_id}",
+                        "message": "cron says hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        resolve_mock.assert_not_called()
+        send_mock.assert_awaited_once()
+        assert send_mock.await_args.args[0] == Platform.THECHAT
+        assert send_mock.await_args.args[2] == chat_id
+
     def test_cron_duplicate_target_is_skipped_and_explained(self):
         home = SimpleNamespace(chat_id="-1001")
         config, _telegram_cfg = _make_config()
@@ -952,6 +985,32 @@ class TestParseTargetRefSlack:
     def test_slack_id_not_explicit_for_other_platforms(self):
         assert _parse_target_ref("discord", "C0B0QV5434G")[2] is False
         assert _parse_target_ref("telegram", "C0B0QV5434G")[2] is False
+
+
+class TestParseTargetRefTheChat:
+    """_parse_target_ref recognizes explicit TheChat chat targets."""
+
+    def test_thechat_session_key_is_explicit(self):
+        target = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+
+        chat_id, thread_id, is_explicit = _parse_target_ref("thechat", target)
+
+        assert chat_id == target
+        assert thread_id is None
+        assert is_explicit is True
+
+    def test_thechat_conversation_uuid_is_explicit(self):
+        target = "11111111-1111-4111-8111-111111111111"
+
+        chat_id, thread_id, is_explicit = _parse_target_ref("thechat", target)
+
+        assert chat_id == target
+        assert thread_id is None
+        assert is_explicit is True
+
+    def test_thechat_name_still_requires_directory_resolution(self):
+        assert _parse_target_ref("thechat", "#general")[2] is False
+        assert _parse_target_ref("discord", "thechat:workspace:ws")[2] is False
 
 
 class TestSendDiscordThreadId:

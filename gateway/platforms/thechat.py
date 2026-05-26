@@ -181,11 +181,6 @@ class TheChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        context = self._context_for_send(chat_id, reply_to=reply_to, metadata=metadata)
-        if not context:
-            return SendResult(
-                success=False, error=f"No TheChat context for chat {chat_id}"
-            )
         if not self._client:
             return SendResult(
                 success=False, error="TheChat client is not connected", retryable=True
@@ -198,20 +193,30 @@ class TheChatAdapter(BasePlatformAdapter):
                 success=True, message_id=None, raw_response={"suppressed": True}
             )
 
+        context = self._context_for_send(
+            chat_id, reply_to=reply_to, metadata=metadata
+        )
+        target = context or self._target_from_chat_id(chat_id)
         payload = {
-            "invocationId": context["invocation_id"],
-            "botId": context["bot_id"],
-            "conversationId": context["conversation_id"],
+            "chatId": chat_id,
             "content": content,
             "platformMessageId": f"thechat-adapter:{uuid.uuid4()}",
+            "complete": False,
         }
+        if target.get("invocation_id"):
+            payload["invocationId"] = target["invocation_id"]
+        if target.get("bot_id"):
+            payload["botId"] = target["bot_id"]
+        if target.get("conversation_id"):
+            payload["conversationId"] = target["conversation_id"]
         try:
             response = await self._client.post(
                 "/hermes-platform/messages", json=payload
             )
             response.raise_for_status()
             data = response.json()
-            context["delivered"] = True
+            if context is not None:
+                context["delivered"] = True
             return SendResult(
                 success=True,
                 message_id=str(data.get("messageId") or ""),
@@ -243,6 +248,16 @@ class TheChatAdapter(BasePlatformAdapter):
             if context:
                 return context
         return self._contexts.get(chat_id)
+
+    def _target_from_chat_id(self, chat_id: str) -> Dict[str, Any]:
+        target: Dict[str, Any] = {"chat_id": chat_id}
+        parts = str(chat_id or "").split(":")
+        for index, part in enumerate(parts[:-1]):
+            if part == "conversation" and parts[index + 1]:
+                target["conversation_id"] = parts[index + 1]
+            elif part == "bot" and parts[index + 1]:
+                target["bot_id"] = parts[index + 1]
+        return target
 
     def _is_gateway_operational_notice(self, content: str) -> bool:
         text = content.strip()
@@ -343,15 +358,19 @@ class TheChatAdapter(BasePlatformAdapter):
                 logger.debug(
                     "TheChat: failed to report processing cancellation", exc_info=True
                 )
-        elif outcome == ProcessingOutcome.SUCCESS and not context.get("delivered"):
+        elif outcome == ProcessingOutcome.SUCCESS:
             try:
                 await self._client.post(
                     f"/hermes-platform/invocations/{context['invocation_id']}/completed",
-                    json={"reason": "Hermes gateway completed without a chat response"},
+                    json={
+                        "reason": "Hermes gateway completed"
+                        if context.get("delivered")
+                        else "Hermes gateway completed without a chat response"
+                    },
                 )
             except Exception:
                 logger.debug(
-                    "TheChat: failed to report silent completion", exc_info=True
+                    "TheChat: failed to report completion", exc_info=True
                 )
 
     def _normalize_webhook_path(self, path: str) -> str:

@@ -1,9 +1,11 @@
+import asyncio
 from typing import Any, cast
 
 import httpx
 import pytest
 
 from gateway.config import PlatformConfig
+from gateway.session import build_session_key
 from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
 from gateway.platforms import thechat
 from gateway.platforms.thechat import TheChatAdapter
@@ -105,8 +107,41 @@ async def test_send_uses_reply_to_context_instead_of_latest_chat_context():
     assert result.success is True
     assert adapter._client.posts[0]["path"] == "/hermes-platform/messages"
     assert adapter._client.posts[0]["json"]["invocationId"] == "invocation-first"
+    assert adapter._client.posts[0]["json"]["complete"] is False
     assert first["delivered"] is True
     assert "delivered" not in second
+
+
+@pytest.mark.asyncio
+async def test_send_does_not_use_notify_metadata_as_completion_signal():
+    adapter = _make_adapter()
+    context = _context("invocation-first")
+    adapter._contexts["chat-1"] = context
+
+    result = await adapter.send("chat-1", "final response", metadata={"notify": True})
+
+    assert result.success is True
+    assert adapter._client.posts[0]["path"] == "/hermes-platform/messages"
+    assert adapter._client.posts[0]["json"]["complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_send_can_post_without_invocation_context():
+    adapter = _make_adapter()
+    chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+
+    result = await adapter.send(chat_id, "cron says hello")
+
+    assert result.success is True
+    assert adapter._client.posts[0]["path"] == "/hermes-platform/messages"
+    assert adapter._client.posts[0]["json"] == {
+        "chatId": chat_id,
+        "content": "cron says hello",
+        "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
+        "complete": False,
+        "botId": "bot-1",
+        "conversationId": "conversation-1",
+    }
 
 
 @pytest.mark.asyncio
@@ -151,7 +186,7 @@ async def test_processing_success_without_delivery_marks_invocation_completed():
 
 
 @pytest.mark.asyncio
-async def test_processing_success_after_delivery_does_not_complete_twice():
+async def test_processing_success_after_delivery_marks_invocation_completed():
     adapter = _make_adapter()
     context = _context("invocation-first")
     context["delivered"] = True
@@ -163,7 +198,57 @@ async def test_processing_success_after_delivery_does_not_complete_twice():
         ProcessingOutcome.SUCCESS,
     )
 
-    assert adapter._client.posts == []
+    assert adapter._client.posts == [
+        {
+            "path": "/hermes-platform/invocations/invocation-first/completed",
+            "json": {"reason": "Hermes gateway completed"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_active_stop_command_marks_thechat_command_invocation_completed():
+    adapter = _make_adapter()
+    stop_context = _context("invocation-stop")
+    adapter._contexts["chat-1"] = stop_context
+    adapter._event_contexts["message-stop"] = stop_context
+
+    async def handle(event):
+        assert event.text == "/stop"
+        return "Stopped."
+
+    adapter.set_message_handler(handle)
+    event = _event(adapter, message_id="message-stop")
+    event.text = "/stop"
+    event.message_type = MessageType.COMMAND
+    session_key = build_session_key(
+        event.source,
+        group_sessions_per_user=adapter.config.extra.get("group_sessions_per_user", True),
+        thread_sessions_per_user=adapter.config.extra.get("thread_sessions_per_user", False),
+    )
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    await adapter.handle_message(event)
+
+    assert adapter._client.posts == [
+        {
+            "path": "/hermes-platform/messages",
+            "json": {
+                "chatId": "chat-1",
+                "content": "Stopped.",
+                "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
+                "complete": False,
+                "invocationId": "invocation-stop",
+                "botId": "bot-1",
+                "conversationId": "conversation-1",
+            },
+        },
+        {
+            "path": "/hermes-platform/invocations/invocation-stop/completed",
+            "json": {"reason": "Hermes gateway completed"},
+        },
+    ]
+    assert "chat-1" not in adapter._contexts
 
 
 @pytest.mark.asyncio

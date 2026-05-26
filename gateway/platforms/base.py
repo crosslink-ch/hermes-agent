@@ -2772,6 +2772,10 @@ class BasePlatformAdapter(ABC):
              state and its response is sent in order).
           3. Release the command-scoped guard and drain the latest queued
              follow-up exactly once, after 1 and 2 complete.
+          4. Still fire normal processing lifecycle hooks for the command's own
+             platform event. These commands bypass _process_message_background,
+             but platforms such as TheChat use the completion hook to close the
+             command invocation in their UI.
         """
         logger.debug(
             "[%s] Command '/%s' bypassing active-session guard for %s",
@@ -2785,9 +2789,13 @@ class BasePlatformAdapter(ABC):
         self._active_sessions[session_key] = command_guard
         thread_meta = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
 
+        completion_reported = False
         try:
+            await self._run_processing_hook("on_processing_start", event)
             response = await self._message_handler(event)
             _text, _eph_ttl = self._unwrap_ephemeral(response)
+            delivery_attempted = False
+            delivery_succeeded = False
             # Send the response BEFORE cancelling the old task so the send
             # cannot be affected by task-cancellation side effects (race
             # condition fix — issue #18912).  Previously the send happened
@@ -2807,6 +2815,8 @@ class BasePlatformAdapter(ABC):
                     reply_to=_reply_anchor_for_event(event),
                     metadata=thread_meta,
                 )
+                delivery_attempted = True
+                delivery_succeeded = bool(getattr(_r, "success", False))
                 if _eph_ttl > 0 and _r.success and _r.message_id:
                     self._schedule_ephemeral_delete(
                         chat_id=event.source.chat_id,
@@ -2820,7 +2830,20 @@ class BasePlatformAdapter(ABC):
                 release_guard=False,
                 discard_pending=False,
             )
+            processing_ok = delivery_succeeded if delivery_attempted else True
+            await self._run_processing_hook(
+                "on_processing_complete",
+                event,
+                ProcessingOutcome.SUCCESS if processing_ok else ProcessingOutcome.FAILURE,
+            )
+            completion_reported = True
         except Exception:
+            if not completion_reported:
+                await self._run_processing_hook(
+                    "on_processing_complete",
+                    event,
+                    ProcessingOutcome.FAILURE,
+                )
             # On failure, restore the original guard if one still exists so
             # we don't leave the session in a half-reset state.
             if self._active_sessions.get(session_key) is command_guard:

@@ -14691,10 +14691,10 @@ class GatewayRunner:
         # Natural assistant status messages are intentionally independent from
         # tool progress and token streaming. Users can keep tool_progress quiet
         # in chat platforms while opting into concise mid-turn updates.
-        # TheChat's adapter.send() maps to TheChat's final bot-message API.
-        # Interim assistant text must stay out of that path; otherwise a
-        # pre-tool acknowledgement completes the invocation while the run is
-        # still executing tools, and TheChat falls back to a typing indicator.
+        # TheChat has a structured progress channel for in-flight activity.
+        # Keep natural interim assistant text out of chat history there; normal
+        # adapter sends remain available for explicit status/final messages and
+        # no longer imply invocation completion.
         interim_assistant_messages_enabled = (
             source.platform not in {Platform.WEBHOOK, Platform.THECHAT}
             and is_truthy_value(

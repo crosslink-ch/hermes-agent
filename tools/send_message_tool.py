@@ -12,6 +12,7 @@ import os
 import re
 import ssl
 import time
+import uuid
 from email.utils import formatdate
 from typing import Dict, Optional
 
@@ -30,6 +31,10 @@ _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::(
 _SLACK_TARGET_RE = re.compile(r"^\s*([CGD][A-Z0-9]{8,})\s*$")
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
 _YUANBAO_TARGET_RE = re.compile(r"^\s*((?:group|direct):[^:]+)\s*$")
+_THECHAT_CONVERSATION_RE = re.compile(
+    r"^\s*([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\s*$",
+    re.IGNORECASE,
+)
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
 # Platforms that address recipients by phone number and accept E.164 format
@@ -343,6 +348,14 @@ def _parse_target_ref(platform_name: str, target_ref: str):
             return match.group(1), None, True
         if target_ref.strip().isdigit():
             return f"group:{target_ref.strip()}", None, True
+        return None, None, False
+    if platform_name == "thechat":
+        stripped = target_ref.strip()
+        if stripped.startswith("thechat:"):
+            return stripped, None, True
+        match = _THECHAT_CONVERSATION_RE.fullmatch(stripped)
+        if match:
+            return match.group(1), None, True
         return None, None, False
     if platform_name in _PHONE_PLATFORMS:
         match = _E164_TARGET_RE.fullmatch(target_ref)
@@ -730,6 +743,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             result = await _send_qqbot(pconfig, chat_id, chunk)
         elif platform == Platform.YUANBAO:
             result = await _send_yuanbao(chat_id, chunk)
+        elif platform == Platform.THECHAT:
+            result = await _send_thechat(pconfig, chat_id, chunk)
         else:
             # Plugin platform: route through the gateway's live adapter if
             # available, otherwise the plugin's standalone_sender_fn.
@@ -752,6 +767,65 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         warnings.append(warning)
         last_result["warnings"] = warnings
     return last_result
+
+
+def _thechat_target_from_chat_id(chat_id: str) -> dict:
+    target = {"chatId": chat_id}
+    parts = str(chat_id or "").split(":")
+    for index, part in enumerate(parts[:-1]):
+        if part == "conversation" and parts[index + 1]:
+            target["conversationId"] = parts[index + 1]
+        elif part == "bot" and parts[index + 1]:
+            target["botId"] = parts[index + 1]
+    return target
+
+
+async def _send_thechat(pconfig, chat_id, message):
+    """Post a proactive TheChat bot message through the Hermes platform API."""
+    base_url = str(
+        getattr(pconfig, "extra", {}).get("base_url")
+        or os.getenv("THECHAT_BASE_URL", "")
+    ).rstrip("/")
+    token = str(
+        getattr(pconfig, "token", "")
+        or getattr(pconfig, "extra", {}).get("token")
+        or os.getenv("THECHAT_BOT_TOKEN", "")
+        or os.getenv("THECHAT_HERMES_BOT_TOKEN", "")
+    ).strip()
+    if not base_url:
+        return {"error": "TheChat base URL is not configured"}
+    if not token:
+        return {"error": "TheChat bot token is not configured"}
+
+    payload = {
+        **_thechat_target_from_chat_id(chat_id),
+        "content": message,
+        "platformMessageId": f"send-message-tool:{uuid.uuid4()}",
+        "complete": False,
+    }
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=httpx.Timeout(20.0, connect=5.0),
+        ) as client:
+            response = await client.post("/hermes-platform/messages", json=payload)
+            if response.status_code >= 400:
+                return {
+                    "error": (
+                        f"TheChat send failed with HTTP {response.status_code}: "
+                        f"{response.text[:300]}"
+                    )
+                }
+            data = response.json()
+            return {
+                "success": True,
+                "message_id": str(data.get("messageId") or ""),
+            }
+    except Exception as exc:
+        return {"error": f"TheChat send failed: {exc}"}
 
 
 async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):
