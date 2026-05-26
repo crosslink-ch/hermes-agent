@@ -30,6 +30,7 @@ from gateway.platforms.base import (
     ProcessingOutcome,
     SendResult,
 )
+from gateway.otel import start_span
 
 logger = logging.getLogger(__name__)
 
@@ -209,22 +210,38 @@ class TheChatAdapter(BasePlatformAdapter):
             payload["botId"] = target["bot_id"]
         if target.get("conversation_id"):
             payload["conversationId"] = target["conversation_id"]
-        try:
-            response = await self._client.post(
-                "/hermes-platform/messages", json=payload
-            )
-            response.raise_for_status()
-            data = response.json()
-            if context is not None:
-                context["delivered"] = True
-            return SendResult(
-                success=True,
-                message_id=str(data.get("messageId") or ""),
-                raw_response=data,
-            )
-        except Exception as exc:
-            logger.error("TheChat: failed to send response: %s", exc)
-            return SendResult(success=False, error=str(exc), retryable=True)
+        with start_span(
+            "thechat.message.send",
+            {
+                "messaging.system": "thechat",
+                "messaging.operation": "send",
+                "thechat.chat_id": chat_id,
+                "thechat.invocation_id": target.get("invocation_id") or "",
+                "thechat.bot_id": target.get("bot_id") or "",
+                "thechat.conversation_id": target.get("conversation_id") or "",
+                "thechat.has_invocation_context": context is not None,
+            },
+        ) as span:
+            try:
+                response = await self._client.post(
+                    "/hermes-platform/messages", json=payload
+                )
+                status_code = getattr(response, "status_code", None)
+                if status_code is not None:
+                    span.set_attribute("http.status_code", status_code)
+                response.raise_for_status()
+                data = response.json()
+                if context is not None:
+                    context["delivered"] = True
+                span.set_attribute("thechat.message_id", str(data.get("messageId") or ""))
+                return SendResult(
+                    success=True,
+                    message_id=str(data.get("messageId") or ""),
+                    raw_response=data,
+                )
+            except Exception as exc:
+                logger.error("TheChat: failed to send response: %s", exc)
+                return SendResult(success=False, error=str(exc), retryable=True)
 
     def _context_for_send(
         self,
@@ -302,16 +319,32 @@ class TheChatAdapter(BasePlatformAdapter):
             "conversationId": context["conversation_id"],
             **event,
         }
-        try:
-            response = await self._client.post(
-                f"/hermes-platform/invocations/{context['invocation_id']}/progress",
-                json=payload,
-            )
-            response.raise_for_status()
-            return SendResult(success=True, raw_response=response.json())
-        except Exception as exc:
-            logger.debug("TheChat: failed to send invocation progress", exc_info=True)
-            return SendResult(success=False, error=str(exc), retryable=True)
+        with start_span(
+            "thechat.invocation.progress.send",
+            {
+                "messaging.system": "thechat",
+                "messaging.operation": "progress",
+                "thechat.chat_id": chat_id,
+                "thechat.invocation_id": context["invocation_id"],
+                "thechat.bot_id": context["bot_id"],
+                "thechat.conversation_id": context["conversation_id"],
+                "thechat.progress.type": event.get("type") or "",
+                "thechat.progress.tool": event.get("toolName") or "",
+            },
+        ) as span:
+            try:
+                response = await self._client.post(
+                    f"/hermes-platform/invocations/{context['invocation_id']}/progress",
+                    json=payload,
+                )
+                status_code = getattr(response, "status_code", None)
+                if status_code is not None:
+                    span.set_attribute("http.status_code", status_code)
+                response.raise_for_status()
+                return SendResult(success=True, raw_response=response.json())
+            except Exception as exc:
+                logger.debug("TheChat: failed to send invocation progress", exc_info=True)
+                return SendResult(success=False, error=str(exc), retryable=True)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         context = self._contexts.get(chat_id) or {}
@@ -495,35 +528,50 @@ class TheChatAdapter(BasePlatformAdapter):
         conversation = item.get("conversation") or {}
         sender = item.get("sender") or {}
         message_id = str(item.get("messageId") or invocation_id)
-        context = {
-            "invocation_id": invocation_id,
-            "bot_id": str(bot.get("id") or ""),
-            "bot_name": str(bot.get("name") or "Hermes"),
-            "conversation_id": str(conversation.get("id") or ""),
-            "conversation_name": conversation.get("name"),
-            "chat_type": item.get("chatType") or "group",
-        }
-        self._contexts[chat_id] = context
-        self._event_contexts[message_id] = context
+        with start_span(
+            "thechat.event.handle",
+            {
+                "messaging.system": "thechat",
+                "messaging.operation": "receive",
+                "thechat.chat_id": chat_id,
+                "thechat.invocation_id": invocation_id,
+                "thechat.bot_id": str(bot.get("id") or ""),
+                "thechat.conversation_id": str(conversation.get("id") or ""),
+                "thechat.chat_type": item.get("chatType") or "group",
+                "thechat.continuity_id": str((item.get("continuity") or {}).get("id") or ""),
+            },
+        ) as span:
+            context = {
+                "invocation_id": invocation_id,
+                "bot_id": str(bot.get("id") or ""),
+                "bot_name": str(bot.get("name") or "Hermes"),
+                "conversation_id": str(conversation.get("id") or ""),
+                "conversation_name": conversation.get("name"),
+                "chat_type": item.get("chatType") or "group",
+            }
+            self._contexts[chat_id] = context
+            self._event_contexts[message_id] = context
 
-        text = str(item.get("text") or "").strip()
-        source = self.build_source(
-            chat_id=chat_id,
-            chat_name=conversation.get("name") or context["bot_name"],
-            chat_type="dm" if item.get("chatType") == "dm" else "group",
-            user_id=str(sender.get("id") or ""),
-            user_name=str(sender.get("name") or "TheChat User"),
-            guild_id=str(conversation.get("workspaceId") or "") or None,
-            message_id=message_id,
-        )
-        event = MessageEvent(
-            text=text,
-            message_type=MessageType.COMMAND
-            if text.startswith("/")
-            else MessageType.TEXT,
-            source=source,
-            raw_message=item,
-            message_id=message_id,
-            channel_prompt=item.get("instructions"),
-        )
-        await self.handle_message(event)
+            text = str(item.get("text") or "").strip()
+            span.set_attribute("thechat.message_id", message_id)
+            span.set_attribute("thechat.message.length", len(text))
+            source = self.build_source(
+                chat_id=chat_id,
+                chat_name=conversation.get("name") or context["bot_name"],
+                chat_type="dm" if item.get("chatType") == "dm" else "group",
+                user_id=str(sender.get("id") or ""),
+                user_name=str(sender.get("name") or "TheChat User"),
+                guild_id=str(conversation.get("workspaceId") or "") or None,
+                message_id=message_id,
+            )
+            event = MessageEvent(
+                text=text,
+                message_type=MessageType.COMMAND
+                if text.startswith("/")
+                else MessageType.TEXT,
+                source=source,
+                raw_message=item,
+                message_id=message_id,
+                channel_prompt=item.get("instructions"),
+            )
+            await self.handle_message(event)

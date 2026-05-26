@@ -782,6 +782,8 @@ def _thechat_target_from_chat_id(chat_id: str) -> dict:
 
 async def _send_thechat(pconfig, chat_id, message):
     """Post a proactive TheChat bot message through the Hermes platform API."""
+    from gateway.otel import start_span
+
     base_url = str(
         getattr(pconfig, "extra", {}).get("base_url")
         or os.getenv("THECHAT_BASE_URL", "")
@@ -803,29 +805,42 @@ async def _send_thechat(pconfig, chat_id, message):
         "platformMessageId": f"send-message-tool:{uuid.uuid4()}",
         "complete": False,
     }
-    try:
-        import httpx
+    with start_span(
+        "thechat.proactive_message.send",
+        {
+            "messaging.system": "thechat",
+            "messaging.operation": "send",
+            "thechat.chat_id": chat_id,
+            "thechat.bot_id": payload.get("botId") or "",
+            "thechat.conversation_id": payload.get("conversationId") or "",
+            "thechat.message.length": len(message or ""),
+        },
+    ) as span:
+        try:
+            import httpx
 
-        async with httpx.AsyncClient(
-            base_url=base_url,
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=httpx.Timeout(20.0, connect=5.0),
-        ) as client:
-            response = await client.post("/hermes-platform/messages", json=payload)
-            if response.status_code >= 400:
+            async with httpx.AsyncClient(
+                base_url=base_url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=httpx.Timeout(20.0, connect=5.0),
+            ) as client:
+                response = await client.post("/hermes-platform/messages", json=payload)
+                span.set_attribute("http.status_code", response.status_code)
+                if response.status_code >= 400:
+                    return {
+                        "error": (
+                            f"TheChat send failed with HTTP {response.status_code}: "
+                            f"{response.text[:300]}"
+                        )
+                    }
+                data = response.json()
+                span.set_attribute("thechat.message_id", str(data.get("messageId") or ""))
                 return {
-                    "error": (
-                        f"TheChat send failed with HTTP {response.status_code}: "
-                        f"{response.text[:300]}"
-                    )
+                    "success": True,
+                    "message_id": str(data.get("messageId") or ""),
                 }
-            data = response.json()
-            return {
-                "success": True,
-                "message_id": str(data.get("messageId") or ""),
-            }
-    except Exception as exc:
-        return {"error": f"TheChat send failed: {exc}"}
+        except Exception as exc:
+            return {"error": f"TheChat send failed: {exc}"}
 
 
 async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False, force_document=False):

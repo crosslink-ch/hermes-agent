@@ -28,6 +28,7 @@ from tools.send_message_tool import (
     _send_matrix_via_adapter,
     _send_signal,
     _send_telegram,
+    _send_thechat,
     _send_to_platform,
     send_message_tool,
 )
@@ -1030,7 +1031,7 @@ class TestParseTargetRefSlack:
 class TestParseTargetRefTheChat:
     """_parse_target_ref recognizes explicit TheChat chat targets."""
 
-    def test_thechat_session_key_is_explicit(self):
+    def test_thechat_continuity_chat_key_is_explicit(self):
         target = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
 
         chat_id, thread_id, is_explicit = _parse_target_ref("thechat", target)
@@ -1051,6 +1052,64 @@ class TestParseTargetRefTheChat:
     def test_thechat_name_still_requires_directory_resolution(self):
         assert _parse_target_ref("thechat", "#general")[2] is False
         assert _parse_target_ref("discord", "thechat:workspace:ws")[2] is False
+
+    @pytest.mark.asyncio
+    async def test_send_thechat_posts_continuity_target(self, monkeypatch):
+        captured = {}
+
+        class FakeResponse:
+            status_code = 200
+
+            def json(self):
+                return {"messageId": "message-1"}
+
+        class FakeAsyncClient:
+            def __init__(self, *, base_url, headers, timeout):
+                captured["base_url"] = base_url
+                captured["headers"] = headers
+                captured["timeout"] = timeout
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def post(self, path, json=None):
+                captured["path"] = path
+                captured["payload"] = json
+                return FakeResponse()
+
+        class FakeTimeout:
+            def __init__(self, *args, **kwargs):
+                captured["timeout_args"] = (args, kwargs)
+
+        monkeypatch.setitem(
+            sys.modules,
+            "httpx",
+            SimpleNamespace(AsyncClient=FakeAsyncClient, Timeout=FakeTimeout),
+        )
+        pconfig = SimpleNamespace(
+            token="bot-token",
+            extra={"base_url": "http://thechat.test"},
+        )
+        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+
+        result = await _send_thechat(pconfig, chat_id, "cron update")
+
+        assert result == {"success": True, "message_id": "message-1"}
+        assert captured["base_url"] == "http://thechat.test"
+        assert captured["headers"] == {"Authorization": "Bearer bot-token"}
+        assert captured["path"] == "/hermes-platform/messages"
+        assert captured["payload"] == {
+            "chatId": chat_id,
+            "conversationId": "conversation-1",
+            "botId": "bot-1",
+            "content": "cron update",
+            "platformMessageId": captured["payload"]["platformMessageId"],
+            "complete": False,
+        }
+        assert captured["payload"]["platformMessageId"].startswith("send-message-tool:")
 
 
 class TestSendDiscordThreadId:
