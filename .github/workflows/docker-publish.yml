@@ -33,9 +33,9 @@ on:
 permissions:
   contents: read
 
-# Concurrency: push/release runs are NEVER cancelled so every merge gets its
-# own SHA-tagged image; :main and :latest are guarded separately by the
-# move-main and move-latest jobs.  PR runs reuse a PR-scoped group with
+# Concurrency: push/release runs are NEVER cancelled so every merge gets
+# its own SHA-tagged or release-tagged image.  :main and :latest are guarded
+# separately by move-main and move-latest.  PR runs reuse a PR-scoped group with
 # cancel-in-progress: true so rapid pushes to the same PR collapse to the
 # latest commit.
 concurrency:
@@ -60,7 +60,7 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           submodules: recursive
 
@@ -71,7 +71,7 @@ jobs:
       # to gha with a per-arch scope; the push step below reuses every
       # layer from this build.
       - name: Build image (amd64, smoke test)
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
           file: Dockerfile
@@ -86,9 +86,59 @@ jobs:
         with:
           image: ${{ env.IMAGE_NAME }}:test
 
+      # ---------------------------------------------------------------------
+      # Run the docker-integration test suite against the freshly-built
+      # image already loaded into the local daemon (`:test`).  These tests
+      # are excluded from the sharded `tests.yml :: test` matrix on purpose
+      # (see `_SKIP_PARTS` in scripts/run_tests_parallel.py) because each
+      # shard would otherwise reach the session-scoped ``built_image``
+      # fixture in ``tests/docker/conftest.py`` and start a 3-7min
+      # ``docker build`` under a 180s pytest-timeout cap — guaranteed to
+      # die in fixture setup.
+      #
+      # Piggybacking here avoids a second image build: the smoke test
+      # already proved the image loads + runs, so the daemon has it under
+      # `${IMAGE_NAME}:test` and we just point ``HERMES_TEST_IMAGE`` at
+      # that.  The fixture's ``HERMES_TEST_IMAGE`` branch (see
+      # tests/docker/conftest.py:62-63) short-circuits the rebuild.
+      #
+      # Why this job and not a standalone one: the image is 5GB+; passing
+      # it between jobs via ``docker save``/``upload-artifact`` is slower
+      # than the build itself.  Reusing the existing daemon state is the
+      # cheapest path to coverage on every PR that touches docker code.
+      # ---------------------------------------------------------------------
+      - name: Install uv (for docker tests)
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+
+      - name: Set up Python 3.11 (for docker tests)
+        run: uv python install 3.11
+
+      - name: Install Python dependencies (for docker tests)
+        run: |
+          uv venv .venv --python 3.11
+          source .venv/bin/activate
+          # ``dev`` extra pulls in pytest, pytest-asyncio, pytest-timeout —
+          # everything tests/docker/ needs.  We deliberately avoid ``all``
+          # here because the docker tests only drive the container via
+          # subprocess and don't import hermes_agent's optional deps.
+          uv pip install -e ".[dev]"
+
+      - name: Run docker integration tests
+        env:
+          # Skip rebuild; use the image already loaded by the build step.
+          HERMES_TEST_IMAGE: ${{ env.IMAGE_NAME }}:test
+          # Match the policy in tests.yml :: test job — no accidental
+          # real-API calls from inside the harness.
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/docker/ -v --tb=short
+
       - name: Log in to Docker Hub
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -105,7 +155,7 @@ jobs:
       - name: Push amd64 by digest
         id: push
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
           file: Dockerfile
@@ -148,7 +198,7 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           submodules: recursive
 
@@ -159,7 +209,7 @@ jobs:
       # to gha with a per-arch scope; the push step below reuses every
       # layer from this build.
       - name: Build image (arm64, smoke test)
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
           file: Dockerfile
@@ -176,7 +226,7 @@ jobs:
 
       - name: Log in to Docker Hub
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -184,7 +234,7 @@ jobs:
       - name: Push arm64 by digest
         id: push
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8  # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
         with:
           context: .
           file: Dockerfile
@@ -227,6 +277,12 @@ jobs:
       pushed_release_tag: ${{ steps.mark_release_pushed.outputs.pushed }}
       release_tag: ${{ steps.tag.outputs.tag }}
     steps:
+      - name: Checkout code
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 1000
+
       - name: Download digests
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
@@ -238,7 +294,7 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -337,7 +393,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 1000
 
@@ -345,25 +401,23 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # Read the git revision label off the current :main manifest, then
-      # use `git merge-base --is-ancestor` to check whether our commit is a
-      # descendant of it.  If :main doesn't exist yet, or its label is
-      # missing, we treat that as "safe to publish".  If another run already
-      # advanced :main past us (or diverged), we skip and leave it alone.
+      # use `git merge-base --is-ancestor` to check whether our commit is
+      # a descendant of it.  If :main doesn't exist yet, or its label is
+      # missing, we treat that as "safe to publish".  If another run
+      # already advanced :main past us (or diverged), we skip and leave
+      # it alone.
       - name: Decide whether to move :main
         id: main_check
         run: |
           set -euo pipefail
           image="${IMAGE_NAME}"
 
-          # Pull the JSON for the linux/amd64 sub-manifest's config and extract
-          # the OCI revision label with jq — Go template field access can't
-          # handle dots in map keys, so using json+jq is the robust route.
           image_json=$(
             docker buildx imagetools inspect "${image}:main" \
               --format '{{ json (index .Image "linux/amd64") }}' \
@@ -396,7 +450,6 @@ jobs:
             exit 0
           fi
 
-          # Make sure we have the :main commit locally for merge-base.
           if ! git cat-file -e "${current_sha}^{commit}" 2>/dev/null; then
             git fetch --no-tags --prune origin \
               "+refs/heads/main:refs/remotes/origin/main" \
@@ -409,7 +462,6 @@ jobs:
             exit 0
           fi
 
-          # Our SHA must be a descendant of the current :main to be safe.
           if git merge-base --is-ancestor "${current_sha}" "${GITHUB_SHA}"; then
             echo "Our commit is a descendant of :main — safe to advance."
             echo "push_main=true" >> "$GITHUB_OUTPUT"
@@ -440,10 +492,10 @@ jobs:
   #
   # We still run an ancestor check against the existing :latest so that a
   # backport release on an older branch (e.g. patching v1.1.5 after v1.2.3
-  # is out) doesn't drag :latest backwards.  The check is the same shape as
-  # move-main: read the OCI revision label off the current :latest, look up
-  # that commit in git, and only advance if our release commit is a strict
-  # descendant.
+  # is out) doesn't drag :latest backwards.  The check is the same shape
+  # as the ancestor check in the merge job for :main: read the OCI
+  # revision label off the current :latest, look up that commit in git,
+  # and only advance if our release commit is a strict descendant.
   # ---------------------------------------------------------------------------
   move-latest:
     if: |
@@ -458,7 +510,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           fetch-depth: 1000
 
@@ -466,7 +518,7 @@ jobs:
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9  # v3
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
