@@ -210,6 +210,8 @@ class TheChatAdapter(BasePlatformAdapter):
             payload["botId"] = target["bot_id"]
         if target.get("conversation_id"):
             payload["conversationId"] = target["conversation_id"]
+        if target.get("thread_id"):
+            payload["threadId"] = target["thread_id"]
         with start_span(
             "thechat.message.send",
             {
@@ -250,6 +252,14 @@ class TheChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
+        if metadata:
+            thread_id = metadata.get("thread_id") or metadata.get("message_thread_id")
+            if thread_id:
+                context = self._contexts.get(
+                    self._context_key(chat_id, str(thread_id))
+                )
+                if context:
+                    return context
         candidate_ids = [reply_to]
         if metadata:
             candidate_ids.extend(
@@ -265,6 +275,11 @@ class TheChatAdapter(BasePlatformAdapter):
             if context:
                 return context
         return self._contexts.get(chat_id)
+
+    def _context_key(self, chat_id: str, thread_id: Optional[str] = None) -> str:
+        if thread_id:
+            return f"{chat_id}:thread:{thread_id}"
+        return chat_id
 
     def _target_from_chat_id(self, chat_id: str) -> Dict[str, Any]:
         target: Dict[str, Any] = {"chat_id": chat_id}
@@ -283,18 +298,18 @@ class TheChatAdapter(BasePlatformAdapter):
         )
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        context = self._contexts.get(chat_id)
+        context = self._context_for_send(chat_id, metadata=metadata)
         if not context or not self._client:
             return
         try:
-            await self._client.post(
-                "/hermes-platform/typing",
-                json={
-                    "invocationId": context["invocation_id"],
-                    "botId": context["bot_id"],
-                    "conversationId": context["conversation_id"],
-                },
-            )
+            payload = {
+                "invocationId": context["invocation_id"],
+                "botId": context["bot_id"],
+                "conversationId": context["conversation_id"],
+            }
+            if context.get("thread_id"):
+                payload["threadId"] = context["thread_id"]
+            await self._client.post("/hermes-platform/typing", json=payload)
         except Exception:
             logger.debug("TheChat: typing update failed", exc_info=True)
 
@@ -319,6 +334,8 @@ class TheChatAdapter(BasePlatformAdapter):
             "conversationId": context["conversation_id"],
             **event,
         }
+        if context.get("thread_id"):
+            payload["threadId"] = context["thread_id"]
         with start_span(
             "thechat.invocation.progress.send",
             {
@@ -358,7 +375,9 @@ class TheChatAdapter(BasePlatformAdapter):
     async def on_processing_start(self, event: MessageEvent) -> None:
         context = self._event_contexts.get(str(event.message_id or ""))
         if context:
-            self._contexts[event.source.chat_id] = context
+            self._contexts[
+                self._context_key(event.source.chat_id, event.source.thread_id)
+            ] = context
 
     async def on_processing_complete(
         self, event: MessageEvent, outcome: ProcessingOutcome
@@ -366,9 +385,10 @@ class TheChatAdapter(BasePlatformAdapter):
         context = self._event_contexts.pop(str(event.message_id or ""), None)
         if not context:
             return
-        active_context = self._contexts.get(event.source.chat_id)
+        context_key = self._context_key(event.source.chat_id, event.source.thread_id)
+        active_context = self._contexts.get(context_key)
         if active_context is context:
-            self._contexts.pop(event.source.chat_id, None)
+            self._contexts.pop(context_key, None)
         if not self._client:
             return
         if outcome == ProcessingOutcome.FAILURE:
@@ -524,6 +544,7 @@ class TheChatAdapter(BasePlatformAdapter):
     async def _handle_platform_event(self, item: Dict[str, Any]) -> None:
         chat_id = str(item["chatId"])
         invocation_id = str(item["invocationId"])
+        thread_id = str(item.get("threadId") or item.get("thread_id") or "") or None
         bot = item.get("bot") or {}
         conversation = item.get("conversation") or {}
         sender = item.get("sender") or {}
@@ -538,6 +559,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 "thechat.bot_id": str(bot.get("id") or ""),
                 "thechat.conversation_id": str(conversation.get("id") or ""),
                 "thechat.chat_type": item.get("chatType") or "group",
+                "thechat.thread_id": thread_id or "",
                 "thechat.continuity_id": str((item.get("continuity") or {}).get("id") or ""),
             },
         ) as span:
@@ -548,8 +570,11 @@ class TheChatAdapter(BasePlatformAdapter):
                 "conversation_id": str(conversation.get("id") or ""),
                 "conversation_name": conversation.get("name"),
                 "chat_type": item.get("chatType") or "group",
+                "thread_id": thread_id,
             }
-            self._contexts[chat_id] = context
+            self._contexts[self._context_key(chat_id, thread_id)] = context
+            if thread_id is None:
+                self._contexts[chat_id] = context
             self._event_contexts[message_id] = context
 
             text = str(item.get("text") or "").strip()
@@ -562,6 +587,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 user_id=str(sender.get("id") or ""),
                 user_name=str(sender.get("name") or "TheChat User"),
                 guild_id=str(conversation.get("workspaceId") or "") or None,
+                thread_id=thread_id,
                 message_id=message_id,
             )
             event = MessageEvent(

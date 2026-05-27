@@ -74,6 +74,7 @@ def _context(invocation_id):
         "conversation_id": "conversation-1",
         "conversation_name": "Hermes DM",
         "chat_type": "dm",
+        "thread_id": None,
     }
 
 
@@ -288,6 +289,37 @@ async def test_send_invocation_progress_posts_structured_event():
 
 
 @pytest.mark.asyncio
+async def test_send_invocation_progress_uses_thread_metadata_context():
+    adapter = _make_adapter()
+    first = _context("invocation-first")
+    first["thread_id"] = "thread-1"
+    second = _context("invocation-second")
+    second["thread_id"] = "thread-2"
+    adapter._contexts[adapter._context_key("chat-1", "thread-1")] = first
+    adapter._contexts[adapter._context_key("chat-1", "thread-2")] = second
+
+    result = await adapter.send_invocation_progress(
+        "chat-1",
+        {"type": "tool.started", "status": "running"},
+        metadata={"thread_id": "thread-1"},
+    )
+
+    assert result.success is True
+    assert adapter._client.posts == [
+        {
+            "path": "/hermes-platform/invocations/invocation-first/progress",
+            "json": {
+                "botId": "bot-1",
+                "conversationId": "conversation-1",
+                "type": "tool.started",
+                "status": "running",
+                "threadId": "thread-1",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_connect_defaults_to_polling_without_webhook_url(monkeypatch):
     fake_client = _FakeClient()
     monkeypatch.setattr(thechat.httpx, "AsyncClient", lambda **_kwargs: fake_client)
@@ -393,6 +425,43 @@ async def test_webhook_event_dispatches_to_gateway_message_handler():
     assert event.source.chat_id == "direct:user-1"
     assert event.source.chat_type == "dm"
     assert adapter._contexts["direct:user-1"]["invocation_id"] == "invocation-1"
+
+
+@pytest.mark.asyncio
+async def test_threaded_platform_event_sets_source_thread_and_context_key():
+    adapter = _make_adapter()
+    handled = []
+
+    async def handle(event):
+        handled.append(event)
+
+    adapter.handle_message = cast(Any, handle)
+
+    await adapter._handle_platform_event_safely(
+        {
+            "chatId": "direct:user-1",
+            "chatType": "dm",
+            "threadId": "task-thread-1",
+            "invocationId": "invocation-1",
+            "messageId": "message-1",
+            "text": "hello from threaded task",
+            "sender": {"id": "user-1", "name": "User"},
+            "bot": {"id": "bot-1", "name": "Hermes"},
+            "conversation": {
+                "id": "conversation-1",
+                "name": "Hermes DM",
+                "workspaceId": "workspace-1",
+            },
+        }
+    )
+
+    assert len(handled) == 1
+    event = handled[0]
+    assert event.source.chat_id == "direct:user-1"
+    assert event.source.thread_id == "task-thread-1"
+    context = adapter._contexts["direct:user-1:thread:task-thread-1"]
+    assert context["invocation_id"] == "invocation-1"
+    assert context["thread_id"] == "task-thread-1"
 
 
 @pytest.mark.asyncio
