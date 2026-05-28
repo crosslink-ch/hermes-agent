@@ -125,6 +125,98 @@ def test_resolve_codex_runtime_credentials_force_refresh(tmp_path, monkeypatch):
     assert resolved["api_key"] == "access-forced"
 
 
+def test_resolve_codex_runtime_credentials_falls_back_to_pool_when_singleton_empty(tmp_path, monkeypatch):
+    """Regression for #32992 — chat path returns 401 when singleton is empty but pool has creds.
+
+    The chat path historically went through ``resolve_codex_runtime_credentials`` which
+    only consulted ``providers.openai-codex.tokens`` and raised ``AuthError`` when that
+    was empty.  The auxiliary path went through ``_read_codex_access_token`` which
+    checks the pool first.  Users with creds only in the pool (manual seed, partial
+    re-auth, restore from backup) hit a bare HTTP 401 on chat but worked fine on
+    auxiliary calls.  The fallback closes that divergence.
+    """
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    # Singleton: empty tokens (would normally raise AuthError).
+    # Pool: valid access_token.
+    auth_store = {
+        "version": 1,
+        "providers": {},  # no openai-codex singleton at all
+        "credential_pool": {
+            "openai-codex": [
+                {
+                    "source": "device_code",
+                    "access_token": "pool-fallback-token",
+                    "refresh_token": "pool-refresh",
+                    "last_status": "ok",
+                    "auth_type": "oauth",
+                },
+            ],
+        },
+    }
+    (hermes_home / "auth.json").write_text(json.dumps(auth_store))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    resolved = resolve_codex_runtime_credentials()
+    assert resolved["api_key"] == "pool-fallback-token"
+    assert resolved["source"] == "credential_pool"
+    assert resolved["base_url"]  # default codex backend URL
+
+
+def test_resolve_codex_runtime_credentials_pool_fallback_skips_exhausted(tmp_path, monkeypatch):
+    """The pool fallback skips entries currently in an exhaustion cooldown window."""
+    import time as _time
+
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    future_reset = _time.time() + 3600  # 1h cooldown remaining
+    auth_store = {
+        "version": 1,
+        "providers": {},
+        "credential_pool": {
+            "openai-codex": [
+                {
+                    "source": "device_code",
+                    "access_token": "wedged-token",
+                    "last_error_reset_at": future_reset,  # in cooldown
+                },
+                {
+                    "source": "device_code",
+                    "access_token": "usable-token",
+                    "last_status": "ok",
+                },
+            ],
+        },
+    }
+    (hermes_home / "auth.json").write_text(json.dumps(auth_store))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    resolved = resolve_codex_runtime_credentials()
+    assert resolved["api_key"] == "usable-token"
+    assert resolved["source"] == "credential_pool"
+
+
+def test_resolve_codex_runtime_credentials_pool_fallback_no_usable_entry(tmp_path, monkeypatch):
+    """When both singleton and pool are empty/unusable, the original AuthError propagates."""
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    auth_store = {
+        "version": 1,
+        "providers": {},
+        "credential_pool": {
+            "openai-codex": [
+                {"source": "device_code", "access_token": ""},  # empty
+            ],
+        },
+    }
+    (hermes_home / "auth.json").write_text(json.dumps(auth_store))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    with pytest.raises(AuthError) as exc:
+        resolve_codex_runtime_credentials()
+    assert exc.value.code == "codex_auth_missing"
+
+
 def test_resolve_provider_explicit_codex_does_not_fallback(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -209,6 +301,88 @@ def test_save_codex_tokens_syncs_credential_pool(tmp_path, monkeypatch):
 
     # Provider singleton is updated too.
     assert auth["providers"]["openai-codex"]["tokens"]["access_token"] == "new-at"
+
+
+def test_save_codex_tokens_syncs_manual_device_code_entries(tmp_path, monkeypatch):
+    """Re-auth must also refresh ``manual:device_code`` pool entries.
+
+    Regression for #33538: a user who hit #33000 before the #33164 fix landed
+    would have run ``hermes auth add openai-codex`` as a workaround, leaving
+    a pool entry with ``source="manual:device_code"``.  On every subsequent
+    re-auth via setup/model picker, the singleton-seeded ``device_code`` entry
+    got refreshed but the ``manual:device_code`` entry stayed stale, recreating
+    the same 401 token_invalidated symptom that #33164 was supposed to fix.
+
+    An interactive Codex device-code re-auth proves the user owns the ChatGPT
+    account, so it is safe to refresh every device-code-backed entry in the
+    pool — but NOT independent ``manual:api_key`` entries (separate accounts /
+    explicit API keys).
+    """
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir(parents=True, exist_ok=True)
+    (hermes_home / "auth.json").write_text(json.dumps({
+        "version": 1,
+        "providers": {
+            "openai-codex": {
+                "tokens": {"access_token": "old-at", "refresh_token": "old-rt"},
+                "last_refresh": "2026-01-01T00:00:00Z",
+                "auth_mode": "chatgpt",
+            },
+        },
+        "credential_pool": {
+            "openai-codex": [
+                {
+                    "id": "seeded",
+                    "source": "device_code",
+                    "auth_type": "oauth",
+                    "access_token": "old-at",
+                    "refresh_token": "old-rt",
+                },
+                {
+                    "id": "auth-add",
+                    "source": "manual:device_code",
+                    "auth_type": "oauth",
+                    "access_token": "stale-manual-at",
+                    "refresh_token": "stale-manual-rt",
+                    "last_status": "exhausted",
+                    "last_error_code": 401,
+                    "last_error_reason": "token_invalidated",
+                },
+                {
+                    "id": "api-key",
+                    "source": "manual:api_key",
+                    "auth_type": "api_key",
+                    "access_token": "user-api-key",
+                },
+            ],
+        },
+    }))
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+    _save_codex_tokens({"access_token": "fresh-at", "refresh_token": "fresh-rt"},
+                       last_refresh="2026-05-28T00:00:00Z")
+
+    auth = json.loads((hermes_home / "auth.json").read_text())
+    pool = auth["credential_pool"]["openai-codex"]
+
+    # Singleton-seeded device_code entry: refreshed and error markers cleared.
+    seeded = next(e for e in pool if e["source"] == "device_code")
+    assert seeded["access_token"] == "fresh-at"
+    assert seeded["refresh_token"] == "fresh-rt"
+
+    # manual:device_code entry: ALSO refreshed (the new behavior).
+    manual_dc = next(e for e in pool if e["source"] == "manual:device_code")
+    assert manual_dc["access_token"] == "fresh-at"
+    assert manual_dc["refresh_token"] == "fresh-rt"
+    assert manual_dc["last_refresh"] == "2026-05-28T00:00:00Z"
+    assert manual_dc["last_status"] is None
+    assert manual_dc["last_error_code"] is None
+    assert manual_dc["last_error_reason"] is None
+
+    # manual:api_key entry: untouched — independent credential.
+    api_key = next(e for e in pool if e["source"] == "manual:api_key")
+    assert api_key["access_token"] == "user-api-key"
+    assert "refresh_token" not in api_key or api_key.get("refresh_token") is None
 
 
 def test_import_codex_cli_tokens(tmp_path, monkeypatch):
