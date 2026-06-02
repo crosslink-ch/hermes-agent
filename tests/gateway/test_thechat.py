@@ -4,8 +4,9 @@ from typing import Any, cast
 import httpx
 import pytest
 
-from gateway.config import PlatformConfig
-from gateway.session import build_session_key
+from gateway.config import Platform, PlatformConfig
+from gateway.run import GatewayRunner
+from gateway.session import SessionSource, build_session_key
 from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
 from gateway.platforms import thechat
 from gateway.platforms.thechat import TheChatAdapter
@@ -253,6 +254,209 @@ async def test_active_stop_command_marks_thechat_command_invocation_completed():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command_text", "response_text"),
+    [
+        ("/approve", "Command approved. The agent is resuming..."),
+        ("/steer prefer the smaller fix", "Steer queued."),
+    ],
+)
+async def test_active_non_canceling_commands_mark_thechat_invocation_completed(
+    command_text,
+    response_text,
+):
+    adapter = _make_adapter()
+    command_context = _context("invocation-command")
+    adapter._contexts["chat-1"] = command_context
+    adapter._event_contexts["message-command"] = command_context
+
+    async def handle(event):
+        assert event.text == command_text
+        return response_text
+
+    adapter.set_message_handler(handle)
+    event = _event(adapter, message_id="message-command")
+    event.text = command_text
+    event.message_type = MessageType.COMMAND
+    session_key = build_session_key(
+        event.source,
+        group_sessions_per_user=adapter.config.extra.get("group_sessions_per_user", True),
+        thread_sessions_per_user=adapter.config.extra.get("thread_sessions_per_user", False),
+    )
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    await adapter.handle_message(event)
+
+    assert adapter._client.posts == [
+        {
+            "path": "/hermes-platform/messages",
+            "json": {
+                "chatId": "chat-1",
+                "content": response_text,
+                "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
+                "complete": False,
+                "invocationId": "invocation-command",
+                "botId": "bot-1",
+                "conversationId": "conversation-1",
+            },
+        },
+        {
+            "path": "/hermes-platform/invocations/invocation-command/completed",
+            "json": {"reason": "Hermes gateway completed"},
+        },
+    ]
+    assert "chat-1" not in adapter._contexts
+    assert "message-command" not in adapter._event_contexts
+
+
+@pytest.mark.asyncio
+async def test_active_queue_command_completes_when_queued_turn_completes():
+    adapter = _make_adapter()
+    command_context = _context("invocation-queue")
+    adapter._contexts["chat-1"] = command_context
+    adapter._event_contexts["message-queue"] = command_context
+
+    async def handle(event):
+        queued_event = _event(adapter, message_id=event.message_id)
+        queued_event.text = "run tests"
+        adapter._pending_messages[session_key] = queued_event
+        return "Queued for the next turn."
+
+    adapter.set_message_handler(handle)
+    event = _event(adapter, message_id="message-queue")
+    event.text = "/queue run tests"
+    event.message_type = MessageType.COMMAND
+    session_key = build_session_key(
+        event.source,
+        group_sessions_per_user=adapter.config.extra.get("group_sessions_per_user", True),
+        thread_sessions_per_user=adapter.config.extra.get("thread_sessions_per_user", False),
+    )
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    await adapter.handle_message(event)
+
+    assert adapter._client.posts == [
+        {
+            "path": "/hermes-platform/messages",
+            "json": {
+                "chatId": "chat-1",
+                "content": "Queued for the next turn.",
+                "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
+                "complete": False,
+                "invocationId": "invocation-queue",
+                "botId": "bot-1",
+                "conversationId": "conversation-1",
+            },
+        }
+    ]
+    assert adapter._event_contexts["message-queue"] is command_context
+
+    queued_event = adapter._pending_messages.pop(session_key)
+    await adapter.on_processing_complete(queued_event, ProcessingOutcome.SUCCESS)
+
+    assert adapter._client.posts[-1] == {
+        "path": "/hermes-platform/invocations/invocation-queue/completed",
+        "json": {"reason": "Hermes gateway completed"},
+    }
+    assert "message-queue" not in adapter._event_contexts
+
+
+@pytest.mark.asyncio
+async def test_busy_command_ack_marks_thechat_invocation_completed():
+    adapter = _make_adapter()
+    command_context = _context("invocation-command")
+    adapter._contexts["chat-1"] = command_context
+    adapter._event_contexts["message-command"] = command_context
+
+    async def handle(_event):
+        return "unused"
+
+    async def busy_handler(event, session_key):
+        adapter._pending_messages[session_key] = event
+        await adapter._send_with_retry(
+            chat_id=event.source.chat_id,
+            content="Interrupting current task.",
+            reply_to=event.message_id,
+            metadata={"message_id": event.message_id},
+        )
+        return True
+
+    adapter.set_message_handler(handle)
+    adapter.set_busy_session_handler(busy_handler)
+    event = _event(adapter, message_id="message-command")
+    event.text = "/appro e"
+    event.message_type = MessageType.COMMAND
+    session_key = build_session_key(
+        event.source,
+        group_sessions_per_user=adapter.config.extra.get("group_sessions_per_user", True),
+        thread_sessions_per_user=adapter.config.extra.get("thread_sessions_per_user", False),
+    )
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    await adapter.handle_message(event)
+
+    assert adapter._client.posts == [
+        {
+            "path": "/hermes-platform/messages",
+            "json": {
+                "chatId": "chat-1",
+                "content": "Interrupting current task.",
+                "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
+                "complete": False,
+                "invocationId": "invocation-command",
+                "botId": "bot-1",
+                "conversationId": "conversation-1",
+            },
+        },
+        {
+            "path": "/hermes-platform/invocations/invocation-command/completed",
+            "json": {"reason": "Hermes gateway completed"},
+        },
+    ]
+    assert "message-command" not in adapter._event_contexts
+
+
+@pytest.mark.asyncio
+async def test_busy_text_pending_turn_is_not_completed_by_ack():
+    adapter = _make_adapter()
+    context = _context("invocation-followup")
+    adapter._contexts["chat-1"] = context
+    adapter._event_contexts["message-followup"] = context
+
+    async def handle(_event):
+        return "unused"
+
+    async def busy_handler(event, session_key):
+        adapter._pending_messages[session_key] = event
+        await adapter._send_with_retry(
+            chat_id=event.source.chat_id,
+            content="Interrupting current task.",
+            reply_to=event.message_id,
+            metadata={"message_id": event.message_id},
+        )
+        return True
+
+    adapter.set_message_handler(handle)
+    adapter.set_busy_session_handler(busy_handler)
+    event = _event(adapter, message_id="message-followup")
+    event.text = "please adjust this"
+    event.message_type = MessageType.TEXT
+    session_key = build_session_key(
+        event.source,
+        group_sessions_per_user=adapter.config.extra.get("group_sessions_per_user", True),
+        thread_sessions_per_user=adapter.config.extra.get("thread_sessions_per_user", False),
+    )
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    await adapter.handle_message(event)
+
+    assert [post["path"] for post in adapter._client.posts] == [
+        "/hermes-platform/messages",
+    ]
+    assert adapter._event_contexts["message-followup"] is context
+
+
+@pytest.mark.asyncio
 async def test_send_invocation_progress_posts_structured_event():
     adapter = _make_adapter()
     context = _context("invocation-first")
@@ -317,6 +521,53 @@ async def test_send_invocation_progress_uses_thread_metadata_context():
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_send_invocation_progress_prefers_message_metadata_over_latest_context():
+    adapter = _make_adapter()
+    original = _context("invocation-original")
+    original["thread_id"] = "thread-1"
+    command = _context("invocation-command")
+    command["thread_id"] = "thread-1"
+    adapter._contexts[adapter._context_key("chat-1", "thread-1")] = command
+    adapter._contexts["chat-1"] = command
+    adapter._event_contexts["message-original"] = original
+    adapter._event_contexts["message-command"] = command
+
+    result = await adapter.send_invocation_progress(
+        "chat-1",
+        {"type": "tool.started", "status": "running"},
+        metadata={"thread_id": "thread-1", "message_id": "message-original"},
+    )
+
+    assert result.success is True
+    assert adapter._client.posts == [
+        {
+            "path": "/hermes-platform/invocations/invocation-original/progress",
+            "json": {
+                "botId": "bot-1",
+                "conversationId": "conversation-1",
+                "type": "tool.started",
+                "status": "running",
+                "threadId": "thread-1",
+            },
+        }
+    ]
+
+
+def test_gateway_thechat_metadata_carries_originating_message_id():
+    runner = object.__new__(GatewayRunner)
+    source = SessionSource(
+        platform=Platform.THECHAT,
+        chat_id="chat-1",
+        chat_type="dm",
+        user_id="user-1",
+    )
+
+    assert runner._thread_metadata_for_source(source, "message-original") == {
+        "message_id": "message-original"
+    }
 
 
 @pytest.mark.asyncio

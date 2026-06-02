@@ -62,17 +62,22 @@ def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) 
     ``direct_messages_topic_id`` when the Bot API supports it.
     """
     thread_id = getattr(source, "thread_id", None)
+    platform = _platform_name(getattr(source, "platform", None))
+    anchor = reply_to_message_id or getattr(source, "message_id", None)
     if thread_id is None:
+        if platform == "thechat" and anchor is not None:
+            return {"message_id": str(anchor)}
         return None
     metadata = {"thread_id": thread_id}
-    if _platform_name(getattr(source, "platform", None)) == "telegram" and getattr(source, "chat_type", None) == "dm":
+    if platform == "telegram" and getattr(source, "chat_type", None) == "dm":
         metadata["telegram_dm_topic_reply_fallback"] = True
         tid = str(thread_id)
         if tid and tid not in {"", "1"}:
             metadata["direct_messages_topic_id"] = tid
-        anchor = reply_to_message_id or getattr(source, "message_id", None)
         if anchor is not None:
             metadata["telegram_reply_to_message_id"] = str(anchor)
+    elif platform == "thechat" and anchor is not None:
+        metadata["message_id"] = str(anchor)
     return metadata
 
 
@@ -3321,6 +3326,98 @@ class BasePlatformAdapter(ABC):
 
         await self._drain_pending_after_session_command(session_key, command_guard)
 
+    async def _dispatch_inline_with_processing_lifecycle(
+        self,
+        event: MessageEvent,
+        session_key: str,
+        cmd: str | None = None,
+    ) -> None:
+        """Dispatch an inline active-session event and close its own lifecycle.
+
+        Some active-session inputs must reach the gateway runner immediately
+        without becoming a background agent turn. Platforms such as TheChat still
+        model those inputs as invocations, so the inline path has to report
+        completion itself.
+        """
+        if not self._message_handler:
+            return
+
+        thread_meta = _thread_metadata_for_source(
+            event.source, _reply_anchor_for_event(event)
+        )
+        delivery_attempted = False
+        delivery_succeeded = False
+        completion_reported = False
+        try:
+            await self._run_processing_hook("on_processing_start", event)
+            response = await self._message_handler(event)
+            _text, _eph_ttl = self._unwrap_ephemeral(response)
+            if _text:
+                _r = await self._send_with_retry(
+                    chat_id=event.source.chat_id,
+                    content=_text,
+                    reply_to=_reply_anchor_for_event(event),
+                    metadata=thread_meta,
+                )
+                delivery_attempted = True
+                delivery_succeeded = bool(getattr(_r, "success", False))
+                if _eph_ttl > 0 and _r.success and _r.message_id:
+                    self._schedule_ephemeral_delete(
+                        chat_id=event.source.chat_id,
+                        message_id=_r.message_id,
+                        ttl_seconds=_eph_ttl,
+                    )
+            pending_event = self._pending_messages.get(session_key)
+            pending_message_id = getattr(pending_event, "message_id", None)
+            if (
+                (cmd in {"queue", "q"} and event.get_command_args().strip())
+                or (
+                    pending_event is not None
+                    and pending_message_id is not None
+                    and str(pending_message_id) == str(event.message_id or "")
+                )
+            ):
+                return
+            processing_ok = delivery_succeeded if delivery_attempted else True
+            await self._run_processing_hook(
+                "on_processing_complete",
+                event,
+                ProcessingOutcome.SUCCESS if processing_ok else ProcessingOutcome.FAILURE,
+            )
+            completion_reported = True
+        except Exception:
+            if not completion_reported:
+                await self._run_processing_hook(
+                    "on_processing_complete",
+                    event,
+                    ProcessingOutcome.FAILURE,
+                )
+            raise
+
+    async def _complete_absorbed_active_session_event(
+        self,
+        event: MessageEvent,
+        session_key: str,
+    ) -> None:
+        """Close an active-session event that will not run as its own turn."""
+        pending_event = self._pending_messages.get(session_key)
+        is_command = bool(event.get_command()) or event.message_type == MessageType.COMMAND
+        if pending_event is event and not is_command:
+            return
+        try:
+            await self._run_processing_hook("on_processing_start", event)
+            await self._run_processing_hook(
+                "on_processing_complete",
+                event,
+                ProcessingOutcome.SUCCESS,
+            )
+        except Exception:
+            logger.debug(
+                "[%s] Failed to complete absorbed active-session event",
+                self.name,
+                exc_info=True,
+            )
+
     async def handle_message(self, event: MessageEvent) -> None:
         """
         Process an incoming message.
@@ -3387,22 +3484,9 @@ class BasePlatformAdapter(ABC):
                     self.name, cmd, session_key,
                 )
                 try:
-                    _thread_meta = _thread_metadata_for_source(event.source, _reply_anchor_for_event(event))
-                    response = await self._message_handler(event)
-                    _text, _eph_ttl = self._unwrap_ephemeral(response)
-                    if _text:
-                        _r = await self._send_with_retry(
-                            chat_id=event.source.chat_id,
-                            content=_text,
-                            reply_to=_reply_anchor_for_event(event),
-                            metadata=_thread_meta,
-                        )
-                        if _eph_ttl > 0 and _r.success and _r.message_id:
-                            self._schedule_ephemeral_delete(
-                                chat_id=event.source.chat_id,
-                                message_id=_r.message_id,
-                                ttl_seconds=_eph_ttl,
-                            )
+                    await self._dispatch_inline_with_processing_lifecycle(
+                        event, session_key, cmd
+                    )
                 except Exception as e:
                     logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
                 return
@@ -3435,24 +3519,9 @@ class BasePlatformAdapter(ABC):
                         self.name, session_key,
                     )
                     try:
-                        _thread_meta = _thread_metadata_for_source(
-                            event.source, _reply_anchor_for_event(event)
+                        await self._dispatch_inline_with_processing_lifecycle(
+                            event, session_key, cmd
                         )
-                        response = await self._message_handler(event)
-                        _text, _eph_ttl = self._unwrap_ephemeral(response)
-                        if _text:
-                            _r = await self._send_with_retry(
-                                chat_id=event.source.chat_id,
-                                content=_text,
-                                reply_to=_reply_anchor_for_event(event),
-                                metadata=_thread_meta,
-                            )
-                            if _eph_ttl > 0 and _r.success and _r.message_id:
-                                self._schedule_ephemeral_delete(
-                                    chat_id=event.source.chat_id,
-                                    message_id=_r.message_id,
-                                    ttl_seconds=_eph_ttl,
-                                )
                     except Exception as e:
                         logger.error(
                             "[%s] Clarify text-intercept dispatch failed: %s",
@@ -3463,6 +3532,9 @@ class BasePlatformAdapter(ABC):
             if self._busy_session_handler is not None:
                 try:
                     if await self._busy_session_handler(event, session_key):
+                        await self._complete_absorbed_active_session_event(
+                            event, session_key
+                        )
                         return
                 except Exception as e:
                     logger.error("[%s] Busy-session handler failed: %s", self.name, e, exc_info=True)

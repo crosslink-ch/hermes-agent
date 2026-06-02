@@ -252,14 +252,6 @@ class TheChatAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        if metadata:
-            thread_id = metadata.get("thread_id") or metadata.get("message_thread_id")
-            if thread_id:
-                context = self._contexts.get(
-                    self._context_key(chat_id, str(thread_id))
-                )
-                if context:
-                    return context
         candidate_ids = [reply_to]
         if metadata:
             candidate_ids.extend(
@@ -274,6 +266,14 @@ class TheChatAdapter(BasePlatformAdapter):
             context = self._event_contexts.get(str(candidate))
             if context:
                 return context
+        if metadata:
+            thread_id = metadata.get("thread_id") or metadata.get("message_thread_id")
+            if thread_id:
+                context = self._contexts.get(
+                    self._context_key(chat_id, str(thread_id))
+                )
+                if context:
+                    return context
         return self._contexts.get(chat_id)
 
     def _context_key(self, chat_id: str, thread_id: Optional[str] = None) -> str:

@@ -13884,11 +13884,15 @@ class GatewayRunner:
     ) -> Optional[Dict[str, Any]]:
         """Build the metadata dict platforms need for thread-aware replies."""
         thread_id = getattr(source, "thread_id", None)
+        platform = getattr(source, "platform", None)
+        anchor = reply_to_message_id or getattr(source, "message_id", None)
         if thread_id is None:
+            if platform == Platform.THECHAT and anchor is not None:
+                return {"message_id": str(anchor)}
             return None
         metadata: Dict[str, Any] = {"thread_id": thread_id}
         if (
-            getattr(source, "platform", None) == Platform.TELEGRAM
+            platform == Platform.TELEGRAM
             and getattr(source, "chat_type", None) == "dm"
         ):
             metadata["telegram_dm_topic_reply_fallback"] = True
@@ -13898,9 +13902,10 @@ class GatewayRunner:
             tid = str(thread_id)
             if tid and tid not in {"", "1"}:
                 metadata["direct_messages_topic_id"] = tid
-            anchor = reply_to_message_id or getattr(source, "message_id", None)
             if anchor is not None:
                 metadata["telegram_reply_to_message_id"] = str(anchor)
+        elif platform == Platform.THECHAT and anchor is not None:
+            metadata["message_id"] = str(anchor)
         return metadata
 
     @staticmethod
@@ -16225,11 +16230,17 @@ class GatewayRunner:
             _progress_thread_id = source.thread_id or event_message_id
         else:
             _progress_thread_id = source.thread_id
-        _progress_metadata = (
-            self._thread_metadata_for_source(source, event_message_id)
-            if _progress_thread_id == source.thread_id
-            else {"thread_id": _progress_thread_id}
-        ) if _progress_thread_id else None
+        _source_message_metadata = self._thread_metadata_for_source(
+            source, event_message_id
+        )
+        if _progress_thread_id:
+            _progress_metadata = (
+                _source_message_metadata
+                if _progress_thread_id == source.thread_id
+                else {"thread_id": _progress_thread_id}
+            )
+        else:
+            _progress_metadata = _source_message_metadata
         _progress_reply_to = (
             event_message_id
             if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
@@ -16614,7 +16625,7 @@ class GatewayRunner:
                 "reply_to_message_id": event_message_id,
             }
         else:
-            _status_thread_metadata = self._thread_metadata_for_source(source, event_message_id) if _progress_thread_id else None
+            _status_thread_metadata = _source_message_metadata
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
