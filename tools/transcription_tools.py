@@ -806,7 +806,7 @@ def _get_provider(stt_config: dict) -> str:
         if provider == "xai":
             from tools.xai_http import resolve_xai_http_credentials
 
-            if resolve_xai_http_credentials().get("api_key") or get_env_value("XAI_API_KEY"):
+            if resolve_xai_http_credentials().get("api_key"):
                 return "xai"
             logger.warning(
                 "STT provider 'xai' configured but no xAI credentials are available"
@@ -849,7 +849,7 @@ def _get_provider(stt_config: dict) -> str:
     try:
         from tools.xai_http import resolve_xai_http_credentials
 
-        if resolve_xai_http_credentials().get("api_key") or get_env_value("XAI_API_KEY"):
+        if resolve_xai_http_credentials().get("api_key"):
             logger.info("No local STT available, using xAI Grok STT API")
             return "xai"
     except Exception:
@@ -1430,8 +1430,6 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
 
     creds = resolve_xai_http_credentials()
     api_key = str(creds.get("api_key") or "").strip()
-    if not api_key:
-        api_key = str(get_env_value("XAI_API_KEY") or "").strip()
     if not api_key:
         return {
             "success": False,
