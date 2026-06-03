@@ -48,6 +48,7 @@ concurrency:
 
 env:
   IMAGE_NAME: ${{ github.repository == 'crosslink-ch/hermes-agent' && 'crosslinkch/hermes-agent' || 'nousresearch/hermes-agent' }}
+  ARM64_CACHE_REF: ${{ github.repository == 'crosslink-ch/hermes-agent' && 'ghcr.io/crosslink-ch/hermes-agent:buildcache-arm64' || 'ghcr.io/nousresearch/hermes-agent:buildcache-arm64' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -251,7 +252,7 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:test
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
-          cache-from: type=registry,ref=ghcr.io/nousresearch/hermes-agent:buildcache-arm64
+          cache-from: type=registry,ref=${{ env.ARM64_CACHE_REF }}
 
       # Main/release builds read AND write the registry cache so the digest
       # push below reuses layers from this smoke-test build, and so the next
@@ -267,8 +268,8 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:test
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
-          cache-from: type=registry,ref=ghcr.io/nousresearch/hermes-agent:buildcache-arm64
-          cache-to: type=registry,ref=ghcr.io/nousresearch/hermes-agent:buildcache-arm64,mode=max
+          cache-from: type=registry,ref=${{ env.ARM64_CACHE_REF }}
+          cache-to: type=registry,ref=${{ env.ARM64_CACHE_REF }},mode=max
 
       - name: Smoke test image
         uses: ./.github/actions/hermes-smoke-test
@@ -295,8 +296,8 @@ jobs:
           build-args: |
             HERMES_GIT_SHA=${{ github.sha }}
           outputs: type=image,name=${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=registry,ref=ghcr.io/nousresearch/hermes-agent:buildcache-arm64
-          cache-to: type=registry,ref=ghcr.io/nousresearch/hermes-agent:buildcache-arm64,mode=max
+          cache-from: type=registry,ref=${{ env.ARM64_CACHE_REF }}
+          cache-to: type=registry,ref=${{ env.ARM64_CACHE_REF }},mode=max
 
       - name: Export digest
         if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'release' || github.event_name == 'workflow_dispatch'
