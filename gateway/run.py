@@ -2427,6 +2427,238 @@ class GatewayRunner:
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         )
 
+    def _platform_continuity_for_event(self, event: MessageEvent) -> Dict[str, Any]:
+        raw_message = getattr(event, "raw_message", None)
+        if not isinstance(raw_message, dict):
+            return {}
+        continuity = raw_message.get("continuity")
+        return continuity if isinstance(continuity, dict) else {}
+
+    def _text_continuity_field(self, continuity: Dict[str, Any], *keys: str) -> Optional[str]:
+        for key in keys:
+            value = continuity.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    def _session_lineage_root_id(self, session_id: str) -> str:
+        if not session_id:
+            return session_id
+        session_db = getattr(self, "_session_db", None)
+        if session_db is None:
+            return session_id
+        try:
+            chain = session_db._session_lineage_root_to_tip(session_id)
+        except Exception:
+            logger.debug("Failed to resolve session lineage for %s", session_id, exc_info=True)
+            return session_id
+        return str(chain[0]) if chain else session_id
+
+    def _session_reference_for_entry(
+        self,
+        session_entry: Any,
+        *,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        session_id = str(getattr(session_entry, "session_id", "") or "").strip()
+        session_key = str(getattr(session_entry, "session_key", "") or "").strip()
+        if not session_id and not session_key:
+            return None
+        return {
+            "sessionId": session_id or None,
+            "sessionKey": session_key or None,
+            "lineageRootId": self._session_lineage_root_id(session_id) if session_id else None,
+            "reason": reason,
+            "source": "hermes",
+            "updatedAt": datetime.now().isoformat(),
+        }
+
+    def _annotate_event_session(
+        self,
+        event: MessageEvent,
+        session_entry: Any,
+        *,
+        reason: str,
+    ) -> None:
+        reference = self._session_reference_for_entry(session_entry, reason=reason)
+        if reference:
+            try:
+                setattr(event, "hermes_session", reference)
+            except Exception:
+                pass
+
+    def _apply_platform_session_continuity(
+        self,
+        event: MessageEvent,
+        source: SessionSource,
+        session_entry: Any,
+    ) -> Any:
+        if getattr(source, "platform", None) != Platform.THECHAT:
+            return session_entry
+        continuity = self._platform_continuity_for_event(event)
+        if not continuity:
+            return session_entry
+
+        session_key = getattr(session_entry, "session_key", None) or self._session_key_for_source(source)
+        branch_parent_session_id = self._text_continuity_field(
+            continuity,
+            "branchFromSessionId",
+            "branch_from_session_id",
+        )
+        if branch_parent_session_id:
+            branch_title = self._text_continuity_field(
+                continuity,
+                "branchTitle",
+                "branch_title",
+            )
+            branched_entry = self._branch_session_from_parent(
+                source=source,
+                session_key=session_key,
+                parent_session_id=branch_parent_session_id,
+                branch_title=branch_title,
+            )
+            if branched_entry is not None:
+                self._annotate_event_session(
+                    event,
+                    branched_entry,
+                    reason="branch.created",
+                )
+                return branched_entry
+
+        requested_session_id = self._text_continuity_field(
+            continuity,
+            "sessionId",
+            "session_id",
+        )
+        if (
+            requested_session_id
+            and requested_session_id != getattr(session_entry, "session_id", None)
+            and getattr(self, "_session_db", None) is not None
+        ):
+            try:
+                resolved_session_id = self._session_db.resolve_resume_session_id(requested_session_id)
+                session_row = self._session_db.get_session(resolved_session_id)
+            except Exception:
+                logger.debug(
+                    "Failed to resolve TheChat continuity session %s",
+                    requested_session_id,
+                    exc_info=True,
+                )
+                session_row = None
+                resolved_session_id = requested_session_id
+            if session_row:
+                switched = self.session_store.switch_session(session_key, resolved_session_id)
+                if switched is not None:
+                    self._clear_session_boundary_security_state(session_key)
+                    self._evict_cached_agent(session_key)
+                    self._annotate_event_session(
+                        event,
+                        switched,
+                        reason="continuity.resumed",
+                    )
+                    return switched
+
+        return session_entry
+
+    def _branch_session_from_parent(
+        self,
+        *,
+        source: SessionSource,
+        session_key: str,
+        parent_session_id: str,
+        branch_title: Optional[str] = None,
+    ) -> Any:
+        session_db = getattr(self, "_session_db", None)
+        if session_db is None:
+            return None
+        parent_session_id = str(parent_session_id or "").strip()
+        if not parent_session_id:
+            return None
+        try:
+            parent_session_id = session_db.resolve_resume_session_id(parent_session_id)
+            parent_session = session_db.get_session(parent_session_id)
+        except Exception:
+            logger.debug(
+                "Failed to resolve TheChat branch parent %s",
+                parent_session_id,
+                exc_info=True,
+            )
+            return None
+        if not parent_session:
+            logger.debug("TheChat branch parent session not found: %s", parent_session_id)
+            return None
+
+        history = self.session_store.load_transcript(parent_session_id)
+        if not history:
+            try:
+                history = session_db.get_messages_as_conversation(
+                    parent_session_id,
+                    include_ancestors=True,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to load TheChat branch parent messages for %s",
+                    parent_session_id,
+                    exc_info=True,
+                )
+                history = []
+        if not history:
+            return None
+
+        import uuid as _uuid
+
+        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_session_id = f"{timestamp_str}_{_uuid.uuid4().hex[:6]}"
+        title = (branch_title or "").strip()
+        if not title:
+            current_title = session_db.get_session_title(parent_session_id)
+            title = session_db.get_next_title_in_lineage(current_title or "branch")
+
+        try:
+            session_db.create_session(
+                session_id=new_session_id,
+                source=source.platform.value if source.platform else "gateway",
+                model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
+                parent_session_id=parent_session_id,
+            )
+        except Exception as exc:
+            logger.error("Failed to create TheChat branch session: %s", exc)
+            return None
+
+        for msg in history:
+            try:
+                session_db.append_message(
+                    session_id=new_session_id,
+                    role=msg.get("role", "user"),
+                    content=msg.get("content"),
+                    tool_name=msg.get("tool_name") or msg.get("name"),
+                    tool_calls=msg.get("tool_calls"),
+                    tool_call_id=msg.get("tool_call_id"),
+                    finish_reason=msg.get("finish_reason"),
+                    reasoning=msg.get("reasoning"),
+                    reasoning_content=msg.get("reasoning_content"),
+                    reasoning_details=msg.get("reasoning_details"),
+                    codex_reasoning_items=msg.get("codex_reasoning_items"),
+                    codex_message_items=msg.get("codex_message_items"),
+                )
+            except Exception:
+                pass
+
+        try:
+            session_db.set_session_title(new_session_id, title)
+        except Exception:
+            pass
+
+        switched = self.session_store.switch_session(session_key, new_session_id)
+        if switched is None:
+            return None
+        self._clear_session_boundary_security_state(session_key)
+        self._evict_cached_agent(session_key)
+        return switched
+
     def _telegram_topic_mode_enabled(self, source: SessionSource) -> bool:
         """Return whether Telegram DM topic mode is active for this chat."""
         if source.platform != Platform.TELEGRAM or source.chat_type != "dm":
@@ -8888,6 +9120,17 @@ class GatewayRunner:
                     self._record_telegram_topic_binding(source, session_entry)
                 except Exception:
                     logger.debug("Failed to record Telegram topic binding", exc_info=True)
+        session_entry = self._apply_platform_session_continuity(
+            event,
+            source,
+            session_entry,
+        )
+        if not getattr(event, "hermes_session", None):
+            self._annotate_event_session(
+                event,
+                session_entry,
+                reason="message.started",
+            )
         if getattr(session_entry, "was_auto_reset", False):
             # Treat auto-reset as a full conversation boundary — drop every
             # session-scoped transient state so the fresh session does not
@@ -9531,6 +9774,11 @@ class GatewayRunner:
                 self._sync_telegram_topic_binding(
                     source, session_entry, reason="agent-result-compression",
                 )
+            self._annotate_event_session(
+                event,
+                session_entry,
+                reason="message.completed",
+            )
 
             # Prepend reasoning/thinking if display is enabled (per-platform)
             try:
@@ -10138,6 +10386,13 @@ class GatewayRunner:
                 self._record_telegram_topic_binding(source, new_entry)
             except Exception:
                 logger.debug("Failed to rebind Telegram topic after /new", exc_info=True)
+
+        if new_entry is not None:
+            self._annotate_event_session(
+                event,
+                new_entry,
+                reason="session.reset",
+            )
 
         # Fire plugin on_session_reset hook (new session guaranteed to exist)
         try:
@@ -13876,6 +14131,11 @@ class GatewayRunner:
 
         # Get the title for confirmation
         title = self._session_db.get_session_title(target_id) or name
+        self._annotate_event_session(
+            event,
+            new_entry,
+            reason="session.resumed",
+        )
 
         # Count messages for context
         history = self.session_store.load_transcript(target_id)
@@ -13970,6 +14230,11 @@ class GatewayRunner:
         if not new_entry:
             return t("gateway.branch.switch_failed")
         self._clear_session_boundary_security_state(session_key)
+        self._annotate_event_session(
+            event,
+            new_entry,
+            reason="branch.created",
+        )
 
         # Evict any cached agent for this session
         self._evict_cached_agent(session_key)
@@ -17517,6 +17782,17 @@ class GatewayRunner:
             }
         else:
             _status_thread_metadata = _source_message_metadata
+        if source.platform == Platform.THECHAT:
+            _thechat_session = {
+                "sessionId": session_id,
+                "sessionKey": session_key,
+                "lineageRootId": self._session_lineage_root_id(session_id),
+                "reason": "progress",
+                "source": "hermes",
+                "updatedAt": datetime.now().isoformat(),
+            }
+            _status_thread_metadata = dict(_status_thread_metadata or {})
+            _status_thread_metadata["session"] = _thechat_session
 
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
