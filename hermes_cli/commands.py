@@ -806,6 +806,108 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
     return all_commands[:max_commands], hidden_count + hidden_core_count
 
 
+# Commands that are meaningless on TheChat: /start acknowledges Telegram-style
+# platform pings and /topic manages Telegram DM topic sessions.
+_THECHAT_EXCLUDED_COMMANDS = frozenset({"start", "topic"})
+
+# TheChat description field caps at 256 chars server-side.
+_THECHAT_DESC_LIMIT = 256
+
+# TheChat allows lowercase a-z, 0-9, '_' and '-'; must start alphanumeric.
+_THECHAT_INVALID_CHARS = re.compile(r"[^a-z0-9_-]")
+
+
+def _sanitize_thechat_name(raw: str) -> str:
+    """Convert a command/skill/plugin name to a valid TheChat command name.
+
+    TheChat requires: 1-32 chars, lowercase a-z, digits, '_' or '-', starting
+    with a letter or digit.  Hyphens are kept as-is (unlike Telegram).
+    """
+    name = _THECHAT_INVALID_CHARS.sub("", raw.lower())
+    return name.strip("_-")
+
+
+def thechat_menu_commands(max_commands: int = 200) -> tuple[list[dict], int]:
+    """Return rich command entries for TheChat bot command registration.
+
+    TheChat accepts structured command metadata (``POST /bots/me/commands``,
+    Telegram setMyCommands-style), so unlike Telegram each entry keeps the
+    args hint, category, and aliases from the registry:
+
+        {"command": "new", "description": ..., "argsHint": "[name]",
+         "category": "Session", "aliases": ["reset"]}
+
+    Priority and trimming mirror :func:`telegram_menu_commands`: core
+    CommandDef commands first (everyday commands up front), then plugin
+    commands, then skills filling the remaining slots.
+
+    Returns:
+        (menu_commands, hidden_count) where hidden_count is the number of
+        commands omitted due to the cap.
+    """
+    overrides = _resolve_config_gates()
+    priority = {name: index for index, name in enumerate(_TELEGRAM_MENU_PRIORITY)}
+    core: list[dict] = []
+    for cmd in COMMAND_REGISTRY:
+        if not _is_gateway_available(cmd, overrides):
+            continue
+        if cmd.name in _THECHAT_EXCLUDED_COMMANDS:
+            continue
+        name = _sanitize_thechat_name(cmd.name)
+        if not name:
+            continue
+        entry: dict = {
+            "command": name,
+            "description": cmd.description[:_THECHAT_DESC_LIMIT],
+        }
+        if cmd.args_hint:
+            entry["argsHint"] = cmd.args_hint[:128]
+        if cmd.category:
+            entry["category"] = cmd.category[:64]
+        aliases = []
+        for alias in cmd.aliases:
+            sanitized = _sanitize_thechat_name(alias)
+            if sanitized and sanitized != name and sanitized not in aliases:
+                aliases.append(sanitized)
+        if aliases:
+            entry["aliases"] = aliases[:8]
+        core.append(entry)
+
+    # Same ordering rule as _prioritize_telegram_menu_commands: priority
+    # commands first (in priority-list order), the rest keep registry order.
+    core = [
+        entry
+        for _index, entry in sorted(
+            enumerate(core),
+            key=lambda item: (0, priority[item[1]["command"]])
+            if item[1]["command"] in priority
+            else (1, item[0]),
+        )
+    ]
+    hidden_core_count = max(0, len(core) - max_commands)
+    all_commands = core[:max_commands]
+
+    reserved_names = {entry["command"] for entry in all_commands}
+    remaining_slots = max(0, max_commands - len(all_commands))
+    entries, hidden_count = _collect_gateway_skill_entries(
+        platform="thechat",
+        max_slots=remaining_slots,
+        reserved_names=reserved_names,
+        desc_limit=_THECHAT_DESC_LIMIT,
+        sanitize_name=_sanitize_thechat_name,
+    )
+    for name, desc, cmd_key in entries:
+        all_commands.append(
+            {
+                "command": name,
+                # TheChat rejects empty descriptions.
+                "description": desc or f"Run /{name}",
+                "category": "Skills" if cmd_key else "Plugins",
+            }
+        )
+    return all_commands, hidden_count + hidden_core_count
+
+
 def discord_skill_commands(
     max_slots: int,
     reserved_names: set[str],

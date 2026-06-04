@@ -595,7 +595,8 @@ async def test_connect_defaults_to_polling_without_webhook_url(monkeypatch):
     await thechat.asyncio.sleep(0)
     assert polled == [True]
     assert adapter.webhook_url == ""
-    assert fake_client.posts == []
+    # No webhook registration — only the slash command registration call.
+    assert [post["path"] for post in fake_client.posts] == ["/bots/me/commands"]
 
     await adapter.disconnect()
     assert fake_client.closed is True
@@ -627,17 +628,85 @@ async def test_connect_starts_webhook_server_and_registers_generic_bot_webhook(
 
     assert await adapter.connect() is True
     assert started == ["http://gateway.test/thechat/webhook"]
-    assert fake_client.posts == [
-        {
-            "path": "/bots/me/webhook",
-            "json": {"url": "http://gateway.test/thechat/webhook"},
-        }
+    assert [post["path"] for post in fake_client.posts] == [
+        "/bots/me/webhook",
+        "/bots/me/commands",
     ]
+    assert fake_client.posts[0]["json"] == {
+        "url": "http://gateway.test/thechat/webhook"
+    }
     assert adapter._poll_task is None
     assert not hasattr(adapter, "_ws_task")
 
     await adapter.disconnect()
     assert fake_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_connect_registers_slash_commands(monkeypatch):
+    fake_client = _FakeClient()
+    monkeypatch.setattr(thechat.httpx, "AsyncClient", lambda **_kwargs: fake_client)
+
+    adapter = TheChatAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="bot-token",
+            extra={"base_url": "http://thechat.test"},
+        )
+    )
+
+    async def poll_loop():
+        return None
+
+    monkeypatch.setattr(adapter, "_poll_loop", poll_loop)
+
+    assert await adapter.connect() is True
+    registration = next(
+        post for post in fake_client.posts if post["path"] == "/bots/me/commands"
+    )
+    commands = registration["json"]["commands"]
+    by_name = {entry["command"]: entry for entry in commands}
+
+    assert by_name["new"]["aliases"] == ["reset"]
+    assert by_name["new"]["argsHint"] == "[name]"
+    assert "help" in by_name
+    assert "stop" in by_name
+    # CLI-only and Telegram-specific commands never reach TheChat.
+    assert "quit" not in by_name
+    assert "start" not in by_name
+    assert "topic" not in by_name
+
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_connect_succeeds_when_command_registration_fails(monkeypatch):
+    class _FailingCommandsClient(_FakeClient):
+        async def post(self, path, json):
+            if path == "/bots/me/commands":
+                raise httpx.HTTPError("404 not found")
+            return await super().post(path, json=json)
+
+    fake_client = _FailingCommandsClient()
+    monkeypatch.setattr(thechat.httpx, "AsyncClient", lambda **_kwargs: fake_client)
+
+    adapter = TheChatAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="bot-token",
+            extra={"base_url": "http://thechat.test"},
+        )
+    )
+
+    async def poll_loop():
+        return None
+
+    monkeypatch.setattr(adapter, "_poll_loop", poll_loop)
+
+    assert await adapter.connect() is True
+    assert adapter.is_connected
+
+    await adapter.disconnect()
 
 
 @pytest.mark.asyncio

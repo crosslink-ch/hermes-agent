@@ -136,6 +136,8 @@ class TheChatAdapter(BasePlatformAdapter):
             await self.disconnect()
             return False
 
+        await self._register_commands()
+
         self._mark_connected()
         if self.webhook_url:
             logger.info(
@@ -564,6 +566,36 @@ class TheChatAdapter(BasePlatformAdapter):
             "/bots/me/webhook", json={"url": self.webhook_url}
         )
         response.raise_for_status()
+
+    async def _register_commands(self) -> None:
+        """Register the gateway's slash commands with TheChat.
+
+        Telegram setMyCommands-style: TheChat stores the list on the bot
+        record and surfaces it as a command menu in its clients.  Best-effort
+        — older TheChat servers without the endpoint must not break connect.
+        """
+        if not self._client:
+            return
+        try:
+            from hermes_cli.commands import thechat_menu_commands
+
+            commands, hidden_count = thechat_menu_commands()
+            response = await self._client.post(
+                "/bots/me/commands", json={"commands": commands}
+            )
+            if getattr(response, "status_code", None) == 404:
+                logger.info(
+                    "TheChat: server does not support command registration; skipping"
+                )
+                return
+            response.raise_for_status()
+            logger.info(
+                "TheChat: registered %d slash commands (%d hidden by cap)",
+                len(commands),
+                hidden_count,
+            )
+        except Exception as exc:
+            logger.warning("TheChat: failed to register slash commands: %s", exc)
 
     def _is_authorized_webhook_request(self, headers: Any) -> bool:
         return headers.get("Authorization", "") == f"Bearer {self.token}"
