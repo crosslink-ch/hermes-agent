@@ -556,6 +556,41 @@ async def test_send_invocation_progress_prefers_message_metadata_over_latest_con
     ]
 
 
+@pytest.mark.asyncio
+async def test_send_exec_approval_posts_structured_approval_request():
+    adapter = _make_adapter()
+    context = _context("invocation-first")
+    adapter._contexts["chat-1"] = context
+
+    result = await adapter.send_exec_approval(
+        "chat-1",
+        "rm -rf /important",
+        session_key="agent:main:thechat:dm:chat-1",
+        description="recursive delete",
+    )
+
+    assert result.success is True
+    assert adapter._client.posts == [
+        {
+            "path": "/hermes-platform/invocations/invocation-first/progress",
+            "json": {
+                "botId": "bot-1",
+                "conversationId": "conversation-1",
+                "type": "approval.request",
+                "status": "waiting",
+                "label": "Command approval required",
+                "preview": "rm -rf /important",
+                "payload": {
+                    "command": "rm -rf /important",
+                    "description": "recursive delete",
+                    "sessionKey": "agent:main:thechat:dm:chat-1",
+                    "choices": ["once", "session", "always", "deny"],
+                },
+            },
+        }
+    ]
+
+
 def test_gateway_thechat_metadata_carries_originating_message_id():
     runner = object.__new__(GatewayRunner)
     source = SessionSource(

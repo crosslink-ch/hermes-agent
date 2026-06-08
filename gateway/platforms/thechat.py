@@ -438,6 +438,33 @@ class TheChatAdapter(BasePlatformAdapter):
                 logger.debug("TheChat: failed to send invocation progress", exc_info=True)
                 return SendResult(success=False, error=str(exc), retryable=True)
 
+    async def send_exec_approval(
+        self,
+        chat_id: str,
+        command: str,
+        session_key: str,
+        description: str = "dangerous command",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send command approval as structured TheChat invocation progress."""
+        command_preview = command[:4000] + "..." if len(command) > 4000 else command
+        return await self.send_invocation_progress(
+            chat_id,
+            {
+                "type": "approval.request",
+                "status": "waiting",
+                "label": "Command approval required",
+                "preview": command_preview,
+                "payload": {
+                    "command": command,
+                    "description": description,
+                    "sessionKey": session_key,
+                    "choices": ["once", "session", "always", "deny"],
+                },
+            },
+            metadata=metadata,
+        )
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         context = self._contexts.get(chat_id) or {}
         return {
