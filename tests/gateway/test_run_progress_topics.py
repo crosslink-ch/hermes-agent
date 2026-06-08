@@ -694,6 +694,11 @@ class TheChatStructuredActivityAgent:
             "Drafting a response",
             None,
         )
+        self.tool_start_callback(
+            "call-skill",
+            "skill_view",
+            {"name": "html-math-study-notes"},
+        )
         self.tool_start_callback("call-1", "terminal", {"command": "pwd"})
         self.tool_progress_callback(
             "tool.completed",
@@ -851,6 +856,7 @@ async def test_thechat_structured_activity_keeps_notices_reasoning_and_tools_dis
         "notice.error",
         "reasoning.available",
         "tool.started",
+        "tool.started",
         "tool.completed",
     ]
     assert not any(event_type.startswith("status.") for event_type in event_types)
@@ -858,8 +864,10 @@ async def test_thechat_structured_activity_keeps_notices_reasoning_and_tools_dis
     assert adapter.progress_events[1]["event"]["status"] == "warning"
     assert adapter.progress_events[2]["event"]["status"] == "failed"
     assert adapter.progress_events[3]["event"]["payload"] == {"text": "Drafting a response"}
-    assert adapter.progress_events[4]["event"]["toolName"] == "terminal"
-    assert adapter.progress_events[5]["event"]["payload"]["duration"] == 0.4
+    assert adapter.progress_events[4]["event"]["toolName"] == "skill_view"
+    assert adapter.progress_events[4]["event"]["label"] == "html-math-study-notes"
+    assert adapter.progress_events[5]["event"]["toolName"] == "terminal"
+    assert adapter.progress_events[6]["event"]["payload"]["duration"] == 0.4
 
 
 @pytest.mark.asyncio
