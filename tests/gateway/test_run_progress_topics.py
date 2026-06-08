@@ -121,6 +121,24 @@ class NonEditingProgressCaptureAdapter(ProgressCaptureAdapter):
         raise AssertionError("non-editable adapters should not receive edit_message calls")
 
 
+class StructuredProgressCaptureAdapter(ProgressCaptureAdapter):
+    SUPPORTS_MESSAGE_EDITING = False
+
+    def __init__(self, platform=Platform.THECHAT):
+        super().__init__(platform=platform)
+        self.progress_events = []
+
+    async def send_invocation_progress(self, chat_id, event, metadata=None) -> SendResult:
+        self.progress_events.append(
+            {
+                "chat_id": chat_id,
+                "event": event,
+                "metadata": metadata,
+            }
+        )
+        return SendResult(success=True, message_id=f"progress-{len(self.progress_events)}")
+
+
 class FakeAgent:
     def __init__(self, **kwargs):
         # Capture anything passed via kwargs (older code path) but don't
@@ -653,6 +671,46 @@ class BackgroundReviewAgent:
         }
 
 
+class TheChatStructuredActivityAgent:
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tool_start_callback = kwargs.get("tool_start_callback")
+        self.tool_complete_callback = kwargs.get("tool_complete_callback")
+        self.status_callback = kwargs.get("status_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        assert self.status_callback is not None
+        assert self.tool_progress_callback is not None
+        assert self.tool_start_callback is not None
+        assert self.tool_complete_callback is not None
+
+        self.status_callback("lifecycle", "Codex gpt-5.5 caps context at 272K")
+        self.status_callback("warn", "Compression provider is unavailable")
+        self.status_callback("error", "Compression provider failed")
+        self.tool_progress_callback(
+            "reasoning.available",
+            "_thinking",
+            "Drafting a response",
+            None,
+        )
+        self.tool_start_callback("call-1", "terminal", {"command": "pwd"})
+        self.tool_progress_callback(
+            "tool.completed",
+            "terminal",
+            None,
+            None,
+            duration=0.4,
+            is_error=False,
+        )
+        self.tool_complete_callback("call-1", "terminal", {"command": "pwd"}, "ok")
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class VerboseAgent:
     """Agent that emits a tool call with args whose JSON exceeds 200 chars."""
     LONG_CODE = "x" * 300
@@ -767,6 +825,41 @@ async def test_run_agent_rolls_progress_bubble_before_platform_limit(monkeypatch
     assert adapter.oversized_edits == []
     all_bubbles = [call["content"] for call in adapter.sent + adapter.edits]
     assert all(len(text) <= adapter.MAX_MESSAGE_LENGTH for text in all_bubbles)
+
+
+@pytest.mark.asyncio
+async def test_thechat_structured_activity_keeps_notices_reasoning_and_tools_distinct(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        TheChatStructuredActivityAgent,
+        session_id="sess-thechat-structured-activity",
+        config_data={"display": {"tool_progress": "off"}},
+        platform=Platform.THECHAT,
+        chat_id="conversation:conversation-1:bot:bot-1",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=StructuredProgressCaptureAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    assert isinstance(adapter, StructuredProgressCaptureAdapter)
+    event_types = [call["event"]["type"] for call in adapter.progress_events]
+    assert event_types == [
+        "notice.lifecycle",
+        "notice.warning",
+        "notice.error",
+        "reasoning.available",
+        "tool.started",
+        "tool.completed",
+    ]
+    assert not any(event_type.startswith("status.") for event_type in event_types)
+    assert adapter.progress_events[0]["event"]["status"] == "info"
+    assert adapter.progress_events[1]["event"]["status"] == "warning"
+    assert adapter.progress_events[2]["event"]["status"] == "failed"
+    assert adapter.progress_events[3]["event"]["payload"] == {"text": "Drafting a response"}
+    assert adapter.progress_events[4]["event"]["toolName"] == "terminal"
+    assert adapter.progress_events[5]["event"]["payload"]["duration"] == 0.4
 
 
 @pytest.mark.asyncio

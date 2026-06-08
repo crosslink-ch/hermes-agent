@@ -14023,17 +14023,20 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             _status_thread_metadata = dict(_status_thread_metadata or {})
             _status_thread_metadata["session"] = _thechat_session
 
+        def _thechat_notice_event_shape(event_type: str) -> tuple[str, str]:
+            normalized = re.sub(
+                r"[^a-z0-9_-]+",
+                "-",
+                str(event_type or "lifecycle").strip().lower(),
+            ).strip("-") or "lifecycle"
+            if normalized == "error":
+                return "notice.error", "failed"
+            if normalized in {"warn", "warning"}:
+                return "notice.warning", "warning"
+            return f"notice.{normalized}", "info"
+
         def _status_callback_sync(event_type: str, message: str) -> None:
             if not _status_adapter or not _run_still_current():
-                return
-            if source.platform == Platform.THECHAT and _structured_progress_supported:
-                _schedule_structured_progress({
-                    "type": f"status.{event_type}",
-                    "status": "running",
-                    "label": message,
-                    "preview": message,
-                    "payload": {"eventType": event_type},
-                })
                 return
             prepared_message = _prepare_gateway_status_message(
                 source.platform,
@@ -14047,6 +14050,16 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     event_type,
                     _redact_gateway_user_facing_secrets(str(message or ""))[:160],
                 )
+                return
+            if source.platform == Platform.THECHAT and _structured_progress_supported:
+                notice_type, notice_status = _thechat_notice_event_shape(event_type)
+                _schedule_structured_progress({
+                    "type": notice_type,
+                    "status": notice_status,
+                    "label": prepared_message,
+                    "preview": prepared_message,
+                    "payload": {"eventType": event_type},
+                })
                 return
             _fut = safe_schedule_threadsafe(
                 _send_or_update_status_coro(_status_adapter, _status_chat_id, event_type, prepared_message, _status_thread_metadata),
