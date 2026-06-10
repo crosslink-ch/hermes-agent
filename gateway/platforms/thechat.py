@@ -97,6 +97,9 @@ class TheChatAdapter(BasePlatformAdapter):
         self._webhook_tasks: set[asyncio.Task] = set()
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self._event_contexts: Dict[str, Dict[str, Any]] = {}
+        # session_key -> context of the invocation that requested an exec
+        # approval; lets approval.resolved reach the original invocation.
+        self._approval_contexts: Dict[str, Dict[str, Any]] = {}
 
     def public_http_routes(self) -> list[dict]:
         if not self.webhook_url:
@@ -388,8 +391,10 @@ class TheChatAdapter(BasePlatformAdapter):
         chat_id: str,
         event: Dict[str, Any],
         metadata: Optional[Dict[str, Any]] = None,
+        *,
+        context: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        context = self._context_for_send(chat_id, metadata=metadata)
+        context = context or self._context_for_send(chat_id, metadata=metadata)
         if not context:
             return SendResult(
                 success=False, error=f"No TheChat context for chat {chat_id}"
@@ -448,6 +453,15 @@ class TheChatAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send command approval as structured TheChat invocation progress."""
         command_preview = command[:4000] + "..." if len(command) > 4000 else command
+        # Remember which invocation asked, keyed by session. The /approve or
+        # /deny reply arrives as its own TheChat invocation and replaces the
+        # per-chat context, so the later approval.resolved event must be
+        # routed through this snapshot to land on the same invocation as the
+        # approval.request. Overwritten by the next request for the session;
+        # never used unless the gateway actually resolved a blocked approval.
+        context = self._context_for_send(chat_id, metadata=metadata)
+        if context:
+            self._approval_contexts[session_key] = context
         return await self.send_invocation_progress(
             chat_id,
             {
@@ -463,6 +477,47 @@ class TheChatAdapter(BasePlatformAdapter):
                 },
             },
             metadata=metadata,
+            context=context,
+        )
+
+    async def send_approval_resolution(
+        self,
+        chat_id: str,
+        session_key: str,
+        choice: str,
+        resolved_count: int = 1,
+        resolve_all: bool = False,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Publish approval.resolved progress so clients dismiss the card.
+
+        TheChat resolves approval cards oldest-first per ``sessionKey``,
+        mirroring ``resolve_gateway_approval``; ``resolveAll`` collapses every
+        pending card for the session at once.
+        """
+        context = self._approval_contexts.get(session_key) or self._context_for_send(
+            chat_id, metadata=metadata
+        )
+        if not context:
+            return SendResult(
+                success=False,
+                error=f"No TheChat approval context for session {session_key}",
+            )
+        return await self.send_invocation_progress(
+            chat_id,
+            {
+                "type": "approval.resolved",
+                "status": "completed",
+                "label": "Approval resolved",
+                "payload": {
+                    "choice": choice,
+                    "sessionKey": session_key,
+                    "resolveAll": resolve_all,
+                    "resolvedCount": resolved_count,
+                },
+            },
+            metadata=metadata,
+            context=context,
         )
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:

@@ -591,6 +591,83 @@ async def test_send_exec_approval_posts_structured_approval_request():
     ]
 
 
+@pytest.mark.asyncio
+async def test_send_approval_resolution_targets_requesting_invocation():
+    """approval.resolved must land on the invocation that sent approval.request.
+
+    The /approve reply arrives as its own TheChat invocation and replaces the
+    per-chat context, so the adapter has to remember the requesting context
+    per session key.
+    """
+    adapter = _make_adapter()
+    original = _context("invocation-original")
+    adapter._contexts["chat-1"] = original
+
+    await adapter.send_exec_approval(
+        "chat-1",
+        "rm -rf /important",
+        session_key="agent:main:thechat:dm:chat-1",
+    )
+
+    # The /approve message overwrites the chat context with its own invocation.
+    adapter._contexts["chat-1"] = _context("invocation-approve-command")
+
+    result = await adapter.send_approval_resolution(
+        "chat-1",
+        session_key="agent:main:thechat:dm:chat-1",
+        choice="session",
+        resolved_count=1,
+    )
+
+    assert result.success is True
+    resolution_post = adapter._client.posts[-1]
+    assert resolution_post["path"] == (
+        "/hermes-platform/invocations/invocation-original/progress"
+    )
+    assert resolution_post["json"]["type"] == "approval.resolved"
+    assert resolution_post["json"]["payload"] == {
+        "choice": "session",
+        "sessionKey": "agent:main:thechat:dm:chat-1",
+        "resolveAll": False,
+        "resolvedCount": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_send_approval_resolution_falls_back_to_chat_context():
+    adapter = _make_adapter()
+    adapter._contexts["chat-1"] = _context("invocation-current")
+
+    result = await adapter.send_approval_resolution(
+        "chat-1",
+        session_key="agent:main:thechat:dm:chat-1",
+        choice="once",
+        resolved_count=2,
+        resolve_all=True,
+    )
+
+    assert result.success is True
+    assert adapter._client.posts[-1]["path"] == (
+        "/hermes-platform/invocations/invocation-current/progress"
+    )
+    assert adapter._client.posts[-1]["json"]["payload"]["resolveAll"] is True
+    assert adapter._client.posts[-1]["json"]["payload"]["resolvedCount"] == 2
+
+
+@pytest.mark.asyncio
+async def test_send_approval_resolution_without_any_context_fails():
+    adapter = _make_adapter()
+
+    result = await adapter.send_approval_resolution(
+        "chat-unknown",
+        session_key="agent:main:thechat:dm:chat-unknown",
+        choice="once",
+    )
+
+    assert result.success is False
+    assert adapter._client.posts == []
+
+
 def test_gateway_thechat_metadata_carries_originating_message_id():
     runner = object.__new__(GatewayRunner)
     source = SessionSource(

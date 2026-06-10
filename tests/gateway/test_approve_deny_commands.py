@@ -326,6 +326,119 @@ class TestDenyCommand:
 
 
 # ------------------------------------------------------------------
+# Approval resolution notifications (adapters with approval cards)
+# ------------------------------------------------------------------
+
+
+class _ApprovalCardAdapter:
+    """Adapter whose class supports send_approval_resolution (like TheChat).
+
+    A plain class (not MagicMock) because the dispatch capability-checks the
+    adapter class, mirroring the send_exec_approval pattern.
+    """
+
+    def __init__(self):
+        self.resume_typing_for_chat = MagicMock()
+        self.resolution_calls = []
+
+    async def send_approval_resolution(self, **kwargs):
+        self.resolution_calls.append(kwargs)
+
+
+class TestApprovalResolutionNotice:
+
+    def setup_method(self):
+        _clear_approval_state()
+
+    @pytest.mark.asyncio
+    async def test_approve_notifies_capable_adapter(self):
+        """/approve emits a resolution notice so approval cards dismiss."""
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        adapter = _ApprovalCardAdapter()
+        runner.adapters = {Platform.TELEGRAM: adapter}
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+        _gateway_queues[session_key] = [_ApprovalEntry({"command": "cmd"})]
+
+        await runner._handle_approve_command(_make_event("/approve session"))
+
+        assert adapter.resolution_calls == [
+            {
+                "chat_id": source.chat_id,
+                "session_key": session_key,
+                "choice": "session",
+                "resolved_count": 1,
+                "resolve_all": False,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_deny_all_notifies_capable_adapter(self):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        adapter = _ApprovalCardAdapter()
+        runner.adapters = {Platform.TELEGRAM: adapter}
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+        _gateway_queues[session_key] = [
+            _ApprovalEntry({"command": "cmd1"}),
+            _ApprovalEntry({"command": "cmd2"}),
+        ]
+
+        await runner._handle_deny_command(_make_event("/deny all"))
+
+        assert adapter.resolution_calls == [
+            {
+                "chat_id": source.chat_id,
+                "session_key": session_key,
+                "choice": "deny",
+                "resolved_count": 2,
+                "resolve_all": True,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_notice_failure_does_not_break_approve_reply(self):
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        class _FailingAdapter(_ApprovalCardAdapter):
+            async def send_approval_resolution(self, **kwargs):
+                raise RuntimeError("network down")
+
+        runner = _make_runner()
+        runner.adapters = {Platform.TELEGRAM: _FailingAdapter()}
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+        entry = _ApprovalEntry({"command": "cmd"})
+        _gateway_queues[session_key] = [entry]
+
+        result = await runner._handle_approve_command(_make_event("/approve"))
+
+        assert "approved" in result.lower()
+        assert entry.event.is_set()
+
+    @pytest.mark.asyncio
+    async def test_adapters_without_capability_are_skipped(self):
+        """Plain adapters (MagicMock here) must not receive resolution calls."""
+        from tools.approval import _ApprovalEntry, _gateway_queues
+
+        runner = _make_runner()
+        source = _make_source()
+        session_key = runner._session_key_for_source(source)
+        entry = _ApprovalEntry({"command": "cmd"})
+        _gateway_queues[session_key] = [entry]
+
+        result = await runner._handle_approve_command(_make_event("/approve"))
+
+        assert "approved" in result.lower()
+        adapter = runner.adapters[Platform.TELEGRAM]
+        assert not adapter.send_approval_resolution.called
+
+
+# ------------------------------------------------------------------
 # Bare "yes" must NOT trigger approval
 # ------------------------------------------------------------------
 
