@@ -62,7 +62,51 @@ def test_thechat_adapter_prefers_live_event_session_over_cached_context_session(
     assert context["session"] == payload
 
 
-def test_thechat_continuity_session_id_switches_gateway_session():
+def test_thechat_continuity_session_id_is_advisory_for_normal_messages():
+    runner = object.__new__(GatewayRunner)
+    switch_calls = []
+    runner._session_db = SimpleNamespace(
+        resolve_resume_session_id=lambda session_id: (_ for _ in ()).throw(
+            AssertionError("normal sessionId continuity must not resolve/switch")
+        ),
+        get_session=lambda session_id: (_ for _ in ()).throw(
+            AssertionError("normal sessionId continuity must not fetch sessions")
+        ),
+    )
+    runner.session_store = SimpleNamespace(
+        switch_session=lambda session_key, target_session_id: switch_calls.append(
+            (session_key, target_session_id)
+        )
+    )
+
+    source = SessionSource(
+        platform=Platform.THECHAT,
+        chat_id="thechat:conversation:1",
+        user_id="user-1",
+    )
+    event = MessageEvent(
+        text="continue",
+        message_type=MessageType.TEXT,
+        source=source,
+        raw_message={"continuity": {"sessionId": "stale-or-client-side-session"}},
+    )
+    current_entry = SimpleNamespace(
+        session_id="derived-from-session-key",
+        session_key="thechat-key",
+    )
+
+    result = runner._apply_platform_session_continuity(
+        event,
+        source,
+        current_entry,
+    )
+
+    assert result is current_entry
+    assert switch_calls == []
+    assert not hasattr(event, "hermes_session")
+
+
+def test_thechat_explicit_resume_session_id_switches_gateway_session():
     runner = object.__new__(GatewayRunner)
     runner._session_db = SimpleNamespace(
         resolve_resume_session_id=lambda session_id: f"{session_id}-tip",
@@ -88,7 +132,7 @@ def test_thechat_continuity_session_id_switches_gateway_session():
         text="continue",
         message_type=MessageType.TEXT,
         source=source,
-        raw_message={"continuity": {"sessionId": "session-2"}},
+        raw_message={"continuity": {"resumeSessionId": "session-2"}},
     )
     current_entry = SimpleNamespace(
         session_id="session-1",

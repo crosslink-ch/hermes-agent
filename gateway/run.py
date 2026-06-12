@@ -2497,6 +2497,56 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 return text
         return None
 
+    def _explicit_thechat_resume_session_id(self, continuity: Dict[str, Any]) -> Optional[str]:
+        """Return a TheChat session switch target only for explicit resume intents.
+
+        TheChat includes the latest Hermes ``sessionId`` in normal continuity
+        payloads so the UI can display/debug the Hermes linkage.  That field is
+        advisory for ordinary thread continuation: the gateway should derive the
+        active Hermes session from the stable platform session key
+        (conversation/thread/user), not let stale client metadata override it.
+
+        Explicit navigation is different.  If TheChat deliberately asks to
+        resume/switch to a historical Hermes session, it must use a dedicated
+        field or intent marker.  Branching uses ``branchFromSessionId`` and is
+        handled separately before this helper.
+        """
+        explicit = self._text_continuity_field(
+            continuity,
+            "resumeSessionId",
+            "resume_session_id",
+            "switchToSessionId",
+            "switch_to_session_id",
+            "targetSessionId",
+            "target_session_id",
+        )
+        if explicit:
+            return explicit
+
+        intent = (
+            self._text_continuity_field(
+                continuity,
+                "action",
+                "mode",
+                "intent",
+            )
+            or ""
+        ).strip().lower().replace("-", "_").replace(".", "_")
+        if intent in {
+            "resume",
+            "resume_session",
+            "session_resume",
+            "switch_session",
+            "session_switch",
+            "restore_session",
+        }:
+            return self._text_continuity_field(
+                continuity,
+                "sessionId",
+                "session_id",
+            )
+        return None
+
     def _session_lineage_root_id(self, session_id: str) -> str:
         if not session_id:
             return session_id
@@ -2581,11 +2631,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 )
                 return branched_entry
 
-        requested_session_id = self._text_continuity_field(
-            continuity,
-            "sessionId",
-            "session_id",
-        )
+        requested_session_id = self._explicit_thechat_resume_session_id(continuity)
         if (
             requested_session_id
             and requested_session_id != getattr(session_entry, "session_id", None)
