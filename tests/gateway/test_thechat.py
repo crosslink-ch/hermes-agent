@@ -557,6 +557,51 @@ async def test_send_invocation_progress_prefers_message_metadata_over_latest_con
 
 
 @pytest.mark.asyncio
+async def test_send_session_title_update_posts_structured_event_with_session_payload():
+    adapter = _make_adapter()
+    context = _context("invocation-title")
+    context["thread_id"] = "thread-1"
+    adapter._contexts[adapter._context_key("chat-1", "thread-1")] = context
+
+    result = await adapter.send_session_title_update(
+        "chat-1",
+        "Generated Task Title",
+        "session-1",
+        session_key="session-key-1",
+        metadata={"thread_id": "thread-1"},
+    )
+
+    assert result.success is True
+    client = cast(_FakeClient, adapter._client)
+    assert client.posts == [
+        {
+            "path": "/hermes-platform/invocations/invocation-title/progress",
+            "json": {
+                "botId": "bot-1",
+                "conversationId": "conversation-1",
+                "type": "session.title",
+                "status": "completed",
+                "label": "Generated Task Title",
+                "preview": "Generated Task Title",
+                "payload": {
+                    "title": "Generated Task Title",
+                    "sessionId": "session-1",
+                    "sessionKey": "session-key-1",
+                },
+                "session": {
+                    "sessionId": "session-1",
+                    "sessionKey": "session-key-1",
+                    "title": "Generated Task Title",
+                    "reason": "session.title",
+                    "source": "hermes",
+                },
+                "threadId": "thread-1",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_send_exec_approval_posts_structured_approval_request():
     adapter = _make_adapter()
     context = _context("invocation-first")
@@ -680,6 +725,71 @@ def test_gateway_thechat_metadata_carries_originating_message_id():
     assert runner._thread_metadata_for_source(source, "message-original") == {
         "message_id": "message-original"
     }
+
+
+@pytest.mark.asyncio
+async def test_gateway_thechat_auto_title_callback_sends_after_context_cleanup():
+    runner = object.__new__(GatewayRunner)
+    adapter = _make_adapter()
+    context = _context("invocation-title")
+    context["thread_id"] = "thread-1"
+    adapter._contexts[adapter._context_key("chat-1", "thread-1")] = context
+    runner.adapters = {Platform.THECHAT: adapter}
+
+    source = SessionSource(
+        platform=Platform.THECHAT,
+        chat_id="chat-1",
+        chat_type="dm",
+        user_id="user-1",
+        thread_id="thread-1",
+        message_id="message-1",
+    )
+
+    callback = runner._make_thechat_session_title_callback(
+        source,
+        "session-1",
+        session_key="session-key-1",
+        event_message_id="message-1",
+    )
+
+    assert callable(callback)
+    # The real title generation callback can run after on_processing_complete
+    # removes live TheChat contexts, so the runner snapshots the context before
+    # handing the callback to maybe_auto_title.
+    adapter._contexts.clear()
+    adapter._event_contexts.clear()
+
+    callback("Generated Task Title")
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    client = cast(_FakeClient, adapter._client)
+    assert client.posts == [
+        {
+            "path": "/hermes-platform/invocations/invocation-title/progress",
+            "json": {
+                "botId": "bot-1",
+                "conversationId": "conversation-1",
+                "type": "session.title",
+                "status": "completed",
+                "label": "Generated Task Title",
+                "preview": "Generated Task Title",
+                "payload": {
+                    "title": "Generated Task Title",
+                    "sessionId": "session-1",
+                    "sessionKey": "session-key-1",
+                },
+                "session": {
+                    "sessionId": "session-1",
+                    "sessionKey": "session-key-1",
+                    "title": "Generated Task Title",
+                    "reason": "session.title",
+                    "source": "hermes",
+                },
+                "threadId": "thread-1",
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

@@ -42,7 +42,7 @@ from collections import OrderedDict
 from contextvars import copy_context
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Optional, Any, List, Union
+from typing import Dict, Optional, Any, List, Union, Coroutine, cast
 
 # account_usage imports the OpenAI SDK chain (~230 ms). Only needed by
 # /usage; we still import it at module top in the gateway because test
@@ -10754,6 +10754,163 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             return value.strip().lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
+    def _make_thechat_session_title_callback(
+        self,
+        source: SessionSource,
+        session_id: str,
+        *,
+        session_key: Optional[str] = None,
+        event_message_id: Optional[str] = None,
+    ):
+        """Build a title callback that propagates generated task titles to TheChat."""
+        if (
+            getattr(source, "platform", None) != Platform.THECHAT
+            or not getattr(source, "thread_id", None)
+            or not session_id
+        ):
+            return None
+
+        adapter = getattr(self, "adapters", {}).get(Platform.THECHAT)
+        sender = getattr(adapter, "send_session_title_update", None) if adapter else None
+        if not callable(sender):
+            return None
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = getattr(self, "_gateway_loop", None)
+        if loop is None or loop.is_closed():
+            return None
+
+        try:
+            copied_source = dataclasses.replace(source)
+        except Exception:
+            copied_source = source
+
+        metadata = self._thread_metadata_for_source(
+            copied_source,
+            event_message_id or getattr(copied_source, "message_id", None),
+        ) or {}
+        metadata = dict(metadata)
+        existing_session = metadata.get("session")
+        session_payload: Dict[str, Any] = {}
+        if isinstance(existing_session, dict):
+            session_payload.update(existing_session)
+        session_payload.update(
+            {
+                "sessionId": str(session_id),
+                "reason": "session.title",
+                "source": "hermes",
+            }
+        )
+        if session_key:
+            session_payload["sessionKey"] = str(session_key)
+        metadata["session"] = session_payload
+
+        context_snapshot: Optional[Dict[str, Any]] = None
+        context_provider = getattr(adapter, "_context_for_send", None)
+        if callable(context_provider):
+            try:
+                context = context_provider(copied_source.chat_id, metadata=metadata)
+                if isinstance(context, dict):
+                    context_snapshot = dict(context)
+            except Exception:
+                logger.debug(
+                    "Failed to snapshot TheChat context for session title update",
+                    exc_info=True,
+                )
+
+        def _callback(title: str) -> None:
+            self._schedule_thechat_session_title_update(
+                copied_source,
+                session_id,
+                title,
+                session_key=session_key,
+                metadata=metadata,
+                context=context_snapshot,
+                loop=loop,
+            )
+
+        return _callback
+
+    def _schedule_thechat_session_title_update(
+        self,
+        source: SessionSource,
+        session_id: str,
+        title: str,
+        *,
+        session_key: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        context: Optional[Dict[str, Any]] = None,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+    ) -> None:
+        """Schedule a structured TheChat session.title event from auto-title."""
+        title = str(title or "").strip()
+        if (
+            not title
+            or not session_id
+            or getattr(source, "platform", None) != Platform.THECHAT
+            or not getattr(source, "thread_id", None)
+        ):
+            return
+
+        adapter = getattr(self, "adapters", {}).get(Platform.THECHAT)
+        sender = getattr(adapter, "send_session_title_update", None) if adapter else None
+        if not callable(sender):
+            return
+
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = getattr(self, "_gateway_loop", None)
+        if loop is None or loop.is_closed():
+            return
+
+        metadata = dict(metadata or self._thread_metadata_for_source(source) or {})
+        existing_session = metadata.get("session")
+        session_payload: Dict[str, Any] = {}
+        if isinstance(existing_session, dict):
+            session_payload.update(existing_session)
+        session_payload.update(
+            {
+                "sessionId": str(session_id),
+                "title": title,
+                "reason": "session.title",
+                "source": "hermes",
+            }
+        )
+        if session_key:
+            session_payload["sessionKey"] = str(session_key)
+        metadata["session"] = session_payload
+
+        future = safe_schedule_threadsafe(
+            cast(
+                Coroutine[Any, Any, Any],
+                sender(
+                    source.chat_id,
+                    title,
+                    str(session_id),
+                    session_key=str(session_key) if session_key else None,
+                    metadata=metadata,
+                    context=context,
+                ),
+            ),
+            loop,
+            logger=logger,
+            log_message="TheChat session title update failed to schedule",
+        )
+        if future is None:
+            return
+
+        def _log_title_update_failure(fut) -> None:
+            try:
+                fut.result()
+            except Exception:
+                logger.debug("TheChat session title update failed", exc_info=True)
+
+        future.add_done_callback(_log_title_update_failure)
+
     def _schedule_telegram_topic_title_rename(
         self,
         source: SessionSource,
@@ -15076,6 +15233,18 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                             effective_session_id,
                             title,
                         )
+                    elif (
+                        getattr(source, "platform", None) == Platform.THECHAT
+                        and getattr(source, "thread_id", None)
+                    ):
+                        thechat_title_callback = self._make_thechat_session_title_callback(
+                            source,
+                            effective_session_id,
+                            session_key=session_key,
+                            event_message_id=event_message_id,
+                        )
+                        if thechat_title_callback is not None:
+                            maybe_auto_title_kwargs["title_callback"] = thechat_title_callback
                     maybe_auto_title(
                         self._session_db,
                         effective_session_id,

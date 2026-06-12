@@ -346,6 +346,7 @@ class TheChatAdapter(BasePlatformAdapter):
             ("branchFromThreadId", "branch_from_thread_id"),
             ("branchFromLineageRootId", "branch_from_lineage_root_id"),
             ("branchTitle", "branch_title"),
+            ("title", "title"),
         ):
             field_value = _field(camel, snake)
             if field_value:
@@ -442,6 +443,68 @@ class TheChatAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.debug("TheChat: failed to send invocation progress", exc_info=True)
                 return SendResult(success=False, error=str(exc), retryable=True)
+
+    async def send_session_title_update(
+        self,
+        chat_id: str,
+        title: str,
+        session_id: str,
+        session_key: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Publish an auto-generated Hermes session title to TheChat.
+
+        TheChat task threads consume structured invocation progress events for
+        session metadata updates.  The payload is redundant by design: clients
+        can react to the top-level event payload or to the normalized
+        ``session`` object that accompanies all Hermes continuity updates.
+        """
+        normalized_title = str(title or "").strip()
+        normalized_session_id = str(session_id or "").strip()
+        if not normalized_title or not normalized_session_id:
+            return SendResult(
+                success=False,
+                error="TheChat session title update requires title and session_id",
+            )
+
+        merged_metadata: Dict[str, Any] = dict(metadata or {})
+        existing_session = merged_metadata.get("session")
+        session_payload: Dict[str, Any] = {}
+        if isinstance(existing_session, dict):
+            session_payload.update(existing_session)
+        session_payload.update(
+            {
+                "sessionId": normalized_session_id,
+                "title": normalized_title,
+                "reason": "session.title",
+                "source": "hermes",
+            }
+        )
+        if session_key:
+            session_payload["sessionKey"] = str(session_key)
+        merged_metadata["session"] = session_payload
+
+        event_payload: Dict[str, Any] = {
+            "title": normalized_title,
+            "sessionId": normalized_session_id,
+        }
+        if session_key:
+            event_payload["sessionKey"] = str(session_key)
+
+        return await self.send_invocation_progress(
+            chat_id,
+            {
+                "type": "session.title",
+                "status": "completed",
+                "label": normalized_title,
+                "preview": normalized_title,
+                "payload": event_payload,
+            },
+            metadata=merged_metadata,
+            context=context,
+        )
 
     async def send_exec_approval(
         self,
