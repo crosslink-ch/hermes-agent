@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+from hermes_state import SessionDB
 
 from agent.title_generator import (
     generate_title,
@@ -148,6 +149,51 @@ class TestAutoTitleSession:
             )
         db.set_session_title.assert_called_once_with("sess-1", "Readable Session")
         assert seen == ["Readable Session"]
+
+    def test_uniquifies_duplicate_generated_title_before_callback(self):
+        """Generated titles must be made unique before storing and propagating."""
+        db = MagicMock()
+        db.get_session_title.return_value = None
+        db.get_next_title_in_lineage.return_value = "Casual Greeting with Bruno #3"
+        seen = []
+
+        with patch("agent.title_generator.generate_title", return_value="Casual Greeting with Bruno"):
+            auto_title_session(
+                db,
+                "sess-1",
+                "hello",
+                "Hey Bruno — what’s up?",
+                title_callback=seen.append,
+            )
+
+        db.get_next_title_in_lineage.assert_called_once_with("Casual Greeting with Bruno")
+        db.set_session_title.assert_called_once_with("sess-1", "Casual Greeting with Bruno #3")
+        assert seen == ["Casual Greeting with Bruno #3"]
+
+    def test_real_session_db_duplicate_title_still_triggers_callback(self, tmp_path):
+        """Regression for duplicate generated titles silently dropping TheChat callbacks."""
+        db = SessionDB(db_path=tmp_path / "state.db")
+        try:
+            db.create_session("old-1", "cli")
+            db.set_session_title("old-1", "Casual Greeting with Bruno")
+            db.create_session("old-2", "cli")
+            db.set_session_title("old-2", "Casual Greeting with Bruno #2")
+            db.create_session("new-thechat", "thechat")
+            seen = []
+
+            with patch("agent.title_generator.generate_title", return_value="Casual Greeting with Bruno"):
+                auto_title_session(
+                    db,
+                    "new-thechat",
+                    "hello",
+                    "Hey Bruno — what’s up?",
+                    title_callback=seen.append,
+                )
+
+            assert db.get_session_title("new-thechat") == "Casual Greeting with Bruno #3"
+            assert seen == ["Casual Greeting with Bruno #3"]
+        finally:
+            db.close()
 
     def test_skips_if_generation_fails(self):
         db = MagicMock()

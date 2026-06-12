@@ -19,6 +19,38 @@ logger = logging.getLogger(__name__)
 FailureCallback = Callable[[str, BaseException], None]
 TitleCallback = Callable[[str], None]
 
+
+def _get_lineage_title(session_db, title: str) -> str:
+    """Return a globally unique title when the session store supports it.
+
+    SessionDB enforces unique titles. Auto-generated titles from common first
+    exchanges (e.g. "hello") can collide with old sessions, which previously
+    caused ``set_session_title`` to raise and skipped downstream title callbacks.
+    ``get_next_title_in_lineage`` preserves the human-readable title while
+    appending ``#N`` when needed.
+    """
+    if not session_db or not title:
+        return title
+
+    # Avoid accidentally invoking MagicMock's dynamic attribute creation in unit
+    # tests and other duck-typed fakes. Real SessionDB exposes this in dir().
+    if "get_next_title_in_lineage" not in dir(session_db):
+        return title
+
+    get_next_title = getattr(session_db, "get_next_title_in_lineage", None)
+    if not callable(get_next_title):
+        return title
+
+    try:
+        candidate = get_next_title(title)
+    except Exception as exc:
+        logger.debug("Failed to uniquify auto-generated title: %s", exc)
+        return title
+
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate
+    return title
+
 _TITLE_PROMPT = (
     "Generate a short, descriptive title (3-7 words) for a conversation that starts with the "
     "following exchange. The title should capture the main topic or intent. "
@@ -118,6 +150,8 @@ def auto_title_session(
     if not title:
         return
 
+    title = _get_lineage_title(session_db, title)
+
     try:
         session_db.set_session_title(session_id, title)
         logger.debug("Auto-generated session title: %s", title)
@@ -127,7 +161,8 @@ def auto_title_session(
             except Exception:
                 logger.debug("Auto-title callback failed", exc_info=True)
     except Exception as e:
-        logger.debug("Failed to set auto-generated title: %s", e)
+        logger.warning("Failed to set auto-generated title for session %s: %s", session_id, e)
+        logger.debug("Failed to set auto-generated title traceback", exc_info=True)
 
 
 def maybe_auto_title(
