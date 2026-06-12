@@ -41,6 +41,34 @@ from agent.model_metadata import estimate_request_tokens_rough
 logger = logging.getLogger(__name__)
 
 
+def _inject_todo_snapshot_internal_note(messages: list, todo_snapshot: str) -> None:
+    """Preserve active todos across compression without making them user input.
+
+    The todo tool exposes a compact "active task list" snapshot so a compressed
+    conversation does not lose in-progress planning state.  This snapshot is an
+    internal continuity note, not a message from the user.  Appending it as a
+    ``role='user'`` turn makes it the newest user instruction after compression,
+    which can cause the model to answer the task-list marker instead of the real
+    latest user request.  Insert an assistant/internal note immediately before
+    the latest user turn so the real user message remains the recency anchor.
+    """
+    snapshot = str(todo_snapshot or "").strip()
+    if not snapshot:
+        return
+
+    note = (
+        "[Internal continuity note preserved across context compression — "
+        "not a user message and not the latest request.]\n"
+        f"{snapshot}"
+    )
+    insert_at = len(messages)
+    for idx in range(len(messages) - 1, -1, -1):
+        if messages[idx].get("role") == "user":
+            insert_at = idx
+            break
+    messages.insert(insert_at, {"role": "assistant", "content": note})
+
+
 def _compression_lock_holder(agent: Any) -> str:
     """Build a unique holder id for the lock: pid:tid:agent-instance:uuid.
 
@@ -492,7 +520,7 @@ def compress_context(
 
     todo_snapshot = agent._todo_store.format_for_injection()
     if todo_snapshot:
-        compressed.append({"role": "user", "content": todo_snapshot})
+        _inject_todo_snapshot_internal_note(compressed, todo_snapshot)
 
     agent._invalidate_system_prompt()
     new_system_prompt = agent._build_system_prompt(system_message)

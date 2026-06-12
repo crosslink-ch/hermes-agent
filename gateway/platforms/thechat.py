@@ -308,10 +308,17 @@ class TheChatAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         reason: str,
     ) -> Optional[Dict[str, Any]]:
+        # Precedence matters after context compression: long-running progress
+        # events can cache the *old* session id in context["session"], then the
+        # gateway updates event.hermes_session to the compressed child at turn
+        # completion. Prefer explicit metadata first, then the live event value,
+        # and only then the cached context payload, so the final completion event
+        # heals TheChat's continuity pointer instead of pinning it to the stale
+        # pre-compression parent.
         for value in (
             (metadata or {}).get("session"),
-            (context or {}).get("session"),
             getattr((context or {}).get("event"), "hermes_session", None),
+            (context or {}).get("session"),
             (context or {}).get("continuity"),
         ):
             payload = self._normalize_session_payload(value, reason=reason)

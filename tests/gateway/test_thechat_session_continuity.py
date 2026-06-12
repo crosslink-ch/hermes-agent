@@ -34,6 +34,34 @@ def test_thechat_adapter_normalizes_session_payload_from_event_context():
     assert context["session"] == payload
 
 
+def test_thechat_adapter_prefers_live_event_session_over_cached_context_session():
+    adapter = TheChatAdapter(PlatformConfig())
+    context = {
+        "session": {
+            "sessionId": "stale-parent",
+            "sessionKey": "key-1",
+            "lineageRootId": "root-1",
+        },
+        "event": SimpleNamespace(
+            hermes_session={
+                "sessionId": "compressed-child",
+                "sessionKey": "key-1",
+                "lineageRootId": "root-1",
+            },
+        ),
+    }
+
+    payload = adapter._session_payload_for_context(
+        context,
+        reason="invocation.completed",
+    )
+
+    assert payload is not None
+    assert payload["sessionId"] == "compressed-child"
+    assert payload["reason"] == "invocation.completed"
+    assert context["session"] == payload
+
+
 def test_thechat_continuity_session_id_switches_gateway_session():
     runner = object.__new__(GatewayRunner)
     runner._session_db = SimpleNamespace(
