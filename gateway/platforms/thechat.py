@@ -209,11 +209,6 @@ class TheChatAdapter(BasePlatformAdapter):
             "platformMessageId": f"thechat-adapter:{uuid.uuid4()}",
             "complete": False,
         }
-        session_payload = self._session_payload_for_context(
-            context, metadata=metadata, reason="message.delivered"
-        )
-        if session_payload:
-            payload["session"] = session_payload
         if target.get("invocation_id"):
             payload["invocationId"] = target["invocation_id"]
         if target.get("bot_id"):
@@ -301,77 +296,6 @@ class TheChatAdapter(BasePlatformAdapter):
                 target["bot_id"] = parts[index + 1]
         return target
 
-    def _session_payload_for_context(
-        self,
-        context: Optional[Dict[str, Any]],
-        *,
-        metadata: Optional[Dict[str, Any]] = None,
-        reason: str,
-    ) -> Optional[Dict[str, Any]]:
-        # Precedence matters after context compression: long-running progress
-        # events can cache the *old* session id in context["session"], then the
-        # gateway updates event.hermes_session to the compressed child at turn
-        # completion. Prefer explicit metadata first, then the live event value,
-        # and only then the cached context payload, so the final completion event
-        # heals TheChat's continuity pointer instead of pinning it to the stale
-        # pre-compression parent.
-        for value in (
-            (metadata or {}).get("session"),
-            getattr((context or {}).get("event"), "hermes_session", None),
-            (context or {}).get("session"),
-            (context or {}).get("continuity"),
-        ):
-            payload = self._normalize_session_payload(value, reason=reason)
-            if payload:
-                if context is not None:
-                    context["session"] = payload
-                return payload
-        return None
-
-    def _normalize_session_payload(
-        self,
-        value: Any,
-        *,
-        reason: str,
-    ) -> Optional[Dict[str, Any]]:
-        if not isinstance(value, dict):
-            return None
-
-        def _field(camel: str, snake: str) -> Optional[str]:
-            raw = value.get(camel, value.get(snake))
-            if raw is None:
-                return None
-            text = str(raw).strip()
-            return text or None
-
-        payload: Dict[str, Any] = {}
-        for camel, snake in (
-            ("sessionId", "session_id"),
-            ("sessionKey", "session_key"),
-            ("lineageRootId", "lineage_root_id"),
-            ("branchFromSessionId", "branch_from_session_id"),
-            ("branchFromThreadId", "branch_from_thread_id"),
-            ("branchFromLineageRootId", "branch_from_lineage_root_id"),
-            ("branchTitle", "branch_title"),
-            ("title", "title"),
-        ):
-            field_value = _field(camel, snake)
-            if field_value:
-                payload[camel] = field_value
-
-        if not any(
-            payload.get(key)
-            for key in ("sessionId", "sessionKey", "branchFromSessionId")
-        ):
-            return None
-
-        payload["reason"] = _field("reason", "reason") or reason
-        payload["source"] = _field("source", "source") or "hermes"
-        updated_at = _field("updatedAt", "updated_at")
-        if updated_at:
-            payload["updatedAt"] = updated_at
-        return payload
-
     def _is_gateway_operational_notice(self, content: str) -> bool:
         text = content.strip()
         return text.startswith("📬 No home channel is set for ") or text.startswith(
@@ -417,11 +341,6 @@ class TheChatAdapter(BasePlatformAdapter):
             "conversationId": context["conversation_id"],
             **event,
         }
-        session_payload = self._session_payload_for_context(
-            context, metadata=metadata, reason="progress"
-        )
-        if session_payload:
-            payload["session"] = session_payload
         if context.get("thread_id"):
             payload["threadId"] = context["thread_id"]
         with start_span(
@@ -463,42 +382,18 @@ class TheChatAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Publish an auto-generated Hermes session title to TheChat.
 
-        TheChat task threads consume structured invocation progress events for
-        session metadata updates.  The payload is redundant by design: clients
-        can react to the top-level event payload or to the normalized
-        ``session`` object that accompanies all Hermes continuity updates.
+        TheChat only needs the human-readable title for thread renaming.  Do
+        not include Hermes session ids in this normal progress event; Hermes
+        remains the source of truth for resolving session continuity.
         """
         normalized_title = str(title or "").strip()
-        normalized_session_id = str(session_id or "").strip()
-        if not normalized_title or not normalized_session_id:
+        if not normalized_title:
             return SendResult(
                 success=False,
-                error="TheChat session title update requires title and session_id",
+                error="TheChat session title update requires title",
             )
 
-        merged_metadata: Dict[str, Any] = dict(metadata or {})
-        existing_session = merged_metadata.get("session")
-        session_payload: Dict[str, Any] = {}
-        if isinstance(existing_session, dict):
-            session_payload.update(existing_session)
-        session_payload.update(
-            {
-                "sessionId": normalized_session_id,
-                "title": normalized_title,
-                "reason": "session.title",
-                "source": "hermes",
-            }
-        )
-        if session_key:
-            session_payload["sessionKey"] = str(session_key)
-        merged_metadata["session"] = session_payload
-
-        event_payload: Dict[str, Any] = {
-            "title": normalized_title,
-            "sessionId": normalized_session_id,
-        }
-        if session_key:
-            event_payload["sessionKey"] = str(session_key)
+        event_payload: Dict[str, Any] = {"title": normalized_title}
 
         return await self.send_invocation_progress(
             chat_id,
@@ -509,7 +404,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 "preview": normalized_title,
                 "payload": event_payload,
             },
-            metadata=merged_metadata,
+            metadata=metadata,
             context=context,
         )
 
@@ -624,11 +519,6 @@ class TheChatAdapter(BasePlatformAdapter):
                 payload: Dict[str, Any] = {
                     "error": "Hermes gateway failed to process the message"
                 }
-                session_payload = self._session_payload_for_context(
-                    context, reason="invocation.failed"
-                )
-                if session_payload:
-                    payload["session"] = session_payload
                 await self._client.post(
                     f"/hermes-platform/invocations/{context['invocation_id']}/failed",
                     json=payload,
@@ -640,11 +530,6 @@ class TheChatAdapter(BasePlatformAdapter):
         elif outcome == ProcessingOutcome.CANCELLED:
             try:
                 payload = {"reason": "Hermes gateway cancelled the message"}
-                session_payload = self._session_payload_for_context(
-                    context, reason="invocation.cancelled"
-                )
-                if session_payload:
-                    payload["session"] = session_payload
                 await self._client.post(
                     f"/hermes-platform/invocations/{context['invocation_id']}/cancelled",
                     json=payload,
@@ -660,11 +545,6 @@ class TheChatAdapter(BasePlatformAdapter):
                     if context.get("delivered")
                     else "Hermes gateway completed without a chat response"
                 }
-                session_payload = self._session_payload_for_context(
-                    context, reason="invocation.completed"
-                )
-                if session_payload:
-                    payload["session"] = session_payload
                 await self._client.post(
                     f"/hermes-platform/invocations/{context['invocation_id']}/completed",
                     json=payload,
@@ -827,6 +707,12 @@ class TheChatAdapter(BasePlatformAdapter):
         conversation = item.get("conversation") or {}
         sender = item.get("sender") or {}
         message_id = str(item.get("messageId") or invocation_id)
+        session_intent = item.get("sessionIntent")
+        session_intent_type = (
+            str(session_intent.get("type") or "")
+            if isinstance(session_intent, dict)
+            else ""
+        )
         with start_span(
             "thechat.event.handle",
             {
@@ -838,7 +724,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 "thechat.conversation_id": str(conversation.get("id") or ""),
                 "thechat.chat_type": item.get("chatType") or "group",
                 "thechat.thread_id": thread_id or "",
-                "thechat.continuity_id": str((item.get("continuity") or {}).get("id") or ""),
+                "thechat.session_intent.type": session_intent_type,
             },
         ) as span:
             context = {
@@ -850,9 +736,8 @@ class TheChatAdapter(BasePlatformAdapter):
                 "chat_type": item.get("chatType") or "group",
                 "thread_id": thread_id,
             }
-            continuity = item.get("continuity")
-            if isinstance(continuity, dict):
-                context["continuity"] = continuity
+            if isinstance(session_intent, dict):
+                context["sessionIntent"] = session_intent
             self._contexts[self._context_key(chat_id, thread_id)] = context
             if thread_id is None:
                 self._contexts[chat_id] = context

@@ -2480,16 +2480,16 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         )
 
-    def _platform_continuity_for_event(self, event: MessageEvent) -> Dict[str, Any]:
+    def _thechat_session_intent_for_event(self, event: MessageEvent) -> Dict[str, Any]:
         raw_message = getattr(event, "raw_message", None)
         if not isinstance(raw_message, dict):
             return {}
-        continuity = raw_message.get("continuity")
-        return continuity if isinstance(continuity, dict) else {}
+        session_intent = raw_message.get("sessionIntent", raw_message.get("session_intent"))
+        return session_intent if isinstance(session_intent, dict) else {}
 
-    def _text_continuity_field(self, continuity: Dict[str, Any], *keys: str) -> Optional[str]:
+    def _text_session_intent_field(self, session_intent: Dict[str, Any], *keys: str) -> Optional[str]:
         for key in keys:
-            value = continuity.get(key)
+            value = session_intent.get(key)
             if value is None:
                 continue
             text = str(value).strip()
@@ -2497,22 +2497,68 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 return text
         return None
 
-    def _explicit_thechat_resume_session_id(self, continuity: Dict[str, Any]) -> Optional[str]:
+    def _thechat_session_intent_type(self, session_intent: Dict[str, Any]) -> str:
+        return (
+            self._text_session_intent_field(
+                session_intent,
+                "type",
+                "action",
+                "mode",
+                "intent",
+            )
+            or ""
+        ).strip().lower().replace("-", "_").replace(".", "_")
+
+    def _is_thechat_branch_intent(self, session_intent: Dict[str, Any]) -> bool:
+        if self._text_session_intent_field(
+            session_intent,
+            "fromSessionId",
+            "from_session_id",
+        ):
+            return True
+        if "fromThreadId" in session_intent or "from_thread_id" in session_intent:
+            return True
+        return self._thechat_session_intent_type(session_intent) in {
+            "branch",
+            "fork",
+            "branch_session",
+            "session_branch",
+            "create_branch",
+        }
+
+    def _session_entry_is_fresh(self, session_entry: Any) -> bool:
+        created_at = getattr(session_entry, "created_at", None)
+        updated_at = getattr(session_entry, "updated_at", None)
+        if not created_at or not updated_at:
+            return False
+        try:
+            return abs((updated_at - created_at).total_seconds()) < 0.001
+        except Exception:
+            return False
+
+    def _thechat_branch_parent_source(
+        self,
+        source: SessionSource,
+        branch_from_thread_id: Optional[str],
+    ) -> SessionSource:
+        return dataclasses.replace(source, thread_id=branch_from_thread_id or None)
+
+    def _explicit_thechat_resume_session_id(self, session_intent: Dict[str, Any]) -> Optional[str]:
         """Return a TheChat session switch target only for explicit resume intents.
 
-        TheChat includes the latest Hermes ``sessionId`` in normal continuity
-        payloads so the UI can display/debug the Hermes linkage.  That field is
-        advisory for ordinary thread continuation: the gateway should derive the
-        active Hermes session from the stable platform session key
-        (conversation/thread/user), not let stale client metadata override it.
+        TheChat must not include passive Hermes session ids in normal messages:
+        the gateway derives ordinary continuation from the stable platform
+        session key (conversation/thread/user).  Explicit resume remains a
+        separate opt-in intent for historical navigation/debugging.
 
         Explicit navigation is different.  If TheChat deliberately asks to
         resume/switch to a historical Hermes session, it must use a dedicated
-        field or intent marker.  Branching uses ``branchFromSessionId`` and is
-        handled separately before this helper.
+        ``sessionIntent`` payload.  Branching uses ``type: branch`` with
+        ``fromThreadId`` / ``fromSessionId`` and is handled separately before
+        this helper.
         """
-        explicit = self._text_continuity_field(
-            continuity,
+        explicit = self._text_session_intent_field(
+            session_intent,
             "resumeSessionId",
             "resume_session_id",
             "switchToSessionId",
@@ -2523,16 +2569,8 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         if explicit:
             return explicit
 
-        intent = (
-            self._text_continuity_field(
-                continuity,
-                "action",
-                "mode",
-                "intent",
-            )
-            or ""
-        ).strip().lower().replace("-", "_").replace(".", "_")
-        if intent in {
+        intent_type = self._thechat_session_intent_type(session_intent)
+        if intent_type in {
             "resume",
             "resume_session",
             "session_resume",
@@ -2540,8 +2578,8 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             "session_switch",
             "restore_session",
         }:
-            return self._text_continuity_field(
-                continuity,
+            return self._text_session_intent_field(
+                session_intent,
                 "sessionId",
                 "session_id",
             )
@@ -2593,7 +2631,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
             except Exception:
                 pass
 
-    def _apply_platform_session_continuity(
+    def _apply_thechat_session_intent(
         self,
         event: MessageEvent,
         source: SessionSource,
@@ -2601,37 +2639,63 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
     ) -> Any:
         if getattr(source, "platform", None) != Platform.THECHAT:
             return session_entry
-        continuity = self._platform_continuity_for_event(event)
-        if not continuity:
+        session_intent = self._thechat_session_intent_for_event(event)
+        if not session_intent:
             return session_entry
 
         session_key = getattr(session_entry, "session_key", None) or self._session_key_for_source(source)
-        branch_parent_session_id = self._text_continuity_field(
-            continuity,
-            "branchFromSessionId",
-            "branch_from_session_id",
-        )
-        if branch_parent_session_id:
-            branch_title = self._text_continuity_field(
-                continuity,
-                "branchTitle",
-                "branch_title",
+        branch_requested = self._is_thechat_branch_intent(session_intent)
+        if branch_requested and self._session_entry_is_fresh(session_entry):
+            branch_title = self._text_session_intent_field(
+                session_intent,
+                "title",
             )
-            branched_entry = self._branch_session_from_parent(
-                source=source,
-                session_key=session_key,
-                parent_session_id=branch_parent_session_id,
-                branch_title=branch_title,
+            branch_parent_session_id = self._text_session_intent_field(
+                session_intent,
+                "fromSessionId",
+                "from_session_id",
             )
-            if branched_entry is not None:
-                self._annotate_event_session(
-                    event,
-                    branched_entry,
-                    reason="branch.created",
+            if not branch_parent_session_id:
+                branch_from_thread_id = self._text_session_intent_field(
+                    session_intent,
+                    "fromThreadId",
+                    "from_thread_id",
                 )
-                return branched_entry
+                parent_source = self._thechat_branch_parent_source(source, branch_from_thread_id)
+                try:
+                    parent_entry = self.session_store.get_session_for_source(parent_source)
+                except Exception:
+                    parent_entry = None
+                    logger.debug(
+                        "Failed to resolve TheChat branch parent source",
+                        exc_info=True,
+                    )
+                branch_parent_session_id = (
+                    str(getattr(parent_entry, "session_id", "") or "").strip()
+                    if parent_entry is not None
+                    else None
+                )
+            if branch_parent_session_id:
+                branched_entry = self._branch_session_from_parent(
+                    source=source,
+                    session_key=session_key,
+                    parent_session_id=branch_parent_session_id,
+                    branch_title=branch_title,
+                )
+                if branched_entry is not None:
+                    self._annotate_event_session(
+                        event,
+                        branched_entry,
+                        reason="branch.created",
+                    )
+                    return branched_entry
+        elif branch_requested:
+            logger.debug(
+                "Ignoring persisted TheChat branch sessionIntent for existing session key %s",
+                session_key,
+            )
 
-        requested_session_id = self._explicit_thechat_resume_session_id(continuity)
+        requested_session_id = self._explicit_thechat_resume_session_id(session_intent)
         if (
             requested_session_id
             and requested_session_id != getattr(session_entry, "session_id", None)
@@ -2642,7 +2706,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 session_row = self._session_db.get_session(resolved_session_id)
             except Exception:
                 logger.debug(
-                    "Failed to resolve TheChat continuity session %s",
+                    "Failed to resolve TheChat sessionIntent session %s",
                     requested_session_id,
                     exc_info=True,
                 )
@@ -2656,7 +2720,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     self._annotate_event_session(
                         event,
                         switched,
-                        reason="continuity.resumed",
+                        reason="session_intent.resumed",
                     )
                     return switched
 
@@ -2721,6 +2785,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                 session_id=new_session_id,
                 source=source.platform.value if source.platform else "gateway",
                 model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
+                model_config={"_branched_from": parent_session_id},
                 parent_session_id=parent_session_id,
             )
         except Exception as exc:
@@ -8390,7 +8455,7 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
                     self._record_telegram_topic_binding(source, session_entry)
                 except Exception:
                     logger.debug("Failed to record Telegram topic binding", exc_info=True)
-        session_entry = self._apply_platform_session_continuity(
+        session_entry = self._apply_thechat_session_intent(
             event,
             source,
             session_entry,

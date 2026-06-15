@@ -1,5 +1,6 @@
 """Tests for gateway session management."""
 import json
+import threading
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -609,6 +610,40 @@ class TestSessionStoreSwitchSession:
         assert resumed["ended_at"] is None
         assert resumed["end_reason"] is None
         db.close()
+
+
+class TestSessionStoreGetSessionForSource:
+    """Regression coverage for looking up an existing session by source."""
+
+    def test_get_session_for_source_does_not_deadlock(self, tmp_path):
+        config = GatewayConfig()
+        store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._db = None
+        source = SessionSource(
+            platform=Platform.THECHAT,
+            chat_id="conversation-1",
+            chat_type="dm",
+            user_id="user-1",
+            thread_id="parent-thread",
+        )
+        created = store.get_or_create_session(source)
+
+        result = []
+        errors = []
+
+        def lookup():
+            try:
+                result.append(store.get_session_for_source(source))
+            except Exception as exc:  # pragma: no cover - assertion reports below
+                errors.append(exc)
+
+        thread = threading.Thread(target=lookup, daemon=True)
+        thread.start()
+        thread.join(timeout=1)
+
+        assert not thread.is_alive()
+        assert errors == []
+        assert result == [created]
 
 
 class TestWhatsAppSessionKeyConsistency:

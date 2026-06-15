@@ -764,6 +764,17 @@ class SessionStore:
             group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
         )
+
+    def get_session_key_for_source(self, source: SessionSource) -> str:
+        """Return the deterministic session key for a source without creating an entry."""
+        return self._generate_session_key(source)
+
+    def get_session_for_source(self, source: SessionSource) -> Optional[SessionEntry]:
+        """Return the current session entry for a source, if Hermes has one."""
+        session_key = self._generate_session_key(source)
+        with self._lock:
+            self._ensure_loaded_locked()
+            return self._entries.get(session_key)
     
     def _is_session_expired(self, entry: SessionEntry) -> bool:
         """Check if a session has expired based on its reset policy.

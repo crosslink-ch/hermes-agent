@@ -557,7 +557,7 @@ async def test_send_invocation_progress_prefers_message_metadata_over_latest_con
 
 
 @pytest.mark.asyncio
-async def test_send_session_title_update_posts_structured_event_with_session_payload():
+async def test_send_session_title_update_posts_structured_event_without_session_payload():
     adapter = _make_adapter()
     context = _context("invocation-title")
     context["thread_id"] = "thread-1"
@@ -585,15 +585,6 @@ async def test_send_session_title_update_posts_structured_event_with_session_pay
                 "preview": "Generated Task Title",
                 "payload": {
                     "title": "Generated Task Title",
-                    "sessionId": "session-1",
-                    "sessionKey": "session-key-1",
-                },
-                "session": {
-                    "sessionId": "session-1",
-                    "sessionKey": "session-key-1",
-                    "title": "Generated Task Title",
-                    "reason": "session.title",
-                    "source": "hermes",
                 },
                 "threadId": "thread-1",
             },
@@ -776,15 +767,6 @@ async def test_gateway_thechat_auto_title_callback_sends_after_context_cleanup()
                 "preview": "Generated Task Title",
                 "payload": {
                     "title": "Generated Task Title",
-                    "sessionId": "session-1",
-                    "sessionKey": "session-key-1",
-                },
-                "session": {
-                    "sessionId": "session-1",
-                    "sessionKey": "session-key-1",
-                    "title": "Generated Task Title",
-                    "reason": "session.title",
-                    "source": "hermes",
                 },
                 "threadId": "thread-1",
             },
