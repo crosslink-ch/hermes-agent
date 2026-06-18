@@ -104,9 +104,20 @@ def make_runner_and_adapter(monkeypatch: pytest.MonkeyPatch, platform: Platform 
 
     async def fake_run_agent(**kwargs):
         message = kwargs["message"]
+        response = f"e2e echo: {message}"
+        session_id = kwargs["session_id"]
+        # In production AIAgent persists its own user/assistant rows to SQLite;
+        # gateway persistence skips DB writes when a SessionDB exists to avoid
+        # duplicate rows. Mirror that contract here so the e2e flow exercises
+        # real transcript loading/branch copying instead of only session_meta.
+        runner.session_store.append_to_transcript(session_id, {"role": "user", "content": message})
+        runner.session_store.append_to_transcript(session_id, {"role": "assistant", "content": response})
         return {
-            "final_response": f"e2e echo: {message}",
-            "messages": [],
+            "final_response": response,
+            "messages": [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": response},
+            ],
             "api_calls": 1,
             "completed": True,
             "history_offset": len(kwargs.get("history") or []),

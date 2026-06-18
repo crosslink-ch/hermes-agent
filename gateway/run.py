@@ -15204,7 +15204,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _structured_progress_adapter = _status_adapter
         _structured_progress_supported = (
             _structured_progress_adapter is not None
-            and type(_structured_progress_adapter).send_invocation_progress
+            and getattr(
+                type(_structured_progress_adapter),
+                "send_invocation_progress",
+                BasePlatformAdapter.send_invocation_progress,
+            )
             is not BasePlatformAdapter.send_invocation_progress
         )
         _structured_completion_meta: Dict[str, List[Dict[str, Any]]] = {}
