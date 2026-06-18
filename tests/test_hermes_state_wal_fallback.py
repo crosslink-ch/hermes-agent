@@ -81,6 +81,33 @@ class TestApplyWalWithFallback:
         assert cur.fetchone()[0].lower() == "wal"
         conn.close()
 
+    def test_env_can_force_delete_without_attempting_wal(self, tmp_path, monkeypatch):
+        """Hosted runtimes can opt out of WAL even when SQLite would accept it.
+
+        Some sandboxed/container filesystems have enough fcntl support for
+        ``PRAGMA journal_mode=WAL`` to succeed, but still corrupt under
+        multi-process WAL access.  ``HERMES_SQLITE_JOURNAL_MODE=delete`` lets
+        those deployments choose rollback journaling up-front.
+        """
+        monkeypatch.setenv("HERMES_SQLITE_JOURNAL_MODE", "delete")
+        conn, attempts = _open_blocking(tmp_path / "forced-delete.db", isolation_level=None)
+        mode = apply_wal_with_fallback(conn, db_label="forced.db")
+        assert mode == "delete"
+        assert attempts[0] == 0
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
+        conn.execute("CREATE TABLE t (x INTEGER)")
+        conn.execute("INSERT INTO t VALUES (1)")
+        assert conn.execute("SELECT x FROM t").fetchone()[0] == 1
+        conn.close()
+
+    def test_env_rejects_invalid_journal_mode(self, tmp_path, monkeypatch):
+        """A typo in the operator override should fail loudly, not silently WAL."""
+        monkeypatch.setenv("HERMES_SQLITE_JOURNAL_MODE", "banana")
+        conn = sqlite3.connect(str(tmp_path / "bad-env.db"), isolation_level=None)
+        with pytest.raises(ValueError, match="HERMES_SQLITE_JOURNAL_MODE"):
+            apply_wal_with_fallback(conn)
+        conn.close()
+
     def test_falls_back_to_delete_on_locking_protocol(self, tmp_path, caplog):
         """NFS-style ``locking protocol`` error → DELETE mode + one WARNING."""
         conn, _ = _open_blocking(tmp_path / "nfs.db", isolation_level=None)

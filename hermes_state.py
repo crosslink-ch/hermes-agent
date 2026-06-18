@@ -16,6 +16,7 @@ Key design decisions:
 
 import json
 import logging
+import os
 import random
 import re
 import sqlite3
@@ -55,6 +56,15 @@ _WAL_INCOMPAT_MARKERS = (
     "locking protocol",       # SQLITE_PROTOCOL on NFS/SMB
     "not authorized",         # Some FUSE mounts block WAL pragma outright
 )
+
+# Advanced escape hatch for hosted/sandboxed/container filesystems where WAL
+# appears to enable successfully but the runtime's mmap/fcntl semantics are not
+# trustworthy under multi-process access (e.g. some gVisor / FUSE / networked
+# volume combinations).  Unset/auto keeps the normal WAL-with-fallback path.
+# DELETE is the intended safe value for managed Hermes runtimes that share one
+# HERMES_HOME between gateway + dashboard + terminal processes.
+_SQLITE_JOURNAL_MODE_ENV = "HERMES_SQLITE_JOURNAL_MODE"
+_FORCED_JOURNAL_MODES = {"wal", "delete", "truncate", "persist"}
 
 # Last SessionDB() init error, per-process.  Surfaced in /resume and
 # related slash-command error strings so users know WHY the DB is
@@ -154,6 +164,44 @@ def _on_disk_journal_mode(conn: sqlite3.Connection) -> Optional[str]:
     return str(mode).strip().lower() if mode is not None else None
 
 
+def _forced_sqlite_journal_mode() -> Optional[str]:
+    """Return the explicit journal mode requested by environment, if any.
+
+    ``None`` means normal Hermes behavior: prefer WAL and fall back to DELETE
+    only when SQLite reports a known WAL-incompatible filesystem error.  Hosted
+    runtimes can set ``HERMES_SQLITE_JOURNAL_MODE=delete`` to opt out of WAL
+    up-front when WAL's shared-memory/locking assumptions are unsafe even though
+    the initial PRAGMA succeeds.
+    """
+    raw = os.getenv(_SQLITE_JOURNAL_MODE_ENV, "").strip().lower()
+    if not raw or raw == "auto":
+        return None
+    if raw == "rollback":
+        raw = "delete"
+    if raw not in _FORCED_JOURNAL_MODES:
+        allowed = ", ".join(["auto", "rollback", *_FORCED_JOURNAL_MODES])
+        raise ValueError(
+            f"Invalid {_SQLITE_JOURNAL_MODE_ENV}={raw!r}; expected one of: {allowed}"
+        )
+    return raw
+
+
+def _apply_forced_journal_mode(
+    conn: sqlite3.Connection,
+    mode: str,
+    *,
+    db_label: str,
+) -> str:
+    """Apply an explicit journal mode and verify SQLite accepted it."""
+    row = conn.execute(f"PRAGMA journal_mode={mode.upper()}").fetchone()
+    actual = str(row[0]).strip().lower() if row and row[0] is not None else ""
+    if actual != mode:
+        raise sqlite3.OperationalError(
+            f"{db_label}: requested journal_mode={mode}, SQLite reported {actual or 'unknown'}"
+        )
+    return actual
+
+
 def apply_wal_with_fallback(
     conn: sqlite3.Connection,
     *,
@@ -179,6 +227,20 @@ def apply_wal_with_fallback(
 
     Never downgrades to DELETE if the on-disk DB header reports WAL — see _on_disk_journal_mode.
     """
+    forced_mode = _forced_sqlite_journal_mode()
+    if forced_mode is not None:
+        if forced_mode == "wal":
+            # Explicit WAL keeps the normal WAL/fallback semantics below.  This
+            # value is accepted mostly so operators can override a previously
+            # forced rollback mode without changing code paths.
+            pass
+        else:
+            return _apply_forced_journal_mode(
+                conn,
+                forced_mode,
+                db_label=db_label,
+            )
+
     # Read-only probe — no flock, no checkpoint, no WAL/SHM unlink.
     # Skipping the set-pragma prevents WAL-init from unlinking files other connections hold open.
     try:
