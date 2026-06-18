@@ -14726,11 +14726,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _progress_thread_id = _resolve_progress_thread_id(
             source.platform, source.thread_id, event_message_id,
         )
+        _source_message_metadata = self._thread_metadata_for_source(
+            source, event_message_id
+        )
         _progress_metadata = (
-            self._thread_metadata_for_source(source, event_message_id)
+            _source_message_metadata
             if _progress_thread_id == source.thread_id
             else {"thread_id": _progress_thread_id}
-        ) if _progress_thread_id else self._thread_metadata_for_source(source, event_message_id)
+        ) if _progress_thread_id else _source_message_metadata
         _progress_reply_to = (
             event_message_id
             if source.platform in (Platform.FEISHU, Platform.MATTERMOST) and source.thread_id and event_message_id
