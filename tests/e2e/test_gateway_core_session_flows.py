@@ -10,6 +10,7 @@ that user-visible platforms depend on.
 """
 
 import asyncio
+import inspect
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -177,6 +178,14 @@ def transcript_contents(runner: GatewayRunner, session_id: str) -> list[tuple[st
     return rows
 
 
+async def session_db_call(runner: GatewayRunner, method_name: str, *args, **kwargs):
+    method = getattr(runner._session_db, method_name)
+    result = method(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
 async def test_thechat_core_send_title_branch_resume_flow(monkeypatch):
     runner, adapter = make_runner_and_adapter(monkeypatch)
     main_source = make_thechat_event("source").source
@@ -186,14 +195,15 @@ async def test_thechat_core_send_title_branch_resume_flow(monkeypatch):
 
     title_response = await dispatch(adapter, make_thechat_event("/title Primary Session"))
     assert "Primary Session" in title_response
-    assert runner._session_db.get_session_title(main_session_id) == "Primary Session"
+    assert await session_db_call(runner, "get_session_title", main_session_id) == "Primary Session"
 
     branch_response = await dispatch(adapter, make_thechat_event("/branch Branch A"))
     assert "Branch A" in branch_response
     branch_session_id = runner.session_store.get_or_create_session(main_source).session_id
     assert branch_session_id != main_session_id
-    assert runner._session_db.get_session(branch_session_id)["parent_session_id"] == main_session_id
-    assert runner._session_db.get_session_title(branch_session_id) == "Branch A"
+    branch_row = await session_db_call(runner, "get_session", branch_session_id)
+    assert branch_row["parent_session_id"] == main_session_id
+    assert await session_db_call(runner, "get_session_title", branch_session_id) == "Branch A"
 
     assert await dispatch(adapter, make_thechat_event("branch followup")) == "e2e echo: branch followup"
 
@@ -243,9 +253,9 @@ async def test_thechat_branch_session_intent_creates_child_session_without_hangi
     child_entry = runner.session_store.get_session_for_source(branch_event.source)
     assert child_entry is not None
     assert child_entry.session_id != parent_entry.session_id
-    child_row = runner._session_db.get_session(child_entry.session_id)
+    child_row = await session_db_call(runner, "get_session", child_entry.session_id)
     assert child_row["parent_session_id"] == parent_entry.session_id
-    assert runner._session_db.get_session_title(child_entry.session_id) == "Child Branch"
+    assert await session_db_call(runner, "get_session_title", child_entry.session_id) == "Child Branch"
 
     child_transcript = transcript_contents(runner, child_entry.session_id)
     assert ("user", "parent hello") in child_transcript
