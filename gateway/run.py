@@ -3425,14 +3425,39 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         return None
 
+    async def _session_db_call(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        """Call a SessionDB method through either the async facade or a sync test double."""
+        session_db = getattr(self, "_session_db", None)
+        if session_db is None:
+            return None
+        method = getattr(session_db, method_name)
+        result = method(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
     def _session_lineage_root_id(self, session_id: str) -> str:
         if not session_id:
             return session_id
         session_db = getattr(self, "_session_db", None)
         if session_db is None:
             return session_id
+        # This helper is sync because it is used while constructing event metadata.
+        # When the gateway owns an AsyncSessionDB facade, do not call through to the
+        # underlying SQLite handle on the event loop; the caller can still carry the
+        # current session id as a safe conservative root.
+        if session_db.__class__.__name__ == "AsyncSessionDB":
+            return session_id
         try:
-            chain = session_db._session_lineage_root_to_tip(session_id)
+            resolver = getattr(session_db, "_session_lineage_root_to_tip", None)
+            if not callable(resolver):
+                return session_id
+            chain = resolver(session_id)
+            if inspect.isawaitable(chain):
+                close = getattr(chain, "close", None)
+                if callable(close):
+                    close()
+                return session_id
         except Exception:
             logger.debug("Failed to resolve session lineage for %s", session_id, exc_info=True)
             return session_id
@@ -3477,6 +3502,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         source: SessionSource,
         session_entry: Any,
     ) -> Any:
+        """Synchronous compatibility wrapper for tests and off-loop callers."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self._apply_thechat_session_intent_async(event, source, session_entry)
+            )
+        raise RuntimeError("_apply_thechat_session_intent must be awaited on the gateway loop")
+
+    async def _apply_thechat_session_intent_async(
+        self,
+        event: MessageEvent,
+        source: SessionSource,
+        session_entry: Any,
+    ) -> Any:
         if getattr(source, "platform", None) != Platform.THECHAT:
             return session_entry
         session_intent = self._thechat_session_intent_for_event(event)
@@ -3516,7 +3556,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     else None
                 )
             if branch_parent_session_id:
-                branched_entry = self._branch_session_from_parent(
+                branched_entry = await self._branch_session_from_parent(
                     source=source,
                     session_key=session_key,
                     parent_session_id=branch_parent_session_id,
@@ -3542,8 +3582,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             and getattr(self, "_session_db", None) is not None
         ):
             try:
-                resolved_session_id = self._session_db.resolve_resume_session_id(requested_session_id)
-                session_row = self._session_db.get_session(resolved_session_id)
+                resolved_session_id = await self._session_db_call("resolve_resume_session_id", requested_session_id)
+                resolved_session_id = str(resolved_session_id or requested_session_id)
+                session_row = await self._session_db_call("get_session", resolved_session_id)
             except Exception:
                 logger.debug(
                     "Failed to resolve TheChat sessionIntent session %s",
@@ -3566,7 +3607,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         return session_entry
 
-    def _branch_session_from_parent(
+    async def _branch_session_from_parent(
         self,
         *,
         source: SessionSource,
@@ -3581,8 +3622,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not parent_session_id:
             return None
         try:
-            parent_session_id = session_db.resolve_resume_session_id(parent_session_id)
-            parent_session = session_db.get_session(parent_session_id)
+            parent_session_id = await self._session_db_call("resolve_resume_session_id", parent_session_id)
+            parent_session_id = str(parent_session_id or "").strip()
+            parent_session = await self._session_db_call("get_session", parent_session_id)
         except Exception:
             logger.debug(
                 "Failed to resolve TheChat branch parent %s",
@@ -3597,7 +3639,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         history = self.session_store.load_transcript(parent_session_id)
         if not history:
             try:
-                history = session_db.get_messages_as_conversation(
+                history = await self._session_db_call(
+                    "get_messages_as_conversation",
                     parent_session_id,
                     include_ancestors=True,
                 )
@@ -3617,11 +3660,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         new_session_id = f"{timestamp_str}_{_uuid.uuid4().hex[:6]}"
         title = (branch_title or "").strip()
         if not title:
-            current_title = session_db.get_session_title(parent_session_id)
-            title = session_db.get_next_title_in_lineage(current_title or "branch")
+            current_title = await self._session_db_call("get_session_title", parent_session_id)
+            title = await self._session_db_call("get_next_title_in_lineage", current_title or "branch")
 
         try:
-            session_db.create_session(
+            await self._session_db_call(
+                "create_session",
                 session_id=new_session_id,
                 source=source.platform.value if source.platform else "gateway",
                 model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
@@ -3634,7 +3678,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         for msg in history:
             try:
-                session_db.append_message(
+                await self._session_db_call(
+                    "append_message",
                     session_id=new_session_id,
                     role=msg.get("role", "user"),
                     content=msg.get("content"),
@@ -3652,7 +3697,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pass
 
         try:
-            session_db.set_session_title(new_session_id, title)
+            await self._session_db_call("set_session_title", new_session_id, title)
         except Exception:
             pass
 
@@ -3677,6 +3722,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 chat_id=str(source.chat_id),
                 user_id=str(source.user_id),
             )
+            if inspect.isawaitable(raw):
+                close = getattr(raw, "close", None)
+                if callable(close):
+                    close()
+                return False
         except Exception:
             logger.debug("Failed to read Telegram topic mode state", exc_info=True)
             return False
@@ -6418,6 +6468,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             await self._safe_adapter_disconnect(adapter, platform)
         stop_task = self._stop_task
         current_task = asyncio.current_task()
+        restart_task = getattr(self, "_restart_task", None)
+        if (
+            stop_task is None
+            and restart_task is not None
+            and restart_task is not current_task
+            and not restart_task.done()
+        ):
+            # Startup noticed the restart request and is about to run the
+            # shutdown path inline; the delayed restart helper would only race
+            # this same stop() call. Cancel it before it can create/await a
+            # second stop waiter.
+            restart_task.cancel()
+            try:
+                await restart_task
+            except asyncio.CancelledError:
+                pass
         if stop_task is not None and stop_task is not current_task:
             await stop_task
         elif not self._shutdown_event.is_set():
@@ -10330,7 +10396,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     await asyncio.to_thread(self._record_telegram_topic_binding, source, session_entry)
                 except Exception:
                     logger.debug("Failed to record Telegram topic binding", exc_info=True)
-        session_entry = self._apply_thechat_session_intent(
+        session_entry = await self._apply_thechat_session_intent_async(
             event,
             source,
             session_entry,
