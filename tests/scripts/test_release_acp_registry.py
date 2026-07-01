@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def _load_release_module(monkeypatch, tmp_root: Path):
@@ -111,3 +112,30 @@ def test_update_version_files_bumps_manifest_alongside_pyproject(
     )
     assert manifest["version"] == "0.14.0"
     assert manifest["distribution"]["uvx"]["package"] == "hermes-agent[acp]==0.14.0"
+
+
+def test_crosslink_release_target_uses_fork_defaults(monkeypatch, tmp_path):
+    module = _load_release_module(monkeypatch, tmp_path)
+    args = SimpleNamespace(
+        target="crosslink",
+        remote=None,
+        repo=None,
+        tag_prefix=None,
+        skip_artifacts=False,
+        attach_artifacts=False,
+    )
+
+    config = module.target_config(args)
+
+    assert config["remote"] == "crosslink-ch"
+    assert config["repo"] == "crosslink-ch/hermes-agent"
+    assert config["repo_url"] == "https://github.com/crosslink-ch/hermes-agent"
+    assert config["tag_prefix"] == "crosslink-v"
+    assert config["tag_glob"] == "crosslink-v20*"
+    assert config["push_ref"] == "HEAD:main"
+    assert config["mark_latest"] is True
+    assert module.should_build_artifacts(args, config) is False
+    assert (
+        module.release_title(config, "0.17.0", "2026.7.1", "crosslink-v2026.7.1")
+        == "Crosslink Hermes v2026.7.1"
+    )

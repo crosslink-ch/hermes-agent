@@ -18,6 +18,10 @@ Usage:
 
     # Override CalVer date (e.g. for a belated release)
     python scripts/release.py --bump minor --publish --date 2026.3.15
+
+    # Crosslink fork dry run / publish
+    python scripts/release.py --target crosslink
+    python scripts/release.py --target crosslink --publish
 """
 
 import argparse
@@ -38,6 +42,32 @@ PYPROJECT_FILE = REPO_ROOT / "pyproject.toml"
 # tests/acp/test_registry_manifest.py enforces this lockstep so the release
 # bump touches both files atomically.
 ACP_REGISTRY_MANIFEST = REPO_ROOT / "acp_registry" / "agent.json"
+
+RELEASE_TARGETS = {
+    "upstream": {
+        "remote": "origin",
+        "repo": "NousResearch/hermes-agent",
+        "tag_prefix": "v",
+        "tag_glob": "v20*",
+        "name": "Hermes Agent",
+        "push_ref": "HEAD",
+        "build_artifacts": True,
+        "mark_latest": False,
+    },
+    "crosslink": {
+        "remote": "crosslink-ch",
+        "repo": "crosslink-ch/hermes-agent",
+        "tag_prefix": "crosslink-v",
+        "tag_glob": "crosslink-v20*",
+        "name": "Crosslink Hermes",
+        "push_ref": "HEAD:main",
+        # Crosslink releases are consumed as Docker images from the fork.  Do not
+        # attach semver-named PyPI artifacts by default, especially when the fork
+        # is shipping a hotfix without bumping the upstream Python package version.
+        "build_artifacts": False,
+        "mark_latest": True,
+    },
+}
 
 # ──────────────────────────────────────────────────────────────────────
 # Git email → GitHub username mapping
@@ -1806,24 +1836,24 @@ def git_result(*args, cwd=None):
     )
 
 
-def get_last_tag():
-    """Get the most recent CalVer tag."""
-    tags = git("tag", "--list", "v20*", "--sort=-v:refname")
+def get_last_tag(tag_glob: str = "v20*"):
+    """Get the most recent CalVer tag for the selected release target."""
+    tags = git("tag", "--list", tag_glob, "--sort=-v:refname")
     if tags:
         return tags.split("\n")[0]
     return None
 
 
-def next_available_tag(base_tag: str) -> tuple[str, str]:
+def next_available_tag(base_tag: str, tag_prefix: str = "v") -> tuple[str, str]:
     """Return a tag/calver pair, suffixing same-day releases when needed."""
     if not git("tag", "--list", base_tag):
-        return base_tag, base_tag.removeprefix("v")
+        return base_tag, base_tag.removeprefix(tag_prefix)
 
     suffix = 2
     while git("tag", "--list", f"{base_tag}.{suffix}"):
         suffix += 1
     tag_name = f"{base_tag}.{suffix}"
-    return tag_name, tag_name.removeprefix("v")
+    return tag_name, tag_name.removeprefix(tag_prefix)
 
 
 def get_current_version():
@@ -2110,15 +2140,22 @@ def get_pr_number(subject: str) -> str | None:
     return None
 
 
-def generate_changelog(commits, tag_name, semver, repo_url="https://github.com/NousResearch/hermes-agent",
-                       prev_tag=None, first_release=False):
+def generate_changelog(
+    commits,
+    tag_name,
+    semver,
+    repo_url="https://github.com/NousResearch/hermes-agent",
+    prev_tag=None,
+    first_release=False,
+    heading: str | None = None,
+):
     """Generate markdown changelog from categorized commits."""
     lines = []
 
     # Header
     now = datetime.now()
     date_str = now.strftime("%B %d, %Y")
-    lines.append(f"# Hermes Agent v{semver} ({tag_name})")
+    lines.append(heading or f"# Hermes Agent v{semver} ({tag_name})")
     lines.append("")
     lines.append(f"**Release Date:** {date_str}")
     lines.append("")
@@ -2214,6 +2251,37 @@ def generate_changelog(commits, tag_name, semver, repo_url="https://github.com/N
     return "\n".join(lines)
 
 
+def target_config(args: argparse.Namespace) -> dict:
+    """Resolve release target defaults plus explicit CLI overrides."""
+    config = dict(RELEASE_TARGETS[args.target])
+    if args.remote:
+        config["remote"] = args.remote
+    if args.repo:
+        config["repo"] = args.repo
+    if args.tag_prefix:
+        config["tag_prefix"] = args.tag_prefix
+        config["tag_glob"] = f"{args.tag_prefix}20*"
+    config["repo_url"] = f"https://github.com/{config['repo']}"
+    return config
+
+
+def release_title(config: dict, semver: str, calver_date: str, tag_name: str) -> str:
+    """Return the human-facing GitHub Release title for a target."""
+    if config.get("name") == "Crosslink Hermes":
+        display_tag = tag_name.removeprefix("crosslink-")
+        return f"Crosslink Hermes {display_tag}"
+    return f"Hermes Agent v{semver} ({calver_date})"
+
+
+def should_build_artifacts(args: argparse.Namespace, config: dict) -> bool:
+    """Decide whether to build/attach Python artifacts for this release."""
+    if args.skip_artifacts:
+        return False
+    if args.attach_artifacts:
+        return True
+    return bool(config.get("build_artifacts", True))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Hermes Agent Release Tool")
     parser.add_argument("--bump", choices=["major", "minor", "patch"],
@@ -2226,7 +2294,22 @@ def main():
                         help="Mark as first release (no previous tag expected)")
     parser.add_argument("--output", type=str,
                         help="Write changelog to file instead of stdout")
+    parser.add_argument("--target", choices=sorted(RELEASE_TARGETS), default="upstream",
+                        help="Release target defaults: upstream or crosslink fork")
+    parser.add_argument("--remote", type=str,
+                        help="Override git remote for publish")
+    parser.add_argument("--repo", type=str,
+                        help="Override GitHub repo for release creation (owner/name)")
+    parser.add_argument("--tag-prefix", type=str,
+                        help="Override CalVer tag prefix (default from --target)")
+    parser.add_argument("--skip-artifacts", action="store_true",
+                        help="Do not build/attach Python sdist/wheel assets")
+    parser.add_argument("--attach-artifacts", action="store_true",
+                        help="Build/attach Python artifacts even if target default skips them")
     args = parser.parse_args()
+    config = target_config(args)
+    repo_url = config["repo_url"]
+    build_artifacts = should_build_artifacts(args, config)
 
     # Determine CalVer date
     if args.date:
@@ -2235,8 +2318,8 @@ def main():
         now = datetime.now()
         calver_date = f"{now.year}.{now.month}.{now.day}"
 
-    base_tag = f"v{calver_date}"
-    tag_name, calver_date = next_available_tag(base_tag)
+    base_tag = f"{config['tag_prefix']}{calver_date}"
+    tag_name, calver_date = next_available_tag(base_tag, config["tag_prefix"])
     if tag_name != base_tag:
         print(f"Note: Tag {base_tag} already exists, using {tag_name}")
 
@@ -2248,7 +2331,7 @@ def main():
         new_version = current_version
 
     # Get previous tag
-    prev_tag = get_last_tag()
+    prev_tag = get_last_tag(config["tag_glob"])
     if not prev_tag and not args.first_release:
         print("No previous tags found. Use --first-release for the initial release.")
         print(f"Would create tag: {tag_name}")
@@ -2262,14 +2345,20 @@ def main():
         if not args.first_release:
             return
 
+    title = release_title(config, new_version, calver_date, tag_name)
+
     print(f"{'='*60}")
-    print(f"  Hermes Agent Release Preview")
+    print(f"  {config['name']} Release Preview")
     print(f"{'='*60}")
+    print(f"  Target:          {args.target}")
+    print(f"  Git remote:      {config['remote']}")
+    print(f"  GitHub repo:     {config['repo']}")
     print(f"  CalVer tag:      {tag_name}")
     print(f"  SemVer:          v{current_version} → v{new_version}")
     print(f"  Previous tag:    {prev_tag or '(none — first release)'}")
     print(f"  Commits:         {len(commits)}")
     print(f"  Unique authors:  {len({c['github_author'] for c in commits})}")
+    print(f"  Artifacts:       {'build/attach' if build_artifacts else 'skip'}")
     print(f"  Mode:            {'PUBLISH' if args.publish else 'DRY RUN'}")
     print(f"{'='*60}")
     print()
@@ -2277,8 +2366,10 @@ def main():
     # Generate changelog
     changelog = generate_changelog(
         commits, tag_name, new_version,
+        repo_url=repo_url,
         prev_tag=prev_tag,
         first_release=args.first_release,
+        heading=f"# {title}",
     )
 
     if args.output:
@@ -2317,29 +2408,42 @@ def main():
         # Create annotated tag
         tag_result = git_result(
             "tag", "-a", tag_name, "-m",
-            f"Hermes Agent v{new_version} ({calver_date})\n\nWeekly release"
+            f"{title}\n\nRelease generated by scripts/release.py"
         )
         if tag_result.returncode != 0:
             print(f"  ✗ Failed to create tag {tag_name}: {tag_result.stderr.strip()}")
             return
         print(f"  ✓ Created tag {tag_name}")
 
-        # Push
-        push_result = git_result("push", "origin", "HEAD", "--tags")
+        # Push the release commit/ref and this tag only. Avoid `--tags` so a fork
+        # release cannot accidentally publish unrelated local upstream tags.
+        push_result = git_result("push", config["remote"], config["push_ref"])
         if push_result.returncode == 0:
-            print(f"  ✓ Pushed to origin")
+            print(f"  ✓ Pushed {config['push_ref']} to {config['remote']}")
         else:
-            print(f"  ✗ Failed to push to origin: {push_result.stderr.strip()}")
+            print(f"  ✗ Failed to push {config['push_ref']} to {config['remote']}: {push_result.stderr.strip()}")
             print("    Continue manually after fixing access:")
-            print("    git push origin HEAD --tags")
+            print(f"    git push {config['remote']} {config['push_ref']}")
+            return
+
+        tag_push_result = git_result("push", config["remote"], tag_name)
+        if tag_push_result.returncode == 0:
+            print(f"  ✓ Pushed tag {tag_name} to {config['remote']}")
+        else:
+            print(f"  ✗ Failed to push tag {tag_name} to {config['remote']}: {tag_push_result.stderr.strip()}")
+            print("    Continue manually after fixing access:")
+            print(f"    git push {config['remote']} {tag_name}")
+            return
 
         # Build semver-named Python artifacts so downstream packagers
         # (e.g. Homebrew) can target them without relying on CalVer tag names.
-        artifacts = build_release_artifacts(new_version)
-        if artifacts:
+        artifacts = build_release_artifacts(new_version) if build_artifacts else []
+        if build_artifacts and artifacts:
             print("  ✓ Built release artifacts:")
             for artifact in artifacts:
                 print(f"    - {artifact.relative_to(REPO_ROOT)}")
+        elif not build_artifacts:
+            print("  ✓ Skipping Python artifacts for this target")
 
         # Create GitHub release
         changelog_file = REPO_ROOT / ".release_notes.md"
@@ -2347,9 +2451,12 @@ def main():
 
         gh_cmd = [
             "gh", "release", "create", tag_name,
-            "--title", f"Hermes Agent v{new_version} ({calver_date})",
+            "--repo", config["repo"],
+            "--title", title,
             "--notes-file", str(changelog_file),
         ]
+        if config.get("mark_latest"):
+            gh_cmd.append("--latest")
         gh_cmd.extend(str(path) for path in artifacts)
 
         gh_bin = shutil.which("gh")
@@ -2365,7 +2472,7 @@ def main():
         if result and result.returncode == 0:
             changelog_file.unlink(missing_ok=True)
             print(f"  ✓ GitHub release created: {result.stdout.strip()}")
-            print(f"\n  🎉 Release v{new_version} ({tag_name}) published!")
+            print(f"\n  🎉 Release {title} ({tag_name}) published!")
         else:
             if result is None:
                 print("  ✗ GitHub release skipped: `gh` CLI not found.")
@@ -2373,15 +2480,18 @@ def main():
                 print(f"  ✗ GitHub release failed: {result.stderr.strip()}")
             print(f"    Release notes kept at: {changelog_file}")
             print(f"    Tag was created locally. Create the release manually:")
+            artifact_args = " ".join(str(path) for path in artifacts)
+            latest_arg = " --latest" if config.get("mark_latest") else ""
             print(
-                f"    gh release create {tag_name} --title 'Hermes Agent v{new_version} ({calver_date})' "
-                f"--notes-file .release_notes.md {' '.join(str(path) for path in artifacts)}"
+                f"    gh release create {tag_name} --repo {config['repo']} --title {title!r} "
+                f"--notes-file .release_notes.md{latest_arg} {artifact_args}"
             )
-            print(f"\n  ✓ Release artifacts prepared for manual publish: v{new_version} ({tag_name})")
+            print(f"\n  ✓ Release prepared for manual publish: {title} ({tag_name})")
     else:
         print(f"\n{'='*60}")
         print(f"  Dry run complete. To publish, add --publish")
-        print(f"  Example: python scripts/release.py --bump minor --publish")
+        example_bump = "" if args.target == "crosslink" else " --bump minor"
+        print(f"  Example: python scripts/release.py --target {args.target}{example_bump} --publish")
         print(f"{'='*60}")
 
 
