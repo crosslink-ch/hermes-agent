@@ -2007,6 +2007,36 @@ class TestRunJobConfigEnvVarExpansion:
             "config.yaml ${VAR} in fallback_providers was not expanded."
         )
 
+    def test_fallback_chain_merges_providers_and_legacy_model(self, tmp_path, monkeypatch):
+        """Cron uses get_fallback_chain so legacy fallback_model is not dropped."""
+        (tmp_path / "config.yaml").write_text(
+            "fallback_providers:\n"
+            "  - provider: openrouter\n"
+            "    model: gpt-4o-mini\n"
+            "fallback_model:\n"
+            "  provider: anthropic\n"
+            "  model: claude-sonnet-4-6\n"
+        )
+
+        job = {"id": "fb-merge", "name": "fallback merge", "prompt": "hi"}
+        fake_db = MagicMock()
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("dotenv.load_dotenv"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+                   return_value=self._RUNTIME), \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+            mock_agent = MagicMock()
+            mock_agent.run_conversation.return_value = {"final_response": "ok"}
+            mock_agent_cls.return_value = mock_agent
+            run_job(job)
+
+        fb = mock_agent_cls.call_args.kwargs.get("fallback_model") or []
+        models = [e.get("model") for e in fb if isinstance(e, dict)]
+        assert models == ["gpt-4o-mini", "claude-sonnet-4-6"]
+
     def test_unexpanded_ref_passthrough_when_var_unset(self, tmp_path, monkeypatch):
         """When the env var is not set, the literal ${VAR} is kept verbatim (not crashed)."""
         (tmp_path / "config.yaml").write_text("model: ${_HERMES_TEST_CRON_UNSET_VAR}\n")
@@ -2621,6 +2651,46 @@ class TestSilentDelivery:
             "Agent completed but produced empty response (model error, timeout, or misconfiguration)",
             delivery_error=None,
         )
+
+
+class TestOneShotDispatchClaim:
+    """run_one_job must claim a finite one-shot's dispatch BEFORE run_job so a
+    tick that dies mid-execution can't re-fire it forever (issue #38758)."""
+
+    def _oneshot(self):
+        return {
+            "id": "monitor-job",
+            "name": "monitor",
+            "deliver": "origin",
+            "origin": {"platform": "telegram", "chat_id": "123"},
+            "schedule": {"kind": "once", "run_at": "2026-01-01T00:00:00+00:00"},
+            "repeat": {"times": 1, "completed": 0},
+        }
+
+    def test_claim_runs_before_run_job(self):
+        order = []
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._oneshot()]), \
+             patch("cron.scheduler.claim_dispatch", side_effect=lambda _id: order.append("claim") or True), \
+             patch("cron.scheduler.run_job", side_effect=lambda _j: order.append("run") or (True, "# out", "ok", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._deliver_result"), \
+             patch("cron.scheduler.mark_job_run"):
+            from cron.scheduler import tick
+            tick(verbose=False)
+        assert order == ["claim", "run"]  # claim strictly before side effect
+
+    def test_refused_claim_skips_run_job(self):
+        with patch("cron.scheduler.get_due_jobs", return_value=[self._oneshot()]), \
+             patch("cron.scheduler.claim_dispatch", return_value=False), \
+             patch("cron.scheduler.run_job") as run_mock, \
+             patch("cron.scheduler.save_job_output"), \
+             patch("cron.scheduler._deliver_result") as deliver_mock, \
+             patch("cron.scheduler.mark_job_run") as mark_mock:
+            from cron.scheduler import tick
+            tick(verbose=False)
+        run_mock.assert_not_called()
+        deliver_mock.assert_not_called()
+        mark_mock.assert_not_called()
 
 
 class TestBuildJobPromptSilentHint:
