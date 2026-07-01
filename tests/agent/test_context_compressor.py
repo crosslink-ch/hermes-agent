@@ -1,6 +1,7 @@
 """Tests for agent/context_compressor.py — compression logic, thresholds, truncation fallback."""
 
 import pytest
+import time
 from unittest.mock import patch, MagicMock
 
 from agent.context_compressor import (
@@ -8,6 +9,7 @@ from agent.context_compressor import (
     HISTORICAL_TASK_HEADING,
     SUMMARY_PREFIX,
 )
+from hermes_state import SessionDB
 
 
 @pytest.fixture()
@@ -508,6 +510,24 @@ class TestNonStringContent:
         assert summary is None
         assert c._summary_failure_cooldown_until > 0
 
+    def test_string_message_coerced_to_summary_content(self):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message = "plain summary text"
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+
+        messages = [
+            {"role": "user", "content": "do something"},
+            {"role": "assistant", "content": "ok"},
+        ]
+
+        with patch("agent.context_compressor.call_llm", return_value=mock_response):
+            summary = c._generate_summary(messages)
+
+        assert summary == f"{SUMMARY_PREFIX}\nplain summary text"
+
     def test_summary_call_does_not_force_temperature(self):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -682,6 +702,47 @@ class TestAuthFailureAborts:
         assert c._last_summary_auth_failure is False
         assert c._last_compress_aborted is False
         assert len(result) < len(msgs)  # middle window dropped
+
+    def test_generate_summary_flags_network_failure(self):
+        """A connection/network error on the summary call flags
+        _last_summary_network_failure (#29559)."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=ConnectionError("Connection error."),
+        ):
+            result = c._generate_summary(self._msgs())
+        assert result is None
+        assert c._last_summary_network_failure is True
+        assert c._last_summary_auth_failure is False
+
+    def test_compress_aborts_on_network_failure_despite_flag_false(self):
+        """#29559/#25585: abort_on_summary_failure=False (default), but a
+        transient connection error must ABORT — messages returned unchanged,
+        _last_compress_aborted=True — NOT drop the middle window. Retrying once
+        the network recovers beats discarding context for a transient blip."""
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(
+                model="test",
+                quiet_mode=True,
+                protect_first_n=2,
+                protect_last_n=2,
+                abort_on_summary_failure=False,
+            )
+        msgs = self._msgs(12)
+        with patch(
+            "agent.context_compressor.call_llm",
+            side_effect=ConnectionError("Connection error."),
+        ):
+            result = c.compress(msgs, current_tokens=999999, force=True)
+        # Session must NOT be compressed/rotated — same messages back.
+        assert result == msgs
+        assert len(result) == len(msgs)
+        assert c._last_compress_aborted is True
+        assert c._last_summary_network_failure is True
+        # Did NOT fall through to the static-fallback (drop-the-middle) path.
+        assert c._last_summary_fallback_used is False
 
     def test_aux_model_auth_failure_recovers_on_main_no_abort(self):
         """A 401 from a DISTINCT auxiliary summary_model retries on the main
@@ -1422,6 +1483,75 @@ class TestAbortOnSummaryFailure:
         assert c._last_compress_aborted is False
         assert c._summary_failure_cooldown_until == 0.0
         assert len(result) < len(msgs)
+
+    def test_force_true_bypasses_persisted_session_cooldown(self, tmp_path):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "summary text"
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("s1", "cli")
+        db.record_compression_failure_cooldown("s1", time.time() + 999.0, "timeout")
+
+        c = self._make_compressor()
+        c.bind_session_state(db, "s1")
+        msgs = self._make_msgs()
+
+        with patch("agent.context_compressor.call_llm", return_value=mock_response) as mock_llm:
+            result = c.compress(msgs, current_tokens=999999, force=True)
+
+        mock_llm.assert_called()
+        assert c._last_compress_aborted is False
+        assert len(result) < len(msgs)
+        assert db.get_compression_failure_cooldown("s1") is None
+
+    def test_aux_fallback_clears_persisted_session_cooldown_before_retry(self, tmp_path):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("s1", "cli")
+        db.record_compression_failure_cooldown("s1", time.time() + 999.0, "timeout")
+
+        c = self._make_compressor()
+        c.bind_session_state(db, "s1")
+        c.summary_model = "aux/model"
+
+        c._fallback_to_main_for_compression(Exception("provider down"), "failed")
+
+        assert c.summary_model == ""
+        assert c._summary_failure_cooldown_until == 0.0
+        assert db.get_compression_failure_cooldown("s1") is None
+
+    def test_success_clears_persisted_session_cooldown(self, tmp_path):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "summary text"
+
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("s1", "cli")
+        db.record_compression_failure_cooldown("s1", time.time() + 999.0, "timeout")
+
+        c = self._make_compressor()
+        c.bind_session_state(db, "s1")
+        c._summary_failure_cooldown_until = 0.0
+        msgs = self._make_msgs()
+
+        with patch("agent.context_compressor.call_llm", return_value=mock_response) as mock_llm:
+            result = c.compress(msgs, current_tokens=999999)
+
+        mock_llm.assert_called()
+        assert c._last_compress_aborted is False
+        assert len(result) < len(msgs)
+        assert db.get_compression_failure_cooldown("s1") is None
+
+    def test_session_end_does_not_clear_persisted_session_cooldown(self, tmp_path):
+        db = SessionDB(db_path=tmp_path / "state.db")
+        db.create_session("s1", "cli")
+        db.record_compression_failure_cooldown("s1", time.time() + 999.0, "timeout")
+
+        c = self._make_compressor()
+        c.bind_session_state(db, "s1")
+        c.on_session_end("s1", [])
+
+        assert db.get_compression_failure_cooldown("s1") is not None
 
 
 class TestSummaryPrefixNormalization:
@@ -2652,3 +2782,140 @@ class TestPreflightSentinelGuard:
         compressor.last_prompt_tokens = 50_000
         result = self._seed(compressor.last_prompt_tokens, 10_000)
         assert result == 50_000
+
+
+class TestTurnPairPreservation:
+    """Causal Coupling guard (#22523): compaction must never orphan a user turn.
+
+    ``_ensure_last_user_message_in_tail`` pulls the cut back to keep the last
+    user message in the tail (fixes #10896).  But its final
+    ``max(last_user_idx, head_end + 1)`` clamp pushes the cut *past* the user
+    when the user sits at ``head_end`` (the first compressible index) — the
+    only case where ``head_end + 1 > last_user_idx``.  The user then lands in
+    the compressed region without its assistant reply; the summariser marks it
+    as a pending ask and the next session re-executes the completed task.
+
+    The guard detects that split and pushes the cut forward to ``pair_end`` so
+    the complete (user -> assistant [-> tool results]) pair is summarised as a
+    finished unit.
+    """
+
+    @pytest.fixture
+    def compressor(self):
+        return ContextCompressor(
+            model="test/model",
+            threshold_percent=0.85,
+            protect_first_n=1,
+            protect_last_n=0,
+            quiet_mode=True,
+        )
+
+    # ------------------------------------------------------------------
+    # _find_turn_pair_end unit tests
+    # ------------------------------------------------------------------
+
+    def test_pair_end_user_only(self, compressor):
+        """User at end of list — no reply yet — pair_end is user+1."""
+        msgs = [{"role": "user", "content": "hello"}]
+        assert compressor._find_turn_pair_end(msgs, 0) == 1
+
+    def test_pair_end_user_with_assistant_reply(self, compressor):
+        """User + assistant — pair_end skips both."""
+        msgs = [
+            {"role": "user", "content": "do x"},
+            {"role": "assistant", "content": "done"},
+        ]
+        assert compressor._find_turn_pair_end(msgs, 0) == 2
+
+    def test_pair_end_user_assistant_with_tools(self, compressor):
+        """User + assistant + tool results — pair_end skips the whole group."""
+        msgs = [
+            {"role": "user", "content": "run it"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"function": {"name": "exec", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+            {"role": "tool", "tool_call_id": "c2", "content": "ok"},
+        ]
+        assert compressor._find_turn_pair_end(msgs, 0) == 4
+
+    def test_pair_end_stops_at_next_user(self, compressor):
+        """pair_end must not cross into the next user turn."""
+        msgs = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "second"},
+        ]
+        assert compressor._find_turn_pair_end(msgs, 0) == 2
+
+    # ------------------------------------------------------------------
+    # _ensure_last_user_message_in_tail unit tests
+    # ------------------------------------------------------------------
+
+    def test_user_already_in_tail_unchanged(self, compressor):
+        """When the user message is already past cut_idx, nothing changes."""
+        msgs = [
+            {"role": "user", "content": "head"},
+            {"role": "assistant", "content": "head reply"},
+            {"role": "user", "content": "last user"},
+            {"role": "assistant", "content": "last reply"},
+        ]
+        result = compressor._ensure_last_user_message_in_tail(msgs, cut_idx=2, head_end=1)
+        assert result == 2
+
+    def test_user_in_compressed_region_pulled_back(self, compressor):
+        """User in the middle (not at head_end) is pulled into the tail (#10896)."""
+        msgs = [
+            {"role": "user", "content": "head"},       # 0
+            {"role": "assistant", "content": "hi"},     # 1
+            {"role": "user", "content": "do thing"},   # 2  <- last user
+            {"role": "assistant", "content": "done"},  # 3
+        ]
+        # head_end=0, so head_end+1=1 <= last_user_idx=2: the #10896 pullback
+        # applies and the user stays in the tail (no forward push).
+        result = compressor._ensure_last_user_message_in_tail(msgs, cut_idx=3, head_end=0)
+        assert result <= 2
+
+    def test_orphan_prevented_user_at_head_end(self, compressor):
+        """Causal Coupling: user at head_end pushes the WHOLE pair into the summary.
+
+        This is the #22523 case: last_user_idx == head_end, so the clamp would
+        return head_end+1 and orphan the user.  The guard instead pushes the
+        cut forward to pair_end so user + reply + tool results are summarised
+        together and the tail never starts with a dangling user ask.
+        """
+        msgs = [
+            {"role": "user", "content": "first exchange"},   # 0 head
+            {"role": "user", "content": "THE ACTIVE ASK"},   # 1 = head_end, last user
+            {"role": "assistant", "content": "done"},        # 2 reply
+            {"role": "tool", "tool_call_id": "c1", "content": "toolout"},  # 3
+            {"role": "assistant", "content": "final reply"}, # 4
+        ]
+        head_end = 1
+        result = compressor._ensure_last_user_message_in_tail(msgs, cut_idx=3, head_end=head_end)
+        # Whole pair (indices 1..3) lands in the compressed region; tail starts at 4.
+        assert result == 4
+        tail = msgs[result:]
+        assert tail and tail[0]["role"] == "assistant"
+
+    def test_no_orphan_after_full_compaction_cycle(self, compressor):
+        """End-to-end: after _find_tail_cut_by_tokens, the tail never starts
+        with an unanswered user message."""
+        msgs = [
+            {"role": "user", "content": "initial"},
+            {"role": "assistant", "content": "ok"},
+        ]
+        for i in range(5):
+            msgs.append({"role": "user", "content": f"step {i}"})
+            msgs.append({"role": "assistant", "content": f"done {i}"})
+        msgs.append({"role": "user", "content": "lights off please"})
+        msgs.append({"role": "assistant", "content": "lights are off"})
+
+        head_end = compressor.protect_first_n
+        cut = compressor._find_tail_cut_by_tokens(msgs, head_end)
+        tail = msgs[cut:]
+
+        if tail and tail[0].get("role") == "user":
+            assert len(tail) >= 2 and tail[1].get("role") == "assistant", (
+                f"Orphan user turn at tail start: {tail[0]['content']!r} — "
+                f"next role is {tail[1].get('role') if len(tail) > 1 else 'nothing'}"
+            )
