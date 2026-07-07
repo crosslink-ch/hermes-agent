@@ -112,7 +112,7 @@ class TheChatAdapter(BasePlatformAdapter):
             ),
         ]
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         if not self.base_url:
             logger.error("TheChat: THECHAT_BASE_URL is required")
             return False

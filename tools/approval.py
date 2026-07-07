@@ -332,12 +332,12 @@ _CMDPOS = (
 # `rm -rf "/"` slip past the unconditional floor entirely.
 #
 # Accept the path either fully wrapped in a matching quote pair OR bare with
-# a whitespace/end terminator. The matching-quote requirement is deliberate:
-# it catches `rm -rf "/"` (path quoted on its own) while NOT firing on a
-# dangerous-looking string that is merely an argument to another command —
-# e.g. `git commit -m "rm -rf /"` — where the closing quote follows the path
-# but no opening quote precedes it, so neither branch applies.
-def _hardline_rm_path(path_alt: str, tail: str = r'(?:\s|$)') -> str:
+# a terminator. The matching-quote branch catches `rm -rf "/"` (path quoted
+# on its own). The bare branch's terminator accepts whitespace, end-of-string
+# OR a shell metacharacter (`) ` ; | &`) so a real root wipe inside a command
+# substitution — `$(rm -rf /)`, `` `rm -rf /` `` — whose `/` is terminated by
+# `)`/backtick is still caught.
+def _hardline_rm_path(path_alt: str, tail: str = r'(?:\s|$|[)`;|&])') -> str:
     return rf'(?:["\'](?:{path_alt})["\']|(?:{path_alt}){tail})'
 
 
@@ -350,14 +350,36 @@ _HARDLINE_SYSTEM_DIRS = (
 # `rm` plus its flag group, shared by the three rm hardline rules. Kept as a
 # plain concatenation (not an f-string) so the regex backslashes never live
 # inside an f-string replacement field — unsupported on the Python 3.11 floor.
-_RM_FLAG_PREFIX = r'\brm\s+(-[^\s]*\s+)*'
+#
+# Anchored to _CMDPOS (start of line, after a command separator ; && || |,
+# after a subshell opener $(/backtick, or after sudo/env/exec wrappers) so the
+# rule fires only when `rm` is an actual command word — not when the literal
+# string "rm -rf /" appears as DATA inside another command's argument, e.g.
+# `gh pr create --title "block rm -rf / spellings"` or `git commit -m "…rm -rf
+# /…"`. Those tripped the unconditional floor and could not run at all before
+# the anchor. A real wipe at any command position (bare, chained, in $()/`…`,
+# under sudo) still matches; the quoted-path branch in _hardline_rm_path keeps
+# catching `rm -rf "/"`.
+_RM_FLAG_PREFIX = _CMDPOS + r'rm\s+(-[^\s]*\s+)*'
 
 HARDLINE_PATTERNS = [
     # rm recursive targeting the root filesystem or protected roots.
     # `${HOME}` brace form and quoted paths (`rm -rf "/"`, `rm -rf "$HOME"`)
     # are handled via _hardline_rm_path so the floor cannot be bypassed with
     # the ordinary quoting/brace shell idioms.
-    (_RM_FLAG_PREFIX + _hardline_rm_path(r'/|/\*|/ \*'), "recursive delete of root filesystem"),
+    #
+    # The path token matches any root-anchored path whose components collapse
+    # back to "/" in the shell: a bare "/", repeated slashes ("//"), and
+    # "."/".." current/parent segments ("/.", "/./", "/..", "/../..") all
+    # resolve to root, optionally followed by a trailing glob ("/*", "//*").
+    # Each inter-slash segment must be exactly "." or "..", so a longer dot
+    # run or any real name is a literal directory, NOT root — "/tmp", "/home",
+    # "/.ssh", "/.config" and even "/..." (a dir literally named "...") fall
+    # through to the softer DANGEROUS_PATTERNS / system-directory rules
+    # instead of being unconditionally hardline-blocked. The explicit "/ \*"
+    # alt preserves the slash-space-glob spelling (`rm -rf / *`, which the
+    # shell sees as two args: "/" plus the "*" glob).
+    (_RM_FLAG_PREFIX + _hardline_rm_path(r'/(?:(?:\.\.?)?/)*(?:\.\.?)?\**|/ \*'), "recursive delete of root filesystem"),
     (_RM_FLAG_PREFIX + _hardline_rm_path(_HARDLINE_SYSTEM_DIRS), "recursive delete of system directory"),
     (_RM_FLAG_PREFIX + _hardline_rm_path(r'(?:~|\$\{?HOME\}?)(?:/?|/\*)?'), "recursive delete of home directory"),
     # Filesystem format
@@ -440,6 +462,53 @@ def detect_hardline_command(command: str) -> tuple:
     return (False, None)
 
 
+def _match_user_deny_rule(command: str) -> str | None:
+    """Return the matching ``approvals.deny`` glob, or None.
+
+    ``approvals.deny`` in config.yaml is a user-defined list of fnmatch
+    globs that block a command unconditionally — like the hardline floor,
+    a deny match fires BEFORE the yolo / mode=off bypass. It is the
+    user-editable counterpart to the code-shipped hardline blocklist:
+    "never let the agent run this, even under yolo".
+
+    Matching is case-insensitive and runs over the same normalized /
+    deobfuscated command variants the dangerous-pattern detector uses, so
+    quoting tricks (``r\\m``, ``git st""atus``) can't sidestep a rule any
+    more easily than they sidestep detection. Empty/absent list = no-op.
+    """
+    try:
+        deny_patterns = _get_approval_config().get("deny") or []
+    except Exception:
+        return None
+    if not deny_patterns:
+        return None
+    globs = [p.strip() for p in deny_patterns
+             if isinstance(p, str) and p.strip()]
+    if not globs:
+        return None
+    for command_variant in _command_detection_variants(command):
+        candidate = command_variant.lower().strip()
+        for pattern in globs:
+            if fnmatch.fnmatchcase(candidate, pattern.lower()):
+                return pattern
+    return None
+
+
+def _user_deny_block_result(pattern: str) -> dict:
+    """Build the standard block result for an ``approvals.deny`` match."""
+    return {
+        "approved": False,
+        "user_deny": True,
+        "message": (
+            f"BLOCKED: this command matches the user-defined deny rule "
+            f"'{pattern}' (approvals.deny in config.yaml). It cannot be "
+            "executed via the agent — not even with --yolo, /yolo, or "
+            "approvals.mode=off. Do NOT retry or rephrase this command; "
+            "the user has explicitly forbidden it."
+        ),
+    }
+
+
 def _hardline_block_result(description: str) -> dict:
     """Build the standard block result for a hardline match."""
     return {
@@ -478,6 +547,18 @@ DANGEROUS_PATTERNS = [
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
     (r'\brm\s+-[^\s]*r', "recursive delete"),
     (r'\brm\s+--recursive\b', "recursive delete (long flag)"),
+    # Windows shell front-ends have destructive built-ins that do not look like
+    # Unix `rm`. Gate only when they are executed through cmd/powershell so
+    # ordinary prose or filenames containing "del"/"rd" do not trip the guard.
+    (r'\bcmd(?:\.exe)?\s+/(?:c|k)\s+.*\b(?:del|erase|rd|rmdir)\b', "Windows cmd destructive delete"),
+    # PowerShell/pwsh: the destructive verb runs as the default positional
+    # argument, so `powershell Remove-Item ...` needs NO explicit -Command.
+    # Anchor the verb to the command position (right after the shell name,
+    # after any leading `-Flag` switches, and optionally after -Command/-c)
+    # so bare invocations are caught while a benign path arg containing
+    # "del"/"rm" (e.g. `-File c:\del-logs\run.ps1`) is not.
+    (r'\b(?:powershell|pwsh)(?:\.exe)?\b(?:\s+-\S+)*\s+(?:-(?:command|c)\s+)?["\']?(?:remove-item|rmdir|erase|del|rd|ri|rm)\b', "Windows PowerShell destructive delete"),
+    (r'\b(?:powershell|pwsh)(?:\.exe)?\b.*\s-(?:encodedcommand|enc|e)\b', "PowerShell encoded command execution"),
     (r'\bchmod\s+(-[^\s]*\s+)*(777|666|o\+[rwx]*w|a\+[rwx]*w)\b', "world/other-writable permissions"),
     (r'\bchmod\s+--recursive\b.*(777|666|o\+[rwx]*w|a\+[rwx]*w)', "recursive world/other-writable (long flag)"),
     (r'\bchown\s+(-[^\s]*)?R\s+root', "recursive chown to root"),
@@ -622,11 +703,27 @@ DANGEROUS_PATTERNS = [
     (r'\b(bash|sh|zsh|ksh)\s+<<', "shell execution via heredoc"),
     # Git destructive operations that can lose uncommitted work or rewrite
     # shared history. Not captured by rm/chmod/etc patterns.
-    (r'\bgit\s+reset\s+--hard\b', "git reset --hard (destroys uncommitted changes)"),
+    # `git reset --hard` accepts any unambiguous long-flag prefix (--h,
+    # --ha, --har, --hard) because git's own option parser resolves
+    # abbreviated long flags -- `--hard` is the only `git reset` mode
+    # starting with "h" (siblings are --soft/--mixed/--merge/--keep), so
+    # this cannot collide with another reset mode. It also does not match
+    # `--help`, which git special-cases before mode resolution.
+    (r'\bgit\s+reset\s+--h(?:a(?:r(?:d)?)?)?\b', "git reset --hard (destroys uncommitted changes)"),
     (r'\bgit\s+push\b.*--forc[a-z]*\b', "git force push (rewrites remote history)"),
     (r'\bgit\s+push\b.*-f\b', "git force push short flag (rewrites remote history)"),
     (r'\bgit\s+clean\s+-[^\s]*f', "git clean with force (deletes untracked files)"),
     (r'\bgit\s+branch\s+-D\b', "git branch force delete"),
+    # `-D` is shorthand for `-d --force`; the long-flag spellings
+    # (`--delete`, `--force`) are different tokens entirely, so they slip
+    # past the `-D\b` pattern above even though `git branch -d --force`
+    # and `git branch --delete --force` delete an unmerged branch exactly
+    # like `-D` does. Match delete+force in either order, bounded to the
+    # same command segment (not spanning `;`/`|`/`&`/newline) the same
+    # way the sudo patterns below do, to avoid contaminating an unrelated
+    # later command in the same script.
+    (r'\bgit\s+branch\b[^;|&\n]*?(?:-d\b|--delete\b)[^;|&\n]*?(?:-f\b|--force\b)', "git branch force delete (long flags)"),
+    (r'\bgit\s+branch\b[^;|&\n]*?(?:-f\b|--force\b)[^;|&\n]*?(?:-d\b|--delete\b)', "git branch force delete (long flags, force-first)"),
     # Script execution after chmod +x — catches the two-step pattern where
     # a script is first made executable then immediately run. The script
     # content may contain dangerous commands that individual patterns miss.
@@ -644,7 +741,14 @@ DANGEROUS_PATTERNS = [
     # are gated below. Lazy `[^;|&\n]*?` allows flag arguments (e.g.
     # `sudo -u root -S whoami`) without spanning command separators. See
     # #17873 category 4.
-    (r'\bsudo\b[^;|&\n]*?\s+(?:-s\b|--stdin\b|-a\b|--askpass\b)',
+    # sudo's own option parser (like git's) resolves unambiguous
+    # long-flag prefixes, so `sudo --stdi` runs identically to
+    # `sudo --stdin` and `sudo --ask` to `sudo --askpass` -- confirmed
+    # against a live sudo binary. `--st[a-z]*` and `--a[a-z]*` are safe
+    # to match broadly: per `man sudo`, `--stdin` is the only long option
+    # starting with "st" (siblings are --shell/--set-home) and
+    # `--askpass` is the only one starting with "a" at all.
+    (r'\bsudo\b[^;|&\n]*?\s+(?:-s\b|--st[a-z]*\b|-a\b|--a[a-z]*\b)',
      "sudo with privilege flag (stdin/askpass/shell/list)"),
     # Combined short-flag form: -nS, -ns, -sa, -las — sudo flags packed
     # into a single -X token. Catches the same threat class.
@@ -733,6 +837,18 @@ def _normalize_command_for_detection(command: str) -> str:
     command = re.sub(r'\\([^\n])', r'\1', command)
     # Strip empty-string literals that split tokens: r''m → rm, r"\"m → rm.
     command = re.sub(r"''|\"\"", '', command)
+    # Collapse $IFS / ${IFS} word-separator expansions to a literal space.
+    # In any POSIX shell the IFS variable defaults to <space><tab><newline>,
+    # so `rm${IFS}-rf${IFS}/` is executed as `rm -rf /`. Because the dangerous
+    # and hardline patterns anchor on literal whitespace (\s) between a command
+    # and its arguments, leaving the unexpanded `${IFS}` token in place lets an
+    # attacker slip past EVERY pattern — including the unconditional hardline
+    # floor (rm -rf /, mkfs, dd to raw device, shutdown/reboot). Substituting a
+    # space here mirrors the shell's own expansion so the patterns fire. The
+    # brace form also covers bash substring expansions like `${IFS:0:1}` (a
+    # single space). Same de-obfuscation class as the backslash/empty-quote
+    # handling above.
+    command = re.sub(r'\$\{IFS\b[^}]*\}|\$IFS\b', ' ', command)
     return command
 
 
@@ -1125,6 +1241,17 @@ def _iter_shell_command_starts(command: str):
             starts.append(i + 2)
             i += 2
             continue
+        # Bare subshell `(cmd)` and brace group `{ cmd; }` openers begin a new
+        # command context, just like `;` or `$(`. We only reach this branch
+        # OUTSIDE any quote (the quote arms above `continue` first), so a `(`
+        # or `{` sitting inside a quoted argument — `--title "block (reboot)"`,
+        # `echo "{ reboot; }"` — never registers a command start. That is the
+        # whole reason this lives in the quote-aware tokenizer instead of the
+        # flat `_CMDPOS` regex, which cannot tell quoted text from real syntax.
+        if ch in ("(", "{"):
+            starts.append(i + 1)
+            i += 1
+            continue
         if ch == ";":
             starts.append(i + 1)
             i += 1
@@ -1155,6 +1282,29 @@ def _iter_shell_command_starts(command: str):
         if start < len(command) and start not in seen:
             seen.add(start)
             yield start
+
+
+def _mark_command_starts(command: str) -> str:
+    """Insert a newline before each real (quote-aware) command start.
+
+    ``\\n`` is already a ``_CMDPOS`` separator, so this rewrites subshell
+    ``(cmd)`` and brace-group ``{ cmd; }`` openers — which the flat pattern
+    class deliberately omits — into a form the anchored hardline/dangerous
+    patterns recognize, WITHOUT the quoted-prose false positives that adding
+    ``(`` / ``{`` to ``_CMDPOS`` would cause. Starts inside quotes are never
+    produced by ``_iter_shell_command_starts``, so quoted arguments such as
+    ``--title "block (reboot)"`` are left exactly as-is.
+    """
+    # Collect the (whitespace-skipped) start offsets, drop 0 (already anchored
+    # by ``^``), and splice a newline in front of each — right-to-left so the
+    # earlier offsets stay valid as we mutate.
+    offsets = sorted(o for o in _iter_shell_command_starts(command) if o > 0)
+    if not offsets:
+        return command
+    out = command
+    for offset in reversed(offsets):
+        out = out[:offset] + "\n" + out[offset:]
+    return out
 
 
 def _iter_shell_command_word_spans(command: str):
@@ -1203,6 +1353,21 @@ def _command_detection_variants(command: str):
     normalized = _normalize_command_for_detection(command)
     seen = {normalized}
     yield normalized
+    # Subshell `(cmd)` and brace-group `{ cmd; }` openers put `cmd` at a real
+    # command position, but the flat `_CMDPOS`-anchored patterns can't see it:
+    # their start-position class deliberately omits `(`/`{` because a bare
+    # regex cannot tell `(reboot)` (real subshell) from `--title "(reboot)"`
+    # (quoted prose) — adding them there regresses ordinary quoted arguments.
+    # Instead, reconstruct the command with a newline (already a `_CMDPOS`
+    # separator) inserted at each command start the QUOTE-AWARE tokenizer
+    # found. Openers inside quotes never yield a start, so quoted prose is
+    # untouched, while `(reboot)` / `{ shutdown -h now; }` now anchor. This
+    # covers every `_CMDPOS` rule (shutdown/reboot/init/systemctl/telinit and
+    # the rm root/home/system floor) in one place.
+    marked = _mark_command_starts(normalized)
+    if marked != normalized and marked not in seen:
+        seen.add(marked)
+        yield marked
     # Shell quoting/escaping can spell a dangerous executable name in pieces
     # (for example r\m or r''m). Keep that deobfuscation scoped to command
     # words so similarly shaped arguments do not become false positives.
@@ -1253,12 +1418,16 @@ _permanent_approved: set = set()
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("event", "data", "result")
+    __slots__ = ("event", "data", "result", "reason")
 
     def __init__(self, data: dict):
         self.event = threading.Event()
         self.data = data          # command, description, pattern_keys, …
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
+        # Optional free-text reason supplied with an explicit deny
+        # (``/deny <reason>``) so the agent can adapt instead of only
+        # hearing "denied". Ported from qwibitai/nanoclaw#2832.
+        self.reason: Optional[str] = None
 
 
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
@@ -1291,13 +1460,18 @@ def unregister_gateway_notify(session_key: str) -> None:
 
 
 def resolve_gateway_approval(session_key: str, choice: str,
-                             resolve_all: bool = False) -> int:
+                             resolve_all: bool = False,
+                             reason: Optional[str] = None) -> int:
     """Called by the gateway's /approve or /deny handler to unblock
     waiting agent thread(s).
 
     When *resolve_all* is True every pending approval in the session is
     resolved at once (``/approve all``).  Otherwise only the oldest one
     is resolved (FIFO).
+
+    *reason* is an optional free-text explanation attached to an explicit
+    deny (``/deny <reason>``).  It is relayed back to the agent in the
+    BLOCKED message so it can adapt instead of only hearing "denied".
 
     Returns the number of approvals resolved (0 means nothing was pending).
     """
@@ -1315,6 +1489,8 @@ def resolve_gateway_approval(session_key: str, choice: str,
 
     for entry in targets:
         entry.result = choice
+        if reason:
+            entry.reason = reason
         entry.event.set()
     return len(targets)
 
@@ -1653,6 +1829,27 @@ def _get_approval_mode() -> str:
     return _normalize_approval_mode(mode)
 
 
+def is_approval_bypass_active() -> bool:
+    """Return True when the user has opted out of Hermes approval prompts.
+
+    Collapses the canonical three-source bypass check used across the codebase
+    into one place:
+      - process-scoped ``--yolo`` / ``HERMES_YOLO_MODE`` (frozen at import time
+        so a mid-process skill can't flip it — a prompt-injection escalation
+        path; see ``_YOLO_MODE_FROZEN`` above),
+      - the session-scoped gateway ``/yolo`` toggle,
+      - ``approvals.mode: off`` in config.
+
+    This is the pure-bypass sub-expression only. Callers that also honor a
+    hardline blocklist / permanent allowlist must check those separately.
+    """
+    return (
+        _YOLO_MODE_FROZEN
+        or is_current_session_yolo_enabled()
+        or _get_approval_mode() == "off"
+    )
+
+
 def _get_approval_timeout() -> int:
     """Read the approval timeout from config. Defaults to 60 seconds."""
     try:
@@ -1842,6 +2039,15 @@ def check_dangerous_command(command: str, env_type: str,
     if is_hardline:
         logger.warning("Hardline block: %s (command: %s)", hardline_desc, command[:200])
         return _hardline_block_result(hardline_desc)
+
+    # User-defined deny rules (approvals.deny in config.yaml): like the
+    # hardline floor, these fire BEFORE the yolo bypass — a deny rule is the
+    # user saying "never, even under yolo".
+    deny_pattern = _match_user_deny_rule(command)
+    if deny_pattern is not None:
+        logger.warning("User deny rule %r blocked command: %s",
+                       deny_pattern, command[:200])
+        return _user_deny_block_result(deny_pattern)
 
     # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
     # CLI --yolo remains process-scoped via the env var for local use.
@@ -2068,7 +2274,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
         surface=surface,
         choice=_outcome,
     )
-    return {"resolved": resolved, "choice": choice}
+    return {"resolved": resolved, "choice": choice, "reason": entry.reason}
 
 
 def check_all_command_guards(command: str, env_type: str,
@@ -2109,6 +2315,15 @@ def check_all_command_guards(command: str, env_type: str,
         logger.warning("Sudo stdin guard block: %s (command: %s)",
                        sudo_guess_desc, command[:200])
         return _sudo_stdin_block_result(sudo_guess_desc)
+
+    # User-defined deny rules (approvals.deny in config.yaml): like the
+    # hardline floor, these fire BEFORE the yolo / mode=off bypass — a deny
+    # rule is the user saying "never, even under yolo".
+    deny_pattern = _match_user_deny_rule(command)
+    if deny_pattern is not None:
+        logger.warning("User deny rule %r blocked command: %s",
+                       deny_pattern, command[:200])
+        return _user_deny_block_result(deny_pattern)
 
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
@@ -2342,6 +2557,7 @@ def check_all_command_guards(command: str, env_type: str,
                 }
             resolved = decision["resolved"]
             choice = decision["choice"]
+            deny_reason = decision.get("reason")
 
             if not resolved or choice is None or choice == "deny":
                 # Consent contract: silence is NOT consent, and an explicit
@@ -2357,21 +2573,28 @@ def check_all_command_guards(command: str, env_type: str,
                     reason = "denied by user"
                     timeout_addendum = ""
                     outcome = "denied"
+                # An explicit deny may carry a free-text reason
+                # (``/deny <reason>``) so the agent can adapt rather than only
+                # hearing "denied". Relayed verbatim; generic attribution.
+                reason_addendum = ""
+                if outcome == "denied" and deny_reason:
+                    reason_addendum = f' Reason given by the user: "{deny_reason}".'
                 return {
                     "approved": False,
                     "message": (
-                        f"BLOCKED: Command {reason}. The user has NOT consented "
-                        f"to this action. Do NOT retry this command, do NOT "
-                        f"rephrase it, and do NOT attempt the same outcome via "
-                        f"a different command. Stop the current workflow and "
-                        f"wait for the user to respond before taking any "
-                        f"further destructive or irreversible action."
-                        f"{timeout_addendum}"
+                        f"BLOCKED: Command {reason}.{reason_addendum} The user "
+                        f"has NOT consented to this action. Do NOT retry this "
+                        f"command, do NOT rephrase it, and do NOT attempt the "
+                        f"same outcome via a different command. Stop the "
+                        f"current workflow and wait for the user to respond "
+                        f"before taking any further destructive or "
+                        f"irreversible action.{timeout_addendum}"
                     ),
                     "pattern_key": primary_key,
                     "description": combined_desc,
                     "outcome": outcome,
                     "user_consent": False,
+                    "deny_reason": deny_reason,
                 }
 
             # User approved — persist based on scope (same logic as CLI)
@@ -2635,22 +2858,27 @@ def check_execute_code_guard(code: str, env_type: str,
 
     resolved = decision["resolved"]
     choice = decision["choice"]
+    deny_reason = decision.get("reason")
 
     if not resolved or choice is None or choice == "deny":
         reason = "timed out without user response" if not resolved else "denied by user"
         addendum = " Silence is not consent." if not resolved else ""
+        reason_addendum = ""
+        if resolved and choice == "deny" and deny_reason:
+            reason_addendum = f' Reason given by the user: "{deny_reason}".'
         return {
             "approved": False,
             "message": (
-                f"BLOCKED: execute_code script {reason}. The user has NOT "
-                f"consented to running this code. Do NOT retry, do NOT rephrase "
-                f"the script, and do NOT attempt the same outcome via a "
-                f"different tool.{addendum}"
+                f"BLOCKED: execute_code script {reason}.{reason_addendum} The "
+                f"user has NOT consented to running this code. Do NOT retry, "
+                f"do NOT rephrase the script, and do NOT attempt the same "
+                f"outcome via a different tool.{addendum}"
             ),
             "pattern_key": pattern_key,
             "description": description,
             "outcome": "timeout" if not resolved else "denied",
             "user_consent": False,
+            "deny_reason": deny_reason,
         }
 
     # Approved — persist based on scope (same logic as check_all_command_guards).

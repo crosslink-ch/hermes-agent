@@ -31,6 +31,18 @@ _HARDLINE_BLOCK = [
     # rm -rf targeting root / system dirs / home
     "rm -rf /",
     "rm -rf /*",
+    # Shell-equivalent spellings of "rm -rf /": repeated slashes and
+    # current/parent-dir segments all collapse back to root, so they must
+    # hit the hardline floor too (regression: these used to slip through the
+    # root pattern's target group and fall to the softer DANGEROUS_PATTERNS
+    # rule, which --yolo / approvals.mode=off / cron approve-mode bypass).
+    "rm -rf //",
+    "rm -rf /.",
+    "rm -rf /./",
+    "rm -rf /..",
+    "rm -rf //*",
+    "rm -fr /./",
+    "ls && rm -rf //",
     "rm -rf /home",
     "rm -rf /home/*",
     "rm -rf /etc",
@@ -106,6 +118,23 @@ _HARDLINE_BLOCK = [
     "exec shutdown",
     "nohup reboot",
     "setsid poweroff",
+    # Bare subshell `(cmd)` and brace-group `{ cmd; }` openers put the trigger
+    # at a real command position, so they must hit the floor just like `$(…)`.
+    # These slipped through before the quote-aware command-start tokenizer
+    # learned to recognize `(` / `{` (issue: (reboot) walked past --yolo).
+    "(reboot)",
+    "( reboot )",
+    "(shutdown -h now)",
+    "(poweroff)",
+    "(halt)",
+    "(init 0)",
+    "(systemctl reboot)",
+    "(sudo reboot)",
+    "{ reboot; }",
+    "{ shutdown -h now; }",
+    "{ poweroff; }",
+    "true && (reboot)",
+    "echo hi; { reboot; }",
 ]
 
 
@@ -121,6 +150,16 @@ _HARDLINE_ALLOW = [
     "rm -rf $HOME/tmp",
     "rm foo.txt",
     "rm -rf some/path",
+    # Literal root-level directories that only LOOK like root-collapse
+    # spellings. Each inter-slash segment must be exactly "." or ".." to
+    # count as a collapse back to "/" — "/..." is a dir literally named
+    # "..." and "/.foo" is an ordinary root dotfile. These must NOT be
+    # swept into the "recursive delete of root filesystem" hardline rule
+    # (regression guard for the collapse-spelling tightening).
+    "rm -rf /...",
+    "rm -rf /....",
+    "rm -rf /.foo",
+    "rm -rf /.config/foo",
     # A dangerous-looking command embedded as a quoted *argument* to another
     # command must not trip the floor: the path is immediately followed by a
     # closing quote with no matching opening quote of its own, so the
@@ -197,6 +236,71 @@ def test_quoted_and_brace_paths_are_hardline_blocked(command):
     """Quoted paths and ${HOME} must hit the floor (was a silent bypass)."""
     is_hl, desc = detect_hardline_command(command)
     assert is_hl, f"quoting/brace bypass leaked through hardline floor: {command!r}"
+    assert desc
+
+
+# Commands that carry the literal string "rm -rf /" (or a sibling) as DATA in
+# another command's quoted argument — a PR title, a commit message, an echo /
+# printf argument. The shell never executes that text as an rm command, so the
+# hardline floor must NOT fire; otherwise the command cannot run at all (this
+# blocked `gh pr create --title "…rm -rf /…"` outright). Regression guard for
+# the command-position anchor on the rm rules.
+_DATA_ARG_NOT_A_COMMAND = [
+    'gh pr create --title "block rm -rf / spellings"',
+    'git commit -m "fixes rm -rf / bypass"',
+    'echo "run rm -rf / now"',
+    'echo "rm -rf /"',
+    'printf "%s" "rm -rf /"',
+    'gh issue comment 1 --body "the fix blocks rm -rf //"',
+    # A `(` or `{` INSIDE a quoted argument is prose, not a subshell/brace
+    # opener — the trigger word after it is data. Naively adding `(` / `{` to
+    # the flat command-position class blocked these (it broke our own
+    # `gh pr create --title "…(reboot)…"` workflow); the quote-aware tokenizer
+    # must leave them alone.
+    'gh pr create --title "block (reboot) spellings"',
+    'git commit -m "(rm -rf /) note"',
+    'echo "(reboot)"',
+    'echo "{ reboot; }"',
+    "echo '(poweroff)'",
+    "echo '{ rm -rf /; }'",
+    'find . -name "*(reboot)*"',
+]
+
+
+@pytest.mark.parametrize("command", _DATA_ARG_NOT_A_COMMAND)
+def test_root_wipe_string_as_data_arg_is_not_hardline(command):
+    """"rm -rf /" as a quoted argument to another command is data, not a wipe."""
+    is_hl, desc = detect_hardline_command(command)
+    assert not is_hl, f"false positive: quoted data arg hit hardline floor: {command!r} ({desc})"
+
+
+# Real root wipes at every command position — bare, chained after a separator,
+# inside a command substitution ($()/backtick), or after sudo/env wrappers.
+# The command-position anchor must keep catching all of these; the substitution
+# forms exercise the shell-metacharacter terminator on the bare path branch.
+_COMMAND_POSITION_ROOT_WIPES = [
+    "rm -rf /",
+    "ls && rm -rf /",
+    "ls; rm -rf /",
+    "echo x | rm -rf /",
+    "sudo rm -rf /",
+    "env X=1 rm -rf /",
+    "$(rm -rf /)",
+    "`rm -rf /`",
+    'echo "$(rm -rf /)"',
+    # Bare subshell / brace-group openers are real command positions too.
+    "(rm -rf /)",
+    "{ rm -rf /; }",
+    "(rm -rf ~)",
+    "(sudo rm -rf /)",
+]
+
+
+@pytest.mark.parametrize("command", _COMMAND_POSITION_ROOT_WIPES)
+def test_root_wipe_at_command_position_is_hardline(command):
+    """A real `rm -rf /` at any command position stays hardline-blocked."""
+    is_hl, desc = detect_hardline_command(command)
+    assert is_hl, f"real root wipe leaked past the floor: {command!r}"
     assert desc
 
 
@@ -279,6 +383,79 @@ def test_yolo_env_var_cannot_bypass_hardline(clean_session, monkeypatch):
         r2 = check_all_command_guards(cmd, "local")
         assert r2["approved"] is False, f"yolo leaked hardline on {cmd!r} (check_all_command_guards)"
         assert r2.get("hardline") is True
+
+
+def test_root_collapse_forms_cannot_bypass_hardline(clean_session, monkeypatch):
+    """Shell-equivalent spellings of "rm -rf /" stay blocked under yolo.
+
+    "//", "/.", "/./", "/..", "//*" all collapse to the root filesystem in
+    the shell. They previously matched only the softer DANGEROUS_PATTERNS
+    rule, which yolo bypasses — leaving the hardline floor open to a full
+    root wipe under --yolo / approvals.mode=off / cron approve-mode.
+    """
+    monkeypatch.setenv("HERMES_YOLO_MODE", "1")
+
+    for cmd in ["rm -rf //", "rm -rf /.", "rm -rf /./", "rm -rf /..", "rm -rf //*"]:
+        is_hl, _ = detect_hardline_command(cmd)
+        assert is_hl, f"{cmd!r} should be hardline-blocked"
+        result = check_all_command_guards(cmd, "local")
+        assert result["approved"] is False, f"yolo leaked hardline on {cmd!r}"
+        assert result.get("hardline") is True
+
+
+def test_root_collapse_pattern_leaves_real_paths_alone(clean_session):
+    """The broadened root token must not over-match real trailing segments.
+
+    A path with a real component after the root-collapse prefix (/tmp,
+    /home/user/x, /.ssh, ./build) is recoverable-or-legitimate and must NOT
+    be pulled onto the hardline floor by the "collapse to /" broadening.
+    """
+    for cmd in ["rm -rf /tmp", "rm -rf /home/user/x", "rm -rf /.ssh",
+                "rm -rf /.config", "rm -rf ./build", "rm -rf /opt/foo",
+                "rm -rf /...", "rm -rf /....", "rm -rf /.foo"]:
+        is_hl, _ = detect_hardline_command(cmd)
+        assert not is_hl, f"{cmd!r} must not be hardline-blocked (over-match)"
+
+
+def test_subshell_brace_group_cannot_bypass_hardline(clean_session, monkeypatch):
+    """Wrapping a catastrophic command in `(…)` or `{ …; }` must not bypass
+    the floor, even under yolo. `(reboot)` / `{ shutdown -h now; }` walked
+    straight past the guard before the command-start tokenizer recognized the
+    subshell and brace-group openers.
+    """
+    monkeypatch.setenv("HERMES_YOLO_MODE", "1")
+
+    for cmd in ["(reboot)", "( reboot )", "(shutdown -h now)", "(poweroff)",
+                "(systemctl reboot)", "(init 0)", "(sudo reboot)",
+                "{ reboot; }", "{ shutdown -h now; }", "{ poweroff; }",
+                "(rm -rf /)", "{ rm -rf /; }", "(rm -rf ~)",
+                "true && (reboot)", "echo hi; { reboot; }"]:
+        r1 = check_dangerous_command(cmd, "local")
+        assert r1["approved"] is False, f"yolo leaked hardline on {cmd!r} (check_dangerous_command)"
+        assert r1.get("hardline") is True
+
+        r2 = check_all_command_guards(cmd, "local")
+        assert r2["approved"] is False, f"yolo leaked hardline on {cmd!r} (check_all_command_guards)"
+        assert r2.get("hardline") is True
+
+
+def test_quoted_paren_brace_prose_not_blocked_under_yolo(clean_session, monkeypatch):
+    """A `(` / `{` inside a quoted argument is prose, not a command opener.
+
+    Regression guard: naively adding `(` / `{` to the flat command-position
+    class blocked ordinary quoted arguments — including our own
+    `gh pr create --title "…(reboot)…"` workflow. The quote-aware tokenizer
+    must leave quoted text untouched, so these stay runnable.
+    """
+    monkeypatch.setenv("HERMES_YOLO_MODE", "1")
+
+    for cmd in ['gh pr create --title "block (reboot) spellings"',
+                'git commit -m "(rm -rf /) note"',
+                'echo "(reboot)"', 'echo "{ reboot; }"',
+                "echo '(poweroff)'", 'find . -name "*(reboot)*"']:
+        assert detect_hardline_command(cmd)[0] is False, (
+            f"quoted prose false-positived on the hardline floor: {cmd!r}"
+        )
 
 
 def test_line_continuation_root_wipe_cannot_bypass_hardline(clean_session, monkeypatch):
