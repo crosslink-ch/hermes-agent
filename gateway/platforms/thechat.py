@@ -485,6 +485,34 @@ class TheChatAdapter(BasePlatformAdapter):
             context=context,
         )
 
+    def _context_from_platform_event(
+        self,
+        item: Any,
+        *,
+        fallback_thread_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(item, dict):
+            return None
+        invocation_id = item.get("invocationId")
+        if not invocation_id:
+            return None
+        bot = item.get("bot") or {}
+        conversation = item.get("conversation") or {}
+        thread_id = str(item.get("threadId") or item.get("thread_id") or fallback_thread_id or "") or None
+        session_intent = item.get("sessionIntent")
+        context: Dict[str, Any] = {
+            "invocation_id": str(invocation_id),
+            "bot_id": str(bot.get("id") or ""),
+            "bot_name": str(bot.get("name") or "Hermes"),
+            "conversation_id": str(conversation.get("id") or ""),
+            "conversation_name": conversation.get("name"),
+            "chat_type": item.get("chatType") or "group",
+            "thread_id": thread_id,
+        }
+        if isinstance(session_intent, dict):
+            context["sessionIntent"] = session_intent
+        return context
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         context = self._contexts.get(chat_id) or {}
         return {
@@ -495,7 +523,19 @@ class TheChatAdapter(BasePlatformAdapter):
         }
 
     async def on_processing_start(self, event: MessageEvent) -> None:
-        context = self._event_contexts.get(str(event.message_id or ""))
+        event_key = str(event.message_id or "")
+        context = self._event_contexts.get(event_key)
+        if context is None:
+            # `/queue <prompt>` is acknowledged and completed immediately while
+            # the queued turn is replayed later using the same platform event.
+            # Rehydrate the context from raw_message so the deferred response and
+            # tool-progress still route to the original TheChat task/thread.
+            context = self._context_from_platform_event(
+                event.raw_message,
+                fallback_thread_id=event.source.thread_id,
+            )
+            if context and event_key:
+                self._event_contexts[event_key] = context
         if context:
             context["event"] = event
             self._contexts[
@@ -727,17 +767,9 @@ class TheChatAdapter(BasePlatformAdapter):
                 "thechat.session_intent.type": session_intent_type,
             },
         ) as span:
-            context = {
-                "invocation_id": invocation_id,
-                "bot_id": str(bot.get("id") or ""),
-                "bot_name": str(bot.get("name") or "Hermes"),
-                "conversation_id": str(conversation.get("id") or ""),
-                "conversation_name": conversation.get("name"),
-                "chat_type": item.get("chatType") or "group",
-                "thread_id": thread_id,
-            }
-            if isinstance(session_intent, dict):
-                context["sessionIntent"] = session_intent
+            context = self._context_from_platform_event(item, fallback_thread_id=thread_id)
+            if context is None:
+                raise ValueError("TheChat event missing invocation context")
             self._contexts[self._context_key(chat_id, thread_id)] = context
             if thread_id is None:
                 self._contexts[chat_id] = context

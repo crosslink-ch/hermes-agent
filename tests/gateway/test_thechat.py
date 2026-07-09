@@ -310,7 +310,7 @@ async def test_active_non_canceling_commands_mark_thechat_invocation_completed(
 
 
 @pytest.mark.asyncio
-async def test_active_queue_command_completes_when_queued_turn_completes():
+async def test_active_queue_command_ack_marks_invocation_completed_immediately():
     adapter = _make_adapter()
     command_context = _context("invocation-queue")
     adapter._contexts["chat-1"] = command_context
@@ -347,17 +347,13 @@ async def test_active_queue_command_completes_when_queued_turn_completes():
                 "botId": "bot-1",
                 "conversationId": "conversation-1",
             },
-        }
+        },
+        {
+            "path": "/hermes-platform/invocations/invocation-queue/completed",
+            "json": {"reason": "Hermes gateway completed"},
+        },
     ]
-    assert adapter._event_contexts["message-queue"] is command_context
-
-    queued_event = adapter._pending_messages.pop(session_key)
-    await adapter.on_processing_complete(queued_event, ProcessingOutcome.SUCCESS)
-
-    assert adapter._client.posts[-1] == {
-        "path": "/hermes-platform/invocations/invocation-queue/completed",
-        "json": {"reason": "Hermes gateway completed"},
-    }
+    assert "chat-1" not in adapter._contexts
     assert "message-queue" not in adapter._event_contexts
 
 
