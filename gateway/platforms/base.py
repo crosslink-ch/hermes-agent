@@ -4674,17 +4674,13 @@ class BasePlatformAdapter(ABC):
                         message_id=_r.message_id,
                         ttl_seconds=_eph_ttl,
                     )
-            pending_event = self._pending_messages.get(session_key)
-            pending_message_id = getattr(pending_event, "message_id", None)
-            if (
-                (cmd in {"queue", "q"} and event.get_command_args().strip())
-                or (
-                    pending_event is not None
-                    and pending_message_id is not None
-                    and str(pending_message_id) == str(event.message_id or "")
-                )
-            ):
-                return
+            # This inline command event is complete once its acknowledgement has
+            # been delivered.  If the command also enqueued a follow-up turn (for
+            # example `/queue <prompt>`), that queued MessageEvent will run later
+            # and emit its own start/complete lifecycle.  Keeping the command
+            # invocation open until the deferred turn finishes makes clients such
+            # as TheChat show a second, stale "is working" state while the current
+            # turn is still active.
             processing_ok = delivery_succeeded if delivery_attempted else True
             await self._run_processing_hook(
                 "on_processing_complete",
