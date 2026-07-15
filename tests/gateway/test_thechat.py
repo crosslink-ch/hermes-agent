@@ -79,13 +79,19 @@ def _context(invocation_id):
     }
 
 
-def _event(adapter, message_id="message-1", chat_id="chat-1"):
+def _event(
+    adapter,
+    message_id="message-1",
+    chat_id="chat-1",
+    thread_id=None,
+):
     source = adapter.build_source(
         chat_id=chat_id,
         chat_type="dm",
         user_id="user-1",
         user_name="User",
         message_id=message_id,
+        thread_id=thread_id,
     )
     return MessageEvent(
         text="hello",
@@ -143,6 +149,50 @@ async def test_send_can_post_without_invocation_context():
         "complete": False,
         "botId": "bot-1",
         "conversationId": "conversation-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_send_keeps_thread_metadata_after_invocation_context_cleanup():
+    adapter = _make_adapter()
+    context = _context("invocation-original")
+    context["thread_id"] = "thread-1"
+    context_key = adapter._context_key("conversation-1", "thread-1")
+    adapter._contexts[context_key] = context
+    adapter._event_contexts["message-original"] = context
+
+    await adapter.on_processing_complete(
+        _event(
+            adapter,
+            message_id="message-original",
+            chat_id="conversation-1",
+            thread_id="thread-1",
+        ),
+        ProcessingOutcome.SUCCESS,
+    )
+
+    assert context_key not in adapter._contexts
+    assert "message-original" not in adapter._event_contexts
+    client = cast(_FakeClient, adapter._client)
+    client.posts.clear()
+
+    result = await adapter.send(
+        "conversation-1",
+        "late clarify response",
+        metadata={
+            "thread_id": "thread-1",
+            "message_id": "message-original",
+        },
+    )
+
+    assert result.success is True
+    assert client.posts[0]["path"] == "/hermes-platform/messages"
+    assert client.posts[0]["json"] == {
+        "chatId": "conversation-1",
+        "content": "late clarify response",
+        "platformMessageId": client.posts[0]["json"]["platformMessageId"],
+        "complete": False,
+        "threadId": "thread-1",
     }
 
 

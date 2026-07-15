@@ -202,7 +202,12 @@ class TheChatAdapter(BasePlatformAdapter):
         context = self._context_for_send(
             chat_id, reply_to=reply_to, metadata=metadata
         )
-        target = context or self._target_from_chat_id(chat_id)
+        target = dict(context or self._target_from_chat_id(chat_id))
+        metadata_thread_id = (metadata or {}).get("thread_id") or (
+            metadata or {}
+        ).get("message_thread_id")
+        if metadata_thread_id and not target.get("thread_id"):
+            target["thread_id"] = str(metadata_thread_id)
         payload = {
             "chatId": chat_id,
             "content": content,
@@ -226,6 +231,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 "thechat.invocation_id": target.get("invocation_id") or "",
                 "thechat.bot_id": target.get("bot_id") or "",
                 "thechat.conversation_id": target.get("conversation_id") or "",
+                "thechat.thread_id": target.get("thread_id") or "",
                 "thechat.has_invocation_context": context is not None,
             },
         ) as span:
