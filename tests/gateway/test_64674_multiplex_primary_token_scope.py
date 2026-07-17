@@ -97,6 +97,29 @@ class TestPlatformHasBotCredential:
             Platform.TELEGRAM, PlatformConfig(enabled=True, token="123:abc")
         ) is True
 
+    def test_thechat_accepts_legacy_extra_token(self):
+        from gateway.run import _platform_has_bot_credential
+
+        config = PlatformConfig(
+            enabled=True,
+            token=None,
+            extra={"base_url": "https://thechat.example", "token": "legacy-token"},
+        )
+        gateway_config = GatewayConfig(multiplex_profiles=True)
+        gateway_config.platforms[Platform.THECHAT] = config
+        assert Platform.THECHAT in gateway_config.get_connected_platforms()
+        assert _platform_has_bot_credential(Platform.THECHAT, config) is True
+
+    def test_extra_token_is_not_accepted_for_other_token_platforms(self):
+        from gateway.run import _platform_has_bot_credential
+
+        config = PlatformConfig(
+            enabled=True,
+            token=None,
+            extra={"token": "not-a-telegram-token-source"},
+        )
+        assert _platform_has_bot_credential(Platform.TELEGRAM, config) is False
+
     def test_non_token_platform_always_true(self):
         from gateway.run import _platform_has_bot_credential
 
@@ -110,6 +133,7 @@ class TestPlatformHasBotCredential:
                 Platform.MATTERMOST,
                 Platform.MATRIX,
                 Platform.WEIXIN,
+                Platform.THECHAT,
             }:
                 continue
             assert _platform_has_bot_credential(

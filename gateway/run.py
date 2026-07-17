@@ -1579,13 +1579,21 @@ def _platform_has_bot_credential(platform: "Platform", platform_config: "Platfor
     Platforms that do not use ``PlatformConfig.token`` always return True so we
     never skip them here (Signal session paths, port-binding HTTP adapters, etc.).
     """
-    from gateway.config import PLATFORM_TOKEN_ENV_NAMES
+    from gateway.config import PLATFORM_TOKEN_ENV_NAMES, Platform
 
     if platform not in PLATFORM_TOKEN_ENV_NAMES:
         return True
     token = getattr(platform_config, "token", None) or ""
     if isinstance(token, str) and token.strip():
         return True
+    # TheChat historically stored its bot token in ``extra.token``. The
+    # adapter and connected-platform predicate still support that shape, so
+    # the multiplex startup gate must not reject an otherwise valid config.
+    if platform is Platform.THECHAT:
+        extra = getattr(platform_config, "extra", None)
+        extra_token = extra.get("token", "") if isinstance(extra, dict) else ""
+        if isinstance(extra_token, str) and extra_token.strip():
+            return True
     # Some adapters also accept api_key as the primary credential.
     api_key = getattr(platform_config, "api_key", None) or ""
     if isinstance(api_key, str) and api_key.strip():
