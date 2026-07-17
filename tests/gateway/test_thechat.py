@@ -857,6 +857,9 @@ async def test_connect_starts_webhook_server_and_registers_generic_bot_webhook(
     monkeypatch,
 ):
     fake_client = _FakeClient()
+    # CI installs [all,dev] without the optional messaging extra. This test
+    # stubs the webhook server itself, so bypass only the dependency gate.
+    monkeypatch.setattr(thechat, "web", object())
     monkeypatch.setattr(thechat.httpx, "AsyncClient", lambda **_kwargs: fake_client)
 
     adapter = TheChatAdapter(
