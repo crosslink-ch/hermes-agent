@@ -170,7 +170,9 @@ jobs:
 
       - name: Create/update PR and enable auto-merge
         env:
-          GH_TOKEN: ${{ secrets.AUTOFIX_BOT_PAT }}
+          # Crosslink forks may not define the upstream bot PAT. The job already
+          # grants contents/pull-requests write, so the built-in token is enough.
+          GH_TOKEN: ${{ secrets.AUTOFIX_BOT_PAT || github.token }}
           BOT_BRANCH: bot/js-autofix
         run: |
           set -euo pipefail
@@ -193,7 +195,7 @@ jobs:
 
       - name: Wait for merge, auto-close on failure or stale
         env:
-          GH_TOKEN: ${{ secrets.AUTOFIX_BOT_PAT }}
+          GH_TOKEN: ${{ secrets.AUTOFIX_BOT_PAT || github.token }}
           START_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
