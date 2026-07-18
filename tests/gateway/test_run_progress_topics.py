@@ -900,7 +900,7 @@ async def test_thechat_structured_activity_keeps_notices_reasoning_and_tools_dis
         session_id="sess-thechat-structured-activity",
         config_data={"display": {"tool_progress": "off"}},
         platform=Platform.THECHAT,
-        chat_id="conversation:conversation-1:bot:bot-1",
+        chat_id="11111111-1111-4111-8111-111111111111",
         chat_type="dm",
         thread_id=None,
         adapter_cls=StructuredProgressCaptureAdapter,

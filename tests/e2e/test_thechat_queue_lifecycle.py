@@ -17,6 +17,9 @@ from gateway.platforms.thechat import TheChatAdapter
 from tests.e2e.conftest import make_runner
 
 
+CONVERSATION_ID = "11111111-1111-4111-8111-111111111111"
+
+
 class FakeResponse:
     def __init__(self, payload: dict[str, Any], status_code: int = 200) -> None:
         self._payload = payload
@@ -90,9 +93,9 @@ async def wait_for_adapter_idle(adapter: TheChatAdapter, *, timeout: float = 2.0
 
 def thechat_event(*, invocation_id: str, text: str, message_id: str) -> dict[str, Any]:
     return {
-        "id": f"event-{invocation_id}",
+        "id": invocation_id,
         "invocationId": invocation_id,
-        "chatId": "conversation-1",
+        "chatId": CONVERSATION_ID,
         "chatType": "dm",
         "threadId": "thread-1",
         "text": text,
@@ -101,7 +104,7 @@ def thechat_event(*, invocation_id: str, text: str, message_id: str) -> dict[str
         "sender": {"id": "user-1", "name": "Bruno"},
         "bot": {"id": "bot-1", "userId": "bot-user-1", "name": "Koda"},
         "conversation": {
-            "id": "conversation-1",
+            "id": CONVERSATION_ID,
             "type": "direct",
             "name": "Koda DM",
             "workspaceId": "workspace-1",

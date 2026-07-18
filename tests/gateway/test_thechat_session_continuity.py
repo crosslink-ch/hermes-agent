@@ -10,6 +10,9 @@ from gateway.run import GatewayRunner
 from gateway.session import SessionSource
 
 
+CONVERSATION_ID = "11111111-1111-4111-8111-111111111111"
+
+
 class _RecordingResponse:
     status_code = 200
 
@@ -30,21 +33,16 @@ class _RecordingClient:
 
 
 @pytest.mark.asyncio
-async def test_thechat_adapter_does_not_send_session_payload_on_messages():
+async def test_thechat_adapter_message_uses_only_current_payload_fields():
     adapter = TheChatAdapter(PlatformConfig())
     client = _RecordingClient()
     adapter._client = client  # type: ignore[assignment]
-    adapter._contexts["chat-1"] = {
-        "conversation_id": "conv-1",
+    adapter._contexts[CONVERSATION_ID] = {
+        "conversation_id": CONVERSATION_ID,
         "invocation_id": "inv-1",
-        "session": {"sessionId": "session-1", "sessionKey": "key-1"},
     }
 
-    result = await adapter.send(
-        "chat-1",
-        "hello",
-        metadata={"session": {"sessionId": "session-2", "sessionKey": "key-1"}},
-    )
+    result = await adapter.send(CONVERSATION_ID, "hello")
 
     assert result.success is True
     assert client.posts[-1][0] == "/hermes-platform/messages"
@@ -56,14 +54,15 @@ async def test_thechat_adapter_title_progress_only_sends_title():
     adapter = TheChatAdapter(PlatformConfig())
     client = _RecordingClient()
     adapter._client = client  # type: ignore[assignment]
-    context = {"conversation_id": "conv-1", "invocation_id": "inv-1", "bot_id": "bot-1"}
+    context = {
+        "conversation_id": CONVERSATION_ID,
+        "invocation_id": "inv-1",
+        "bot_id": "bot-1",
+    }
 
     result = await adapter.send_session_title_update(
-        "chat-1",
+        CONVERSATION_ID,
         "Investigate checkout",
-        "session-1",
-        session_key="key-1",
-        metadata={"session": {"sessionId": "session-1", "sessionKey": "key-1"}},
         context=context,
     )
 
@@ -81,7 +80,7 @@ async def test_thechat_ignores_non_current_session_intent_shapes():
     runner._session_db = None
     source = SessionSource(
         platform=Platform.THECHAT,
-        chat_id="thechat:conversation:1",
+        chat_id=CONVERSATION_ID,
         user_id="user-1",
     )
     current_entry = SimpleNamespace(
@@ -151,7 +150,7 @@ async def test_thechat_branch_resolves_parent_from_current_source_thread_contrac
 
     source = SessionSource(
         platform=Platform.THECHAT,
-        chat_id="thechat:conversation:1",
+        chat_id=CONVERSATION_ID,
         user_id="user-1",
         thread_id="branch-thread",
     )
@@ -187,9 +186,7 @@ async def test_thechat_branch_resolves_parent_from_current_source_thread_contrac
     assert appended[0]["session_id"] == result.session_id
     assert titled[result.session_id] == "Alternative"
     assert result.session_key == "branch-thread-key"
-    session_reference = getattr(event, "hermes_session")
-    assert session_reference["sessionId"] == result.session_id
-    assert session_reference["reason"] == "branch.created"
+    assert not hasattr(event, "hermes_session")
 
 
 @pytest.mark.asyncio
@@ -204,7 +201,7 @@ async def test_thechat_persisted_branch_marker_is_ignored_after_branch_exists():
 
     source = SessionSource(
         platform=Platform.THECHAT,
-        chat_id="thechat:conversation:1",
+        chat_id=CONVERSATION_ID,
         user_id="user-1",
         thread_id="branch-thread",
     )
@@ -216,6 +213,7 @@ async def test_thechat_persisted_branch_marker_is_ignored_after_branch_exists():
             "sessionIntent": {
                 "type": "branch",
                 "fromThreadId": "source-thread",
+                "title": None,
             },
         },
     )

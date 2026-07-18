@@ -67,15 +67,16 @@ class TestTargetToStringRoundtrip:
         assert reparsed.platform == Platform.TELEGRAM
         assert reparsed.chat_id == "999"
 
-    def test_thechat_colon_chat_id_roundtrip(self):
-        original = "thechat:thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
-        target = DeliveryTarget.parse(original)
+    def test_thechat_current_conversation_uuid_and_thread_roundtrip(self):
+        chat_id = "11111111-1111-4111-8111-111111111111"
+        thread_id = "22222222-2222-4222-8222-222222222222"
+        target = DeliveryTarget.parse(f"thechat:{chat_id}:{thread_id}")
 
         assert target.platform == Platform.THECHAT
-        assert target.chat_id == "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
-        assert target.thread_id is None
+        assert target.chat_id == chat_id
+        assert target.thread_id == thread_id
         assert target.is_explicit is True
-        assert DeliveryTarget.parse(target.to_string()).chat_id == target.chat_id
+        assert DeliveryTarget.parse(target.to_string()) == target
 
 
 class TestCaseSensitiveChatIdParsing:

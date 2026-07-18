@@ -169,7 +169,7 @@ class TestResolveDeliveryTarget:
             (
                 "thechat",
                 "THECHAT_HOME_CHANNEL",
-                "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1",
+                "11111111-1111-4111-8111-111111111111",
             ),
         ],
     )
@@ -398,7 +398,7 @@ class TestResolveDeliveryTarget:
         }
 
     def test_bare_thechat_delivery_uses_thechat_home_channel(self, monkeypatch):
-        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+        chat_id = "11111111-1111-4111-8111-111111111111"
         monkeypatch.setenv("THECHAT_HOME_CHANNEL", chat_id)
 
         assert _resolve_delivery_target({"deliver": "thechat"}) == {
@@ -407,8 +407,8 @@ class TestResolveDeliveryTarget:
             "thread_id": None,
         }
 
-    def test_explicit_thechat_delivery_preserves_colon_chat_id(self):
-        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+    def test_explicit_thechat_delivery_uses_current_conversation_uuid(self):
+        chat_id = "11111111-1111-4111-8111-111111111111"
 
         assert _resolve_delivery_target({"deliver": f"thechat:{chat_id}"}) == {
             "platform": "thechat",
@@ -1672,7 +1672,7 @@ class TestRunJobSessionPersistence:
         fake_db.close.assert_called_once()
 
     def test_run_job_sets_auto_delivery_env_from_dotenv_thechat_home_channel(self, tmp_path, monkeypatch):
-        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+        chat_id = "11111111-1111-4111-8111-111111111111"
         job = {
             "id": "test-job",
             "name": "test",

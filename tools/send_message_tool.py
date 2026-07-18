@@ -587,8 +587,6 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         return None, None, False
     if platform_name == "thechat":
         stripped = target_ref.strip()
-        if stripped.startswith("thechat:"):
-            return stripped, None, True
         match = _THECHAT_CONVERSATION_RE.fullmatch(stripped)
         if match:
             return match.group(1), None, True
@@ -1095,7 +1093,9 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         elif platform == Platform.YUANBAO:
             result = await _send_yuanbao(chat_id, chunk)
         elif platform == Platform.THECHAT:
-            result = await _send_thechat(pconfig, chat_id, chunk)
+            result = await _send_thechat(
+                pconfig, chat_id, chunk, thread_id=thread_id
+            )
         else:
             # Plugin platform: route through the gateway's live adapter if
             # available, otherwise the plugin's standalone_sender_fn.
@@ -1120,18 +1120,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     return last_result
 
 
-def _thechat_target_from_chat_id(chat_id: str) -> dict:
-    target = {"chatId": chat_id}
-    parts = str(chat_id or "").split(":")
-    for index, part in enumerate(parts[:-1]):
-        if part == "conversation" and parts[index + 1]:
-            target["conversationId"] = parts[index + 1]
-        elif part == "bot" and parts[index + 1]:
-            target["botId"] = parts[index + 1]
-    return target
-
-
-async def _send_thechat(pconfig, chat_id, message):
+async def _send_thechat(pconfig, chat_id: str, content: str, *, thread_id=None):
     """Post a proactive TheChat bot message through the Hermes platform API."""
     from gateway.otel import start_span
 
@@ -1142,21 +1131,28 @@ async def _send_thechat(pconfig, chat_id, message):
     if not token:
         return {"error": "TheChat bot token is not configured"}
 
+    if not _THECHAT_CONVERSATION_RE.fullmatch(str(chat_id or "").strip()):
+        return {
+            "success": False,
+            "error": "TheChat chat_id must be the current conversation UUID",
+            "retryable": False,
+        }
     payload = {
-        **_thechat_target_from_chat_id(chat_id),
-        "content": message,
+        "chatId": chat_id,
+        "content": content,
         "platformMessageId": f"send-message-tool:{uuid.uuid4()}",
         "complete": False,
     }
+    if thread_id:
+        payload["threadId"] = thread_id
     with start_span(
         "thechat.proactive_message.send",
         {
             "messaging.system": "thechat",
             "messaging.operation": "send",
             "thechat.chat_id": chat_id,
-            "thechat.bot_id": payload.get("botId") or "",
-            "thechat.conversation_id": payload.get("conversationId") or "",
-            "thechat.message.length": len(message or ""),
+            "thechat.thread_id": str(thread_id or ""),
+            "thechat.message.length": len(content or ""),
         },
     ) as span:
         try:

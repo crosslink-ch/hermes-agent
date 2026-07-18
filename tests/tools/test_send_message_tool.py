@@ -330,7 +330,7 @@ class TestSendMessageTool:
             platforms={Platform.THECHAT: thechat_cfg},
             get_home_channel=lambda _platform: None,
         )
-        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+        chat_id = "11111111-1111-4111-8111-111111111111"
 
         with patch("gateway.config.load_gateway_config", return_value=config), \
              patch("tools.interrupt.is_interrupted", return_value=False), \
@@ -354,7 +354,7 @@ class TestSendMessageTool:
         assert send_mock.await_args.args[2] == chat_id
 
     def test_cron_thechat_duplicate_home_target_is_skipped(self):
-        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+        chat_id = "11111111-1111-4111-8111-111111111111"
         thechat_cfg = SimpleNamespace(
             enabled=True,
             token="bot-token",
@@ -1740,14 +1740,12 @@ class TestParseTargetRefSlack:
 class TestParseTargetRefTheChat:
     """_parse_target_ref recognizes explicit TheChat chat targets."""
 
-    def test_thechat_continuity_chat_key_is_explicit(self):
+    def test_obsolete_thechat_composite_chat_key_is_not_explicit(self):
         target = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
 
-        chat_id, thread_id, is_explicit = _parse_target_ref("thechat", target)
+        _chat_id, _thread_id, is_explicit = _parse_target_ref("thechat", target)
 
-        assert chat_id == target
-        assert thread_id is None
-        assert is_explicit is True
+        assert is_explicit is False
 
     def test_thechat_conversation_uuid_is_explicit(self):
         target = "11111111-1111-4111-8111-111111111111"
@@ -1763,7 +1761,7 @@ class TestParseTargetRefTheChat:
         assert _parse_target_ref("discord", "thechat:workspace:ws")[2] is False
 
     @pytest.mark.asyncio
-    async def test_send_thechat_posts_continuity_target(self, monkeypatch):
+    async def test_send_thechat_posts_current_conversation_uuid(self, monkeypatch):
         captured = {}
 
         class FakeResponse:
@@ -1802,7 +1800,7 @@ class TestParseTargetRefTheChat:
             token="bot-token",
             extra={"base_url": "http://thechat.test"},
         )
-        chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+        chat_id = "11111111-1111-4111-8111-111111111111"
 
         result = await _send_thechat(pconfig, chat_id, "cron update")
 
@@ -1812,8 +1810,6 @@ class TestParseTargetRefTheChat:
         assert captured["path"] == "/hermes-platform/messages"
         assert captured["payload"] == {
             "chatId": chat_id,
-            "conversationId": "conversation-1",
-            "botId": "bot-1",
             "content": "cron update",
             "platformMessageId": captured["payload"]["platformMessageId"],
             "complete": False,

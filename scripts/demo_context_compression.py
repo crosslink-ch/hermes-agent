@@ -17,8 +17,6 @@ executes the real compaction assembly code and the recent continuity fixes:
   the compaction handoff summary.
 * ``_inject_todo_snapshot_internal_note(...)`` preserves the todo snapshot as an
   internal assistant note before the latest real user message.
-* ``TheChatAdapter._session_payload_for_context(...)`` prefers the live
-  compressed child session over a stale cached parent session.
 """
 
 from __future__ import annotations
@@ -28,7 +26,6 @@ import json
 import sys
 import textwrap
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Iterable
 from unittest.mock import patch
 
@@ -39,8 +36,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX
 from agent.conversation_compression import _inject_todo_snapshot_internal_note
-from gateway.config import PlatformConfig
-from gateway.platforms.thechat import TheChatAdapter
+
 
 TODO_SNAPSHOT = (
     "[Your active task list was preserved across context compression]\n"
@@ -68,7 +64,7 @@ def build_demo_history() -> list[dict[str, Any]]:
         },
         {
             "role": "user",
-            "content": "Start a debugging session for Hermes/TheChat context compaction.",
+            "content": "Start a debugging session for Hermes context compaction.",
         },
         {
             "role": "assistant",
@@ -76,7 +72,7 @@ def build_demo_history() -> list[dict[str, Any]]:
         },
         {
             "role": "user",
-            "content": "After compaction, TheChat seemed to answer an older clarification instead of my latest request.",
+            "content": "After compaction, Hermes seemed to answer an older clarification instead of my latest request.",
         },
         {
             "role": "assistant",
@@ -97,7 +93,7 @@ def build_demo_history() -> list[dict[str, Any]]:
         },
         {
             "role": "assistant",
-            "content": "Compression did happen, but TheChat's stored continuity pointer still referenced the stale root session.",
+            "content": "Compression did happen, but the preserved task snapshot became the recency anchor.",
         },
         {
             "role": "user",
@@ -223,7 +219,6 @@ Continue from the latest user message after this summary. In this demo that mess
 Show what Hermes context compaction preserves when it replaces older middle turns with a handoff summary.
 
 ## Completed Actions
-- Investigated a TheChat continuity issue where a stale parent/root session id could survive after compaction.
 - Investigated the todo snapshot issue where a synthetic task-list marker could be appended as role='user'.
 - Implemented the fix that preserves todos as an internal assistant continuity note before the latest real user request.
 
@@ -237,9 +232,7 @@ The protected head and protected tail stay as normal messages; middle turns {com
 ## Relevant Files
 - agent/conversation_compression.py
 - agent/context_compressor.py
-- gateway/platforms/thechat.py
 - tests/agent/test_conversation_compression_todo_snapshot.py
-- tests/gateway/test_thechat_session_continuity.py
 
 ## Compacted User Turns
 {chr(10).join(f'- {turn}' for turn in user_turns) or '- None'}
@@ -314,44 +307,17 @@ def run_compaction_demo() -> dict[str, Any]:
     }
 
 
-def run_thechat_continuity_demo() -> dict[str, Any]:
-    adapter = TheChatAdapter(PlatformConfig())
-    context = {
-        "session": {
-            "sessionId": "stale-parent-before-compression",
-            "sessionKey": "thechat:conversation:demo",
-            "lineageRootId": "stale-parent-before-compression",
-        },
-        "event": SimpleNamespace(
-            hermes_session={
-                "sessionId": "compressed-child-after-compression",
-                "sessionKey": "thechat:conversation:demo",
-                "lineageRootId": "stale-parent-before-compression",
-            }
-        ),
-    }
-    emitted = adapter._session_payload_for_context(context, reason="invocation.completed")
-    return {
-        "cached_context_session_before": "stale-parent-before-compression",
-        "live_event_session": "compressed-child-after-compression",
-        "emitted_session_payload": emitted,
-        "context_session_after_call": context.get("session"),
-    }
-
-
 def render_report(*, full: bool = False) -> str:
     demo = run_compaction_demo()
-    thechat = run_thechat_continuity_demo()
 
     lines: list[str] = [
         "# Hermes context compaction demo",
         "",
-        "This is a deterministic local demo: no LLM/API call is made. The only mocked part is summary text generation, so the demo can run offline. The surrounding compaction, todo-snapshot insertion, and TheChat session-payload code are the real project code.",
+        "This is a deterministic local demo: no LLM/API call is made. The only mocked part is summary text generation, so the demo can run offline. The surrounding compaction and todo-snapshot insertion use the real project code.",
         "",
         "## Code paths exercised",
         "- `agent.context_compressor.ContextCompressor.compress(...)`",
         "- `agent.conversation_compression._inject_todo_snapshot_internal_note(...)`",
-        "- `gateway.platforms.thechat.TheChatAdapter._session_payload_for_context(...)`",
         "",
         "## Safety check: latest user recency anchor",
         f"- Latest real user before compaction: `{demo['latest_user_before']}`",
@@ -374,15 +340,6 @@ def render_report(*, full: bool = False) -> str:
         "The old shape below is simulated only for comparison: it appends the todo snapshot as a synthetic `user` turn, making the task-list marker the newest user message. The fixed/current shape above inserts the same text as an internal assistant continuity note before the latest real user message.",
         "",
         render_history("Simulated old buggy after-history", demo["after_buggy_comparison"], full=full),
-        "",
-        "## TheChat continuity payload demo",
-        "This runs the real TheChat adapter helper with a stale cached parent session in `context['session']` and a live compressed child in `event.hermes_session`.",
-        "",
-        "```json",
-        json.dumps(thechat, indent=2, sort_keys=True),
-        "```",
-        "",
-        "Expected: `emitted_session_payload.sessionId` is `compressed-child-after-compression`, not the stale parent.",
     ]
     return "\n".join(lines) + "\n"
 

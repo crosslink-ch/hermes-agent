@@ -182,7 +182,13 @@ class TheChatAdapter(BasePlatformAdapter):
         context = self._context_for_send(
             chat_id, reply_to=reply_to, metadata=metadata
         )
-        target = dict(context or self._target_from_chat_id(chat_id))
+        if context is None and not self._is_current_chat_id(chat_id):
+            return SendResult(
+                success=False,
+                error="TheChat chat_id must be the current conversation UUID",
+                retryable=False,
+            )
+        target = dict(context or {"chat_id": chat_id})
         metadata_thread_id = (metadata or {}).get("thread_id") or (
             metadata or {}
         ).get("message_thread_id")
@@ -272,15 +278,13 @@ class TheChatAdapter(BasePlatformAdapter):
             return f"{chat_id}:thread:{thread_id}"
         return chat_id
 
-    def _target_from_chat_id(self, chat_id: str) -> Dict[str, Any]:
-        target: Dict[str, Any] = {"chat_id": chat_id}
-        parts = str(chat_id or "").split(":")
-        for index, part in enumerate(parts[:-1]):
-            if part == "conversation" and parts[index + 1]:
-                target["conversation_id"] = parts[index + 1]
-            elif part == "bot" and parts[index + 1]:
-                target["bot_id"] = parts[index + 1]
-        return target
+    @staticmethod
+    def _is_current_chat_id(chat_id: Any) -> bool:
+        value = str(chat_id or "").strip()
+        try:
+            return str(uuid.UUID(value)) == value.lower()
+        except (ValueError, AttributeError):
+            return False
 
     def _is_gateway_operational_notice(self, content: str) -> bool:
         text = content.strip()
@@ -360,8 +364,6 @@ class TheChatAdapter(BasePlatformAdapter):
         self,
         chat_id: str,
         title: str,
-        session_id: str,
-        session_key: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         *,
         context: Optional[Dict[str, Any]] = None,
@@ -691,8 +693,19 @@ class TheChatAdapter(BasePlatformAdapter):
         missing = sorted(required.difference(item))
         if missing:
             raise ValueError(f"TheChat event is missing required fields: {', '.join(missing)}")
+        for key in ("id", "invocationId", "chatId", "text", "messageId"):
+            if not isinstance(item[key], str) or not item[key]:
+                raise ValueError(f"TheChat event has an invalid {key}")
+        if item["id"] != item["invocationId"]:
+            raise ValueError("TheChat event id must match invocationId")
+        if not self._is_current_chat_id(item["chatId"]):
+            raise ValueError("TheChat event chatId must be a conversation UUID")
         if item["chatType"] not in {"dm", "group"}:
             raise ValueError("TheChat event has an invalid chatType")
+        if item["threadId"] is not None and not isinstance(item["threadId"], str):
+            raise ValueError("TheChat event has an invalid threadId")
+        if item["instructions"] is not None and not isinstance(item["instructions"], str):
+            raise ValueError("TheChat event has invalid instructions")
         nested_fields = {
             "sender": {"id", "name"},
             "bot": {"id", "userId", "name"},
@@ -702,12 +715,26 @@ class TheChatAdapter(BasePlatformAdapter):
             value = item[key]
             if not isinstance(value, dict) or not fields.issubset(value):
                 raise ValueError(f"TheChat event has an invalid {key} object")
+        conversation = item["conversation"]
+        if conversation["id"] != item["chatId"]:
+            raise ValueError("TheChat event chatId must match conversation.id")
+        expected_chat_type = "dm" if conversation["type"] == "direct" else "group"
+        if conversation["type"] not in {"direct", "group"} or item["chatType"] != expected_chat_type:
+            raise ValueError("TheChat event chatType does not match conversation.type")
         session_intent = item.get("sessionIntent")
         if session_intent is not None:
             if (
                 not isinstance(session_intent, dict)
                 or session_intent.get("type") != "branch"
-                or not {"fromThreadId", "title"}.issubset(session_intent)
+                or set(session_intent) != {"type", "fromThreadId", "title"}
+                or (
+                    session_intent["fromThreadId"] is not None
+                    and not isinstance(session_intent["fromThreadId"], str)
+                )
+                or (
+                    session_intent["title"] is not None
+                    and not isinstance(session_intent["title"], str)
+                )
             ):
                 raise ValueError("TheChat event has an invalid sessionIntent")
         return item

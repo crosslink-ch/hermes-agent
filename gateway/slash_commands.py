@@ -303,13 +303,6 @@ class GatewaySlashCommandsMixin:
             except Exception:
                 logger.debug("Failed to rebind Telegram topic after /new", exc_info=True)
 
-        if new_entry is not None:
-            self._annotate_event_session(
-                event,
-                new_entry,
-                reason="session.reset",
-            )
-
         # Fire plugin on_session_reset hook (new session guaranteed to exist)
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
@@ -3920,11 +3913,6 @@ class GatewaySlashCommandsMixin:
 
         # Get the title for confirmation
         title = await self._session_db.get_session_title(target_id) or name
-        self._annotate_event_session(
-            event,
-            new_entry,
-            reason="session.resumed",
-        )
 
         # Count messages for context
         history = await self.async_session_store.load_transcript(target_id)
@@ -4099,11 +4087,6 @@ class GatewaySlashCommandsMixin:
         if not new_entry:
             return t("gateway.branch.switch_failed")
         self._clear_session_boundary_security_state(session_key)
-        self._annotate_event_session(
-            event,
-            new_entry,
-            reason="branch.created",
-        )
 
         # Evict any cached agent for this session
         self._evict_cached_agent(session_key)

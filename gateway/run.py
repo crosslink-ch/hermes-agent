@@ -3764,9 +3764,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         key: str,
     ) -> Optional[str]:
         value = session_intent.get(key)
-        if value is None:
+        if not isinstance(value, str):
             return None
-        text = str(value).strip()
+        text = value.strip()
         return text or None
 
     def _session_entry_is_fresh(self, session_entry: Any) -> bool:
@@ -3797,66 +3797,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if inspect.isawaitable(result):
             return await result
         return result
-
-    def _session_lineage_root_id(self, session_id: str) -> str:
-        if not session_id:
-            return session_id
-        session_db = getattr(self, "_session_db", None)
-        if session_db is None:
-            return session_id
-        # This helper is sync because it is used while constructing event metadata.
-        # When the gateway owns an AsyncSessionDB facade, do not call through to the
-        # underlying SQLite handle on the event loop; the caller can still carry the
-        # current session id as a safe conservative root.
-        if session_db.__class__.__name__ == "AsyncSessionDB":
-            return session_id
-        try:
-            resolver = getattr(session_db, "_session_lineage_root_to_tip", None)
-            if not callable(resolver):
-                return session_id
-            chain = resolver(session_id)
-            if inspect.isawaitable(chain):
-                close = getattr(chain, "close", None)
-                if callable(close):
-                    close()
-                return session_id
-        except Exception:
-            logger.debug("Failed to resolve session lineage for %s", session_id, exc_info=True)
-            return session_id
-        return str(chain[0]) if chain else session_id
-
-    def _session_reference_for_entry(
-        self,
-        session_entry: Any,
-        *,
-        reason: str,
-    ) -> Optional[Dict[str, Any]]:
-        session_id = str(getattr(session_entry, "session_id", "") or "").strip()
-        session_key = str(getattr(session_entry, "session_key", "") or "").strip()
-        if not session_id and not session_key:
-            return None
-        return {
-            "sessionId": session_id or None,
-            "sessionKey": session_key or None,
-            "lineageRootId": self._session_lineage_root_id(session_id) if session_id else None,
-            "reason": reason,
-            "source": "hermes",
-            "updatedAt": datetime.now().isoformat(),
-        }
-
-    def _annotate_event_session(
-        self,
-        event: MessageEvent,
-        session_entry: Any,
-        *,
-        reason: str,
-    ) -> None:
-        reference = self._session_reference_for_entry(session_entry, reason=reason)
-        if reference:
-            try:
-                setattr(event, "hermes_session", reference)
-            except Exception:
-                pass
 
     async def _apply_thechat_session_intent_async(
         self,
@@ -3899,11 +3839,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     branch_title=branch_title,
                 )
                 if branched_entry is not None:
-                    self._annotate_event_session(
-                        event,
-                        branched_entry,
-                        reason="branch.created",
-                    )
                     return branched_entry
         else:
             logger.debug(
@@ -11695,12 +11630,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             source,
             session_entry,
         )
-        if not getattr(event, "hermes_session", None):
-            self._annotate_event_session(
-                event,
-                session_entry,
-                reason="message.started",
-            )
         # Capture and immediately consume was_auto_reset so it does not
         # re-fire on subsequent messages — preventing the cleanup from
         # wiping model/reasoning overrides set between turns (Closes #48031).
@@ -12628,11 +12557,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _run_start_session_id,
                         session_entry.session_id,
                     )
-            self._annotate_event_session(
-                event,
-                session_entry,
-                reason="message.completed",
-            )
+
 
             # Prepend reasoning/thinking if display is enabled (per-platform).
             # Mattermost requires explicit per-platform opt-in because this is
@@ -14765,16 +14690,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def _make_thechat_session_title_callback(
         self,
         source: SessionSource,
-        session_id: str,
         *,
-        session_key: Optional[str] = None,
         event_message_id: Optional[str] = None,
     ):
         """Build a title callback that propagates generated task titles to TheChat."""
         if (
             getattr(source, "platform", None) != Platform.THECHAT
             or not getattr(source, "thread_id", None)
-            or not session_id
         ):
             return None
 
@@ -14800,20 +14722,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             event_message_id or getattr(copied_source, "message_id", None),
         ) or {}
         metadata = dict(metadata)
-        existing_session = metadata.get("session")
-        session_payload: Dict[str, Any] = {}
-        if isinstance(existing_session, dict):
-            session_payload.update(existing_session)
-        session_payload.update(
-            {
-                "sessionId": str(session_id),
-                "reason": "session.title",
-                "source": "hermes",
-            }
-        )
-        if session_key:
-            session_payload["sessionKey"] = str(session_key)
-        metadata["session"] = session_payload
 
         context_snapshot: Optional[Dict[str, Any]] = None
         context_provider = getattr(adapter, "_context_for_send", None)
@@ -14831,9 +14739,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         def _callback(title: str) -> None:
             self._schedule_thechat_session_title_update(
                 copied_source,
-                session_id,
                 title,
-                session_key=session_key,
                 metadata=metadata,
                 context=context_snapshot,
                 loop=loop,
@@ -14844,10 +14750,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def _schedule_thechat_session_title_update(
         self,
         source: SessionSource,
-        session_id: str,
         title: str,
         *,
-        session_key: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         context: Optional[Dict[str, Any]] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
@@ -14856,7 +14760,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         title = str(title or "").strip()
         if (
             not title
-            or not session_id
             or getattr(source, "platform", None) != Platform.THECHAT
             or not getattr(source, "thread_id", None)
         ):
@@ -14876,21 +14779,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return
 
         metadata = dict(metadata or self._thread_metadata_for_source(source) or {})
-        existing_session = metadata.get("session")
-        session_payload: Dict[str, Any] = {}
-        if isinstance(existing_session, dict):
-            session_payload.update(existing_session)
-        session_payload.update(
-            {
-                "sessionId": str(session_id),
-                "title": title,
-                "reason": "session.title",
-                "source": "hermes",
-            }
-        )
-        if session_key:
-            session_payload["sessionKey"] = str(session_key)
-        metadata["session"] = session_payload
 
         future = safe_schedule_threadsafe(
             cast(
@@ -14898,8 +14786,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 sender(
                     source.chat_id,
                     title,
-                    str(session_id),
-                    session_key=str(session_key) if session_key else None,
                     metadata=metadata,
                     context=context,
                 ),
@@ -19234,17 +19120,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             }
         else:
             _status_thread_metadata = _source_message_metadata
-        if source.platform == Platform.THECHAT:
-            _thechat_session = {
-                "sessionId": session_id,
-                "sessionKey": session_key,
-                "lineageRootId": self._session_lineage_root_id(session_id),
-                "reason": "progress",
-                "source": "hermes",
-                "updatedAt": datetime.now().isoformat(),
-            }
-            _status_thread_metadata = dict(_status_thread_metadata or {})
-            _status_thread_metadata["session"] = _thechat_session
 
         def _thechat_notice_event_shape(event_type: str) -> tuple[str, str]:
             normalized = re.sub(
@@ -20690,8 +20565,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     ):
                         thechat_title_callback = self._make_thechat_session_title_callback(
                             source,
-                            effective_session_id,
-                            session_key=session_key,
                             event_message_id=event_message_id,
                         )
                         if thechat_title_callback is not None:

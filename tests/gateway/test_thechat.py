@@ -12,6 +12,10 @@ from gateway.platforms import thechat
 from gateway.platforms.thechat import TheChatAdapter
 
 
+CONVERSATION_ID = "11111111-1111-4111-8111-111111111111"
+INVOCATION_ID = "22222222-2222-4222-8222-222222222222"
+
+
 class _FakeResponse:
     def __init__(self, data=None):
         self._data = data or {"messageId": "thechat-message-1"}
@@ -91,7 +95,7 @@ def _context(invocation_id):
         "invocation_id": invocation_id,
         "bot_id": "bot-1",
         "bot_name": "Hermes",
-        "conversation_id": "conversation-1",
+        "conversation_id": CONVERSATION_ID,
         "conversation_name": "Hermes DM",
         "chat_type": "dm",
         "thread_id": None,
@@ -101,7 +105,7 @@ def _context(invocation_id):
 def _event(
     adapter,
     message_id="message-1",
-    chat_id="chat-1",
+    chat_id=CONVERSATION_ID,
     thread_id=None,
 ):
     source = adapter.build_source(
@@ -127,19 +131,19 @@ def _platform_item(
     instructions=None,
 ):
     return {
-        "id": "event-1",
-        "chatId": "direct:user-1",
+        "id": INVOCATION_ID,
+        "chatId": CONVERSATION_ID,
         "chatType": "dm",
         "threadId": thread_id,
-        "invocationId": "invocation-1",
+        "invocationId": INVOCATION_ID,
         "messageId": "message-1",
         "text": text,
         "instructions": instructions,
         "sender": {"id": "user-1", "name": "User"},
         "bot": {"id": "bot-1", "userId": "bot-user-1", "name": "Hermes"},
         "conversation": {
-            "id": "conversation-1",
-            "type": "dm",
+            "id": CONVERSATION_ID,
+            "type": "direct",
             "name": "Hermes DM",
             "workspaceId": "workspace-1",
         },
@@ -151,11 +155,11 @@ async def test_send_uses_reply_to_context_instead_of_latest_chat_context():
     adapter = _make_adapter()
     first = _context("invocation-first")
     second = _context("invocation-second")
-    adapter._contexts["chat-1"] = second
+    adapter._contexts[CONVERSATION_ID] = second
     adapter._event_contexts["message-first"] = first
     adapter._event_contexts["message-second"] = second
 
-    result = await adapter.send("chat-1", "first response", reply_to="message-first")
+    result = await adapter.send(CONVERSATION_ID, "first response", reply_to="message-first")
 
     assert result.success is True
     assert adapter._client.posts[0]["path"] == "/hermes-platform/messages"
@@ -169,9 +173,9 @@ async def test_send_uses_reply_to_context_instead_of_latest_chat_context():
 async def test_send_does_not_use_notify_metadata_as_completion_signal():
     adapter = _make_adapter()
     context = _context("invocation-first")
-    adapter._contexts["chat-1"] = context
+    adapter._contexts[CONVERSATION_ID] = context
 
-    result = await adapter.send("chat-1", "final response", metadata={"notify": True})
+    result = await adapter.send(CONVERSATION_ID, "final response", metadata={"notify": True})
 
     assert result.success is True
     assert adapter._client.posts[0]["path"] == "/hermes-platform/messages"
@@ -181,7 +185,7 @@ async def test_send_does_not_use_notify_metadata_as_completion_signal():
 @pytest.mark.asyncio
 async def test_send_can_post_without_invocation_context():
     adapter = _make_adapter()
-    chat_id = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
+    chat_id = CONVERSATION_ID
 
     result = await adapter.send(chat_id, "cron says hello")
 
@@ -192,9 +196,22 @@ async def test_send_can_post_without_invocation_context():
         "content": "cron says hello",
         "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
         "complete": False,
-        "botId": "bot-1",
-        "conversationId": "conversation-1",
     }
+
+
+@pytest.mark.asyncio
+async def test_send_rejects_obsolete_composite_chat_id():
+    adapter = _make_adapter()
+
+    result = await adapter.send(
+        "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1",
+        "obsolete target",
+    )
+
+    assert result.success is False
+    assert result.retryable is False
+    assert "conversation UUID" in (result.error or "")
+    assert cast(_FakeClient, adapter._client).posts == []
 
 
 @pytest.mark.asyncio
@@ -202,7 +219,7 @@ async def test_send_keeps_thread_metadata_after_invocation_context_cleanup():
     adapter = _make_adapter()
     context = _context("invocation-original")
     context["thread_id"] = "thread-1"
-    context_key = adapter._context_key("conversation-1", "thread-1")
+    context_key = adapter._context_key(CONVERSATION_ID, "thread-1")
     adapter._contexts[context_key] = context
     adapter._event_contexts["message-original"] = context
 
@@ -210,7 +227,7 @@ async def test_send_keeps_thread_metadata_after_invocation_context_cleanup():
         _event(
             adapter,
             message_id="message-original",
-            chat_id="conversation-1",
+            chat_id=CONVERSATION_ID,
             thread_id="thread-1",
         ),
         ProcessingOutcome.SUCCESS,
@@ -222,7 +239,7 @@ async def test_send_keeps_thread_metadata_after_invocation_context_cleanup():
     client.posts.clear()
 
     result = await adapter.send(
-        "conversation-1",
+        CONVERSATION_ID,
         "late clarify response",
         metadata={
             "thread_id": "thread-1",
@@ -233,7 +250,7 @@ async def test_send_keeps_thread_metadata_after_invocation_context_cleanup():
     assert result.success is True
     assert client.posts[0]["path"] == "/hermes-platform/messages"
     assert client.posts[0]["json"] == {
-        "chatId": "conversation-1",
+        "chatId": CONVERSATION_ID,
         "content": "late clarify response",
         "platformMessageId": client.posts[0]["json"]["platformMessageId"],
         "complete": False,
@@ -245,7 +262,7 @@ async def test_send_keeps_thread_metadata_after_invocation_context_cleanup():
 async def test_processing_cancel_reports_cancelled_without_chat_message():
     adapter = _make_adapter()
     context = _context("invocation-first")
-    adapter._contexts["chat-1"] = context
+    adapter._contexts[CONVERSATION_ID] = context
     adapter._event_contexts["message-first"] = context
 
     await adapter.on_processing_complete(
@@ -259,14 +276,14 @@ async def test_processing_cancel_reports_cancelled_without_chat_message():
             "json": {"reason": "Hermes gateway cancelled the message"},
         }
     ]
-    assert "chat-1" not in adapter._contexts
+    assert CONVERSATION_ID not in adapter._contexts
 
 
 @pytest.mark.asyncio
 async def test_processing_success_without_delivery_marks_invocation_completed():
     adapter = _make_adapter()
     context = _context("invocation-first")
-    adapter._contexts["chat-1"] = context
+    adapter._contexts[CONVERSATION_ID] = context
     adapter._event_contexts["message-first"] = context
 
     await adapter.on_processing_complete(
@@ -287,7 +304,7 @@ async def test_processing_success_after_delivery_marks_invocation_completed():
     adapter = _make_adapter()
     context = _context("invocation-first")
     context["delivered"] = True
-    adapter._contexts["chat-1"] = context
+    adapter._contexts[CONVERSATION_ID] = context
     adapter._event_contexts["message-first"] = context
 
     await adapter.on_processing_complete(
@@ -307,7 +324,7 @@ async def test_processing_success_after_delivery_marks_invocation_completed():
 async def test_active_stop_command_marks_thechat_command_invocation_completed():
     adapter = _make_adapter()
     stop_context = _context("invocation-stop")
-    adapter._contexts["chat-1"] = stop_context
+    adapter._contexts[CONVERSATION_ID] = stop_context
     adapter._event_contexts["message-stop"] = stop_context
 
     async def handle(event):
@@ -331,13 +348,13 @@ async def test_active_stop_command_marks_thechat_command_invocation_completed():
         {
             "path": "/hermes-platform/messages",
             "json": {
-                "chatId": "chat-1",
+                "chatId": CONVERSATION_ID,
                 "content": "Stopped.",
                 "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
                 "complete": False,
                 "invocationId": "invocation-stop",
                 "botId": "bot-1",
-                "conversationId": "conversation-1",
+                "conversationId": CONVERSATION_ID,
             },
         },
         {
@@ -345,7 +362,7 @@ async def test_active_stop_command_marks_thechat_command_invocation_completed():
             "json": {"reason": "Hermes gateway completed"},
         },
     ]
-    assert "chat-1" not in adapter._contexts
+    assert CONVERSATION_ID not in adapter._contexts
 
 
 @pytest.mark.asyncio
@@ -362,7 +379,7 @@ async def test_active_non_canceling_commands_mark_thechat_invocation_completed(
 ):
     adapter = _make_adapter()
     command_context = _context("invocation-command")
-    adapter._contexts["chat-1"] = command_context
+    adapter._contexts[CONVERSATION_ID] = command_context
     adapter._event_contexts["message-command"] = command_context
 
     async def handle(event):
@@ -386,13 +403,13 @@ async def test_active_non_canceling_commands_mark_thechat_invocation_completed(
         {
             "path": "/hermes-platform/messages",
             "json": {
-                "chatId": "chat-1",
+                "chatId": CONVERSATION_ID,
                 "content": response_text,
                 "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
                 "complete": False,
                 "invocationId": "invocation-command",
                 "botId": "bot-1",
-                "conversationId": "conversation-1",
+                "conversationId": CONVERSATION_ID,
             },
         },
         {
@@ -400,7 +417,7 @@ async def test_active_non_canceling_commands_mark_thechat_invocation_completed(
             "json": {"reason": "Hermes gateway completed"},
         },
     ]
-    assert "chat-1" not in adapter._contexts
+    assert CONVERSATION_ID not in adapter._contexts
     assert "message-command" not in adapter._event_contexts
 
 
@@ -408,7 +425,7 @@ async def test_active_non_canceling_commands_mark_thechat_invocation_completed(
 async def test_active_queue_command_ack_marks_invocation_completed_immediately():
     adapter = _make_adapter()
     command_context = _context("invocation-queue")
-    adapter._contexts["chat-1"] = command_context
+    adapter._contexts[CONVERSATION_ID] = command_context
     adapter._event_contexts["message-queue"] = command_context
 
     async def handle(event):
@@ -434,13 +451,13 @@ async def test_active_queue_command_ack_marks_invocation_completed_immediately()
         {
             "path": "/hermes-platform/messages",
             "json": {
-                "chatId": "chat-1",
+                "chatId": CONVERSATION_ID,
                 "content": "Queued for the next turn.",
                 "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
                 "complete": False,
                 "invocationId": "invocation-queue",
                 "botId": "bot-1",
-                "conversationId": "conversation-1",
+                "conversationId": CONVERSATION_ID,
             },
         },
         {
@@ -448,7 +465,7 @@ async def test_active_queue_command_ack_marks_invocation_completed_immediately()
             "json": {"reason": "Hermes gateway completed"},
         },
     ]
-    assert "chat-1" not in adapter._contexts
+    assert CONVERSATION_ID not in adapter._contexts
     assert "message-queue" not in adapter._event_contexts
 
 
@@ -456,7 +473,7 @@ async def test_active_queue_command_ack_marks_invocation_completed_immediately()
 async def test_busy_command_ack_marks_thechat_invocation_completed():
     adapter = _make_adapter()
     command_context = _context("invocation-command")
-    adapter._contexts["chat-1"] = command_context
+    adapter._contexts[CONVERSATION_ID] = command_context
     adapter._event_contexts["message-command"] = command_context
 
     async def handle(_event):
@@ -490,13 +507,13 @@ async def test_busy_command_ack_marks_thechat_invocation_completed():
         {
             "path": "/hermes-platform/messages",
             "json": {
-                "chatId": "chat-1",
+                "chatId": CONVERSATION_ID,
                 "content": "Interrupting current task.",
                 "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
                 "complete": False,
                 "invocationId": "invocation-command",
                 "botId": "bot-1",
-                "conversationId": "conversation-1",
+                "conversationId": CONVERSATION_ID,
             },
         },
         {
@@ -511,7 +528,7 @@ async def test_busy_command_ack_marks_thechat_invocation_completed():
 async def test_busy_text_pending_turn_is_not_completed_by_ack():
     adapter = _make_adapter()
     context = _context("invocation-followup")
-    adapter._contexts["chat-1"] = context
+    adapter._contexts[CONVERSATION_ID] = context
     adapter._event_contexts["message-followup"] = context
 
     async def handle(_event):
@@ -551,10 +568,10 @@ async def test_busy_text_pending_turn_is_not_completed_by_ack():
 async def test_send_invocation_progress_posts_structured_event():
     adapter = _make_adapter()
     context = _context("invocation-first")
-    adapter._contexts["chat-1"] = context
+    adapter._contexts[CONVERSATION_ID] = context
 
     result = await adapter.send_invocation_progress(
-        "chat-1",
+        CONVERSATION_ID,
         {
             "type": "tool.started",
             "status": "running",
@@ -571,7 +588,7 @@ async def test_send_invocation_progress_posts_structured_event():
             "path": "/hermes-platform/invocations/invocation-first/progress",
             "json": {
                 "botId": "bot-1",
-                "conversationId": "conversation-1",
+                "conversationId": CONVERSATION_ID,
                 "type": "tool.started",
                 "status": "running",
                 "toolCallId": "call-1",
@@ -590,11 +607,11 @@ async def test_send_invocation_progress_uses_thread_metadata_context():
     first["thread_id"] = "thread-1"
     second = _context("invocation-second")
     second["thread_id"] = "thread-2"
-    adapter._contexts[adapter._context_key("chat-1", "thread-1")] = first
-    adapter._contexts[adapter._context_key("chat-1", "thread-2")] = second
+    adapter._contexts[adapter._context_key(CONVERSATION_ID, "thread-1")] = first
+    adapter._contexts[adapter._context_key(CONVERSATION_ID, "thread-2")] = second
 
     result = await adapter.send_invocation_progress(
-        "chat-1",
+        CONVERSATION_ID,
         {"type": "tool.started", "status": "running"},
         metadata={"thread_id": "thread-1"},
     )
@@ -605,7 +622,7 @@ async def test_send_invocation_progress_uses_thread_metadata_context():
             "path": "/hermes-platform/invocations/invocation-first/progress",
             "json": {
                 "botId": "bot-1",
-                "conversationId": "conversation-1",
+                "conversationId": CONVERSATION_ID,
                 "type": "tool.started",
                 "status": "running",
                 "threadId": "thread-1",
@@ -621,13 +638,13 @@ async def test_send_invocation_progress_prefers_message_metadata_over_latest_con
     original["thread_id"] = "thread-1"
     command = _context("invocation-command")
     command["thread_id"] = "thread-1"
-    adapter._contexts[adapter._context_key("chat-1", "thread-1")] = command
-    adapter._contexts["chat-1"] = command
+    adapter._contexts[adapter._context_key(CONVERSATION_ID, "thread-1")] = command
+    adapter._contexts[CONVERSATION_ID] = command
     adapter._event_contexts["message-original"] = original
     adapter._event_contexts["message-command"] = command
 
     result = await adapter.send_invocation_progress(
-        "chat-1",
+        CONVERSATION_ID,
         {"type": "tool.started", "status": "running"},
         metadata={"thread_id": "thread-1", "message_id": "message-original"},
     )
@@ -638,7 +655,7 @@ async def test_send_invocation_progress_prefers_message_metadata_over_latest_con
             "path": "/hermes-platform/invocations/invocation-original/progress",
             "json": {
                 "botId": "bot-1",
-                "conversationId": "conversation-1",
+                "conversationId": CONVERSATION_ID,
                 "type": "tool.started",
                 "status": "running",
                 "threadId": "thread-1",
@@ -652,13 +669,11 @@ async def test_send_session_title_update_posts_structured_event_without_session_
     adapter = _make_adapter()
     context = _context("invocation-title")
     context["thread_id"] = "thread-1"
-    adapter._contexts[adapter._context_key("chat-1", "thread-1")] = context
+    adapter._contexts[adapter._context_key(CONVERSATION_ID, "thread-1")] = context
 
     result = await adapter.send_session_title_update(
-        "chat-1",
+        CONVERSATION_ID,
         "Generated Task Title",
-        "session-1",
-        session_key="session-key-1",
         metadata={"thread_id": "thread-1"},
     )
 
@@ -669,7 +684,7 @@ async def test_send_session_title_update_posts_structured_event_without_session_
             "path": "/hermes-platform/invocations/invocation-title/progress",
             "json": {
                 "botId": "bot-1",
-                "conversationId": "conversation-1",
+                "conversationId": CONVERSATION_ID,
                 "type": "session.title",
                 "status": "completed",
                 "label": "Generated Task Title",
@@ -687,10 +702,10 @@ async def test_send_session_title_update_posts_structured_event_without_session_
 async def test_send_exec_approval_posts_structured_approval_request():
     adapter = _make_adapter()
     context = _context("invocation-first")
-    adapter._contexts["chat-1"] = context
+    adapter._contexts[CONVERSATION_ID] = context
 
     result = await adapter.send_exec_approval(
-        "chat-1",
+        CONVERSATION_ID,
         "rm -rf /important",
         session_key="agent:main:thechat:dm:chat-1",
         description="recursive delete",
@@ -702,7 +717,7 @@ async def test_send_exec_approval_posts_structured_approval_request():
             "path": "/hermes-platform/invocations/invocation-first/progress",
             "json": {
                 "botId": "bot-1",
-                "conversationId": "conversation-1",
+                "conversationId": CONVERSATION_ID,
                 "type": "approval.request",
                 "status": "waiting",
                 "label": "Command approval required",
@@ -728,19 +743,19 @@ async def test_send_approval_resolution_targets_requesting_invocation():
     """
     adapter = _make_adapter()
     original = _context("invocation-original")
-    adapter._contexts["chat-1"] = original
+    adapter._contexts[CONVERSATION_ID] = original
 
     await adapter.send_exec_approval(
-        "chat-1",
+        CONVERSATION_ID,
         "rm -rf /important",
         session_key="agent:main:thechat:dm:chat-1",
     )
 
     # The /approve message overwrites the chat context with its own invocation.
-    adapter._contexts["chat-1"] = _context("invocation-approve-command")
+    adapter._contexts[CONVERSATION_ID] = _context("invocation-approve-command")
 
     result = await adapter.send_approval_resolution(
-        "chat-1",
+        CONVERSATION_ID,
         session_key="agent:main:thechat:dm:chat-1",
         choice="session",
         resolved_count=1,
@@ -763,10 +778,10 @@ async def test_send_approval_resolution_targets_requesting_invocation():
 @pytest.mark.asyncio
 async def test_send_approval_resolution_falls_back_to_chat_context():
     adapter = _make_adapter()
-    adapter._contexts["chat-1"] = _context("invocation-current")
+    adapter._contexts[CONVERSATION_ID] = _context("invocation-current")
 
     result = await adapter.send_approval_resolution(
-        "chat-1",
+        CONVERSATION_ID,
         session_key="agent:main:thechat:dm:chat-1",
         choice="once",
         resolved_count=2,
@@ -799,7 +814,7 @@ def test_gateway_thechat_metadata_carries_originating_message_id():
     runner = object.__new__(GatewayRunner)
     source = SessionSource(
         platform=Platform.THECHAT,
-        chat_id="chat-1",
+        chat_id=CONVERSATION_ID,
         chat_type="dm",
         user_id="user-1",
     )
@@ -815,12 +830,12 @@ async def test_gateway_thechat_auto_title_callback_sends_after_context_cleanup()
     adapter = _make_adapter()
     context = _context("invocation-title")
     context["thread_id"] = "thread-1"
-    adapter._contexts[adapter._context_key("chat-1", "thread-1")] = context
+    adapter._contexts[adapter._context_key(CONVERSATION_ID, "thread-1")] = context
     runner.adapters = {Platform.THECHAT: adapter}
 
     source = SessionSource(
         platform=Platform.THECHAT,
-        chat_id="chat-1",
+        chat_id=CONVERSATION_ID,
         chat_type="dm",
         user_id="user-1",
         thread_id="thread-1",
@@ -829,8 +844,6 @@ async def test_gateway_thechat_auto_title_callback_sends_after_context_cleanup()
 
     callback = runner._make_thechat_session_title_callback(
         source,
-        "session-1",
-        session_key="session-key-1",
         event_message_id="message-1",
     )
 
@@ -851,7 +864,7 @@ async def test_gateway_thechat_auto_title_callback_sends_after_context_cleanup()
             "path": "/hermes-platform/invocations/invocation-title/progress",
             "json": {
                 "botId": "bot-1",
-                "conversationId": "conversation-1",
+                "conversationId": CONVERSATION_ID,
                 "type": "session.title",
                 "status": "completed",
                 "label": "Generated Task Title",
@@ -1028,9 +1041,9 @@ async def test_webhook_event_dispatches_to_gateway_message_handler():
     assert event.text == "hello from webhook"
     assert event.message_id == "message-1"
     assert event.channel_prompt == "reply concisely"
-    assert event.source.chat_id == "direct:user-1"
+    assert event.source.chat_id == CONVERSATION_ID
     assert event.source.chat_type == "dm"
-    assert adapter._contexts["direct:user-1"]["invocation_id"] == "invocation-1"
+    assert adapter._contexts[CONVERSATION_ID]["invocation_id"] == INVOCATION_ID
 
 
 @pytest.mark.asyncio
@@ -1052,10 +1065,10 @@ async def test_threaded_platform_event_sets_source_thread_and_context_key():
 
     assert len(handled) == 1
     event = handled[0]
-    assert event.source.chat_id == "direct:user-1"
+    assert event.source.chat_id == CONVERSATION_ID
     assert event.source.thread_id == "task-thread-1"
-    context = adapter._contexts["direct:user-1:thread:task-thread-1"]
-    assert context["invocation_id"] == "invocation-1"
+    context = adapter._contexts[f"{CONVERSATION_ID}:thread:task-thread-1"]
+    assert context["invocation_id"] == INVOCATION_ID
     assert context["thread_id"] == "task-thread-1"
 
 
@@ -1144,7 +1157,7 @@ def test_webhook_payload_requires_current_envelope_and_event_shape():
         adapter._extract_webhook_event(
             {
                 "type": "thechat.hermes_platform.event",
-                "event": {"invocationId": "invocation-1", "chatId": "chat-1"},
+                "event": {"invocationId": "invocation-1", "chatId": CONVERSATION_ID},
             }
         )
 
@@ -1159,3 +1172,23 @@ def test_webhook_payload_requires_current_envelope_and_event_shape():
     branch_event["sessionIntent"] = {"type": "resume", "sessionId": "old-session"}
     with pytest.raises(ValueError):
         adapter._validate_platform_event(branch_event)
+
+    for obsolete_chat_id in (
+        "direct:user-1",
+        "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1",
+    ):
+        obsolete_event = _platform_item()
+        obsolete_event["chatId"] = obsolete_chat_id
+        obsolete_event["conversation"]["id"] = obsolete_chat_id
+        with pytest.raises(ValueError):
+            adapter._validate_platform_event(obsolete_event)
+
+    extra_intent_event = _platform_item()
+    extra_intent_event["sessionIntent"] = {
+        "type": "branch",
+        "fromThreadId": "source-thread",
+        "title": "Alternative",
+        "sessionId": "obsolete-session",
+    }
+    with pytest.raises(ValueError):
+        adapter._validate_platform_event(extra_intent_event)

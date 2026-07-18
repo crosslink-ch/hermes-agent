@@ -261,4 +261,4 @@ async def test_thechat_branch_session_intent_creates_child_session_without_hangi
     assert ("user", "parent hello") in child_transcript
     assert ("assistant", "e2e echo: parent hello") in child_transcript
     assert ("user", "child first message") in child_transcript
-    assert getattr(branch_event, "hermes_session")["sessionId"] == child_entry.session_id
+    assert not hasattr(branch_event, "hermes_session")
