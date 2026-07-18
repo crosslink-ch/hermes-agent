@@ -578,6 +578,15 @@ class TestActiveQueries:
         assert registry.has_active_processes("t1") is True
         assert registry.has_active_processes("t2") is False
 
+    def test_has_active_environment_uses_object_identity(self, registry):
+        old_env = object()
+        new_env = object()
+        s = _make_session(task_id="t1")
+        s.env_ref = old_env
+        registry._running[s.id] = s
+        assert registry.has_active_environment(old_env) is True
+        assert registry.has_active_environment(new_env) is False
+
     def test_has_active_for_session(self, registry):
         s = _make_session()
         s.session_key = "gw_session_1"
@@ -1066,12 +1075,18 @@ class TestCheckpoint:
     def test_write_checkpoint(self, registry, tmp_path):
         with patch("tools.process_registry.CHECKPOINT_PATH", tmp_path / "procs.json"):
             s = _make_session()
+            s.target = "alpha"
+            s.backend = "local"
+            s.runtime_scope = "scope-v1"
             registry._running[s.id] = s
             registry._write_checkpoint()
 
             data = json.loads((tmp_path / "procs.json").read_text())
             assert len(data) == 1
             assert data[0]["session_id"] == s.id
+            assert data[0]["target"] == "alpha"
+            assert data[0]["backend"] == "local"
+            assert data[0]["runtime_scope"] == "scope-v1"
 
     def test_recover_no_file(self, registry, tmp_path):
         with patch("tools.process_registry.CHECKPOINT_PATH", tmp_path / "missing.json"):
@@ -1124,6 +1139,9 @@ class TestCheckpoint:
             "watcher_user_name": "alice",
             "watcher_thread_id": "42",
             "watcher_interval": 60,
+            "target": "alpha",
+            "backend": "local",
+            "runtime_scope": "scope-v1",
         }]))
         with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
             recovered = registry.recover_from_checkpoint()
@@ -1137,6 +1155,10 @@ class TestCheckpoint:
             assert w["user_name"] == "alice"
             assert w["thread_id"] == "42"
             assert w["check_interval"] == 60
+            session = registry.get("proc_live")
+            assert session.target == "alpha"
+            assert session.backend == "local"
+            assert session.runtime_scope == "scope-v1"
 
     def test_recover_skips_watcher_when_no_interval(self, registry, tmp_path):
         checkpoint = tmp_path / "procs.json"

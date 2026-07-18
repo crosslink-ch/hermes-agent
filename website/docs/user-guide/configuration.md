@@ -130,6 +130,47 @@ terminal:
 
 For cloud sandboxes such as Modal and Daytona, `container_persistent: true` means Hermes will try to preserve filesystem state across sandbox recreation. It does not promise that the same live sandbox, PID space, or background processes will still be running later.
 
+### Named Execution Targets
+
+A single Hermes process can route terminal, file, and Python execution calls to several configured environments. Recognized backend settings under `terminal` are inherited by every target, and target entries can override backend-scoped values such as `backend`, `cwd`, `timeout`, image/resource fields, Docker options, and SSH connection fields. Keep process-wide policy such as shell initialization, environment-passthrough, approval, and code-execution settings at the top level: arbitrary nested keys are not automatically target-aware.
+
+```yaml
+terminal:
+  timeout: 180
+  container_memory: 5120
+  default_target: local
+  targets:
+    local:
+      backend: local
+      cwd: /workspace/local
+    devbox:
+      backend: ssh
+      ssh_host: devbox.example.com
+      ssh_user: bruno
+      cwd: /home/bruno/project
+```
+
+When `targets` is non-empty, a tool call with no selector uses `default_target`. The default must name an entry; invalid defaults and unknown explicit names fail with an error listing the available names. Target names are arbitrary non-empty strings.
+
+The tools use fixed string parameters so changing config does not change the model tool schema:
+
+```text
+terminal(command="git status", target="devbox")
+read_file(path="README.md", target="local")
+write_file(path="notes.txt", content="...", target="devbox")
+patch(mode="replace", path="app.py", old_string="old", new_string="new", target="devbox")
+execute_code(code="print('hello')", target="devbox")
+search_files(pattern="TODO", target="content", execution_target="devbox")
+```
+
+`search_files` is the compatibility exception: its existing `target` argument still selects `content` or `files` search mode, while `execution_target` selects the named environment. A target's terminal and file operations share the same environment and per-session working directory. A `cd` on one target does not change another target; an explicit `workdir` on a terminal call still wins.
+
+Background process follow-up actions remain keyed only by `session_id`. Process start, list, poll, log, wait, kill, and checkpoint results expose the selected `target` and `backend`. Local background processes can be recovered from checkpoints after a Hermes restart; remote/container process handles are currently reported as unavailable after restart rather than silently attaching to a newly created environment. Successful terminal/file/code-execution results expose target metadata (and `cwd` when available). The system prompt lists configured names and marks the default without changing tool schemas.
+
+Command and execute-code approval prompts identify the resolved target/backend. Session and UI-created permanent pattern approvals are scoped to the target's profile/name/effective configuration, so approving a command on one host does not silently authorize the same pattern after that target name is repointed. Explicit entries an operator writes in the global `approvals.command_allowlist` remain global by design. An `execute_code` RPC session is bound to its outer target and effective configuration: nested terminal/file calls inherit that target, cannot pivot to another one, and fail closed if the alias is repointed while the script is running.
+
+If `targets` is absent or empty, Hermes preserves the existing flat config and environment-variable behavior exactly. In that legacy mode, omitted `target` and `target="default"` select the existing environment; every other explicit name is an error. Environment variables remain the legacy single-backend interface and do not select named targets. In named mode Hermes mirrors the resolved default target into `TERMINAL_*` for older internal consumers, but explicit tool selection still comes only from `target` / `execution_target`. Once an entry point reloads or updates its effective configuration, new calls create a replacement environment for any changed target; already-running operations and background sessions remain bound to the environment in which they started. The classic interactive CLI snapshots its merged configuration at startup, so restart that CLI after editing `config.yaml`; runtime replacement is not a promise of automatic disk watching. A persistent named Docker runtime is not hot-swapped while the current process still holds it (or another process has it leased): clean up that target or restart Hermes, then retry the edited config. Its separate stable profile/target storage identity keeps persistent home/workspace data across policy, timeout, or image changes.
+
 ### Backend Overview
 
 | Backend | Where commands run | Isolation | Best for |
@@ -289,7 +330,7 @@ Parallel subagents spawned via `delegate_task(tasks=[...])` share this one conta
 
 #### Environment variable overrides
 
-Every key under `terminal:` has an env-var override of the form `TERMINAL_<KEY_UPPERCASE>`. The most useful ones for the Docker backend:
+Legacy single-backend terminal settings have `TERMINAL_*` environment-variable overrides. Named `default_target` / `targets` selection is config-only; environment variables do not switch targets. The most useful Docker overrides are:
 
 | Env var | Maps to | Notes |
 |---|---|---|

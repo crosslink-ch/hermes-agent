@@ -102,6 +102,18 @@ def _is_mcp_tool_parallel_safe(tool_name: str) -> bool:
         return False
 
 
+def _named_execution_targets_enabled() -> bool:
+    """Return whether omitted file selectors route through a named default."""
+    try:
+        from tools.execution_targets import list_execution_targets
+
+        return any(target.named for target in list_execution_targets())
+    except Exception:
+        # The tools report malformed target config. The planner must still fail
+        # conservative rather than race path mutations before that happens.
+        return True
+
+
 def _plan_tool_batch_segments(tool_calls, *, execution_cwd: Optional[Path] = None) -> List[tuple]:
     """Split a tool-call batch into ordered ``(kind, calls)`` segments.
 
@@ -120,6 +132,10 @@ def _plan_tool_batch_segments(tool_calls, *, execution_cwd: Optional[Path] = Non
       parallel run only when their target path does not overlap another
       path already reserved in the same run; an overlap closes the run so
       the conflicting call starts a NEW run after the first completes.
+      Calls routed through either a configured named default or an explicit
+      execution target are conservative barriers: the planner's host-side
+      canonical path cannot authoritatively model a remote target's CWD or
+      filesystem aliases.
     * Anything not in ``_PARALLEL_SAFE_TOOLS`` and not an opted-in MCP
       tool → barrier.
 
@@ -130,6 +146,7 @@ def _plan_tool_batch_segments(tool_calls, *, execution_cwd: Optional[Path] = Non
     segments: list[list] = []  # [kind, calls] pairs, normalized to tuples on return
     current: list = []
     reserved_paths: list[Path] = []
+    named_default = _named_execution_targets_enabled()
 
     def _close_parallel() -> None:
         nonlocal current, reserved_paths
@@ -173,6 +190,9 @@ def _plan_tool_batch_segments(tool_calls, *, execution_cwd: Optional[Path] = Non
             continue
 
         if tool_name in _PATH_SCOPED_TOOLS:
+            if named_default or function_args.get("target") is not None:
+                _add_sequential(tool_call)
+                continue
             scoped_path = _extract_parallel_scope_path(tool_name, function_args, execution_cwd=execution_cwd)
             if scoped_path is None:
                 _add_sequential(tool_call)

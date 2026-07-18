@@ -2693,11 +2693,15 @@ class TestConcurrentToolExecution:
         tc2 = _mock_tool_call(name="read_file", arguments='{"path":"x.py"}', call_id="c2")
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
         messages = []
-        with patch.object(agent, "_execute_tool_calls_sequential") as mock_seq:
-            with patch.object(agent, "_execute_tool_calls_concurrent") as mock_con:
-                agent._execute_tool_calls(mock_msg, messages, "task-1")
-                mock_con.assert_called_once()
-                mock_seq.assert_not_called()
+        with patch(
+            "agent.tool_dispatch_helpers._named_execution_targets_enabled",
+            return_value=False,
+        ):
+            with patch.object(agent, "_execute_tool_calls_sequential") as mock_seq:
+                with patch.object(agent, "_execute_tool_calls_concurrent") as mock_con:
+                    agent._execute_tool_calls(mock_msg, messages, "task-1")
+                    mock_con.assert_called_once()
+                    mock_seq.assert_not_called()
 
     def test_terminal_batch_forces_sequential(self, agent):
         """Stateful tools should not share the concurrent execution path."""
@@ -2737,11 +2741,71 @@ class TestConcurrentToolExecution:
         )
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
         messages = []
+        with patch(
+            "agent.tool_dispatch_helpers._named_execution_targets_enabled",
+            return_value=False,
+        ):
+            with patch.object(agent, "_execute_tool_calls_sequential") as mock_seq:
+                with patch.object(agent, "_execute_tool_calls_concurrent") as mock_con:
+                    agent._execute_tool_calls(mock_msg, messages, "task-1")
+                    mock_con.assert_called_once()
+                    mock_seq.assert_not_called()
+
+    def test_explicit_targeted_writes_are_sequential_barriers(self, agent):
+        tc1 = _mock_tool_call(
+            name="write_file",
+            arguments='{"path":"src/a.py","content":"one","target":"beta"}',
+            call_id="c1",
+        )
+        tc2 = _mock_tool_call(
+            name="write_file",
+            arguments='{"path":"src/b.py","content":"two","target":"beta"}',
+            call_id="c2",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+        messages = []
         with patch.object(agent, "_execute_tool_calls_sequential") as mock_seq:
             with patch.object(agent, "_execute_tool_calls_concurrent") as mock_con:
                 agent._execute_tool_calls(mock_msg, messages, "task-1")
-                mock_con.assert_called_once()
-                mock_seq.assert_not_called()
+                mock_seq.assert_called_once()
+                mock_con.assert_not_called()
+
+    def test_named_default_writes_are_sequential_barriers(self, agent):
+        tc1 = _mock_tool_call(
+            name="write_file",
+            arguments='{"path":"relative.txt","content":"one"}',
+            call_id="c1",
+        )
+        tc2 = _mock_tool_call(
+            name="write_file",
+            arguments='{"path":"/remote/project/relative.txt","content":"two"}',
+            call_id="c2",
+        )
+        mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])
+        messages = []
+        with patch(
+            "agent.tool_dispatch_helpers._named_execution_targets_enabled",
+            return_value=True,
+        ):
+            with patch.object(agent, "_execute_tool_calls_sequential") as mock_seq:
+                with patch.object(agent, "_execute_tool_calls_concurrent") as mock_con:
+                    agent._execute_tool_calls(mock_msg, messages, "task-1")
+                    mock_seq.assert_called_once()
+                    mock_con.assert_not_called()
+
+    def test_legacy_default_inventory_does_not_enable_named_barrier(self):
+        from agent import tool_dispatch_helpers as helpers
+
+        with patch(
+            "tools.execution_targets.list_execution_targets",
+            return_value=(SimpleNamespace(named=False),),
+        ):
+            assert helpers._named_execution_targets_enabled() is False
+        with patch(
+            "tools.execution_targets.list_execution_targets",
+            return_value=(SimpleNamespace(named=True),),
+        ):
+            assert helpers._named_execution_targets_enabled() is True
 
     def test_overlapping_write_batch_forces_sequential(self, agent):
         """Writes to the same file must stay ordered."""

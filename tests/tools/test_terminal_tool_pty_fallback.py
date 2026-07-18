@@ -55,6 +55,8 @@ def test_terminal_background_disables_pty_for_gh_with_token(monkeypatch, tmp_pat
         terminal_tool_module._last_activity.pop("default", None)
 
     assert captured["use_pty"] is False
+    assert "env_ref" not in captured
+    assert "runtime_scope" not in captured
     assert result["session_id"] == "proc_test"
     assert "PTY disabled" in result["pty_note"]
 
