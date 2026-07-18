@@ -1135,16 +1135,8 @@ async def _send_thechat(pconfig, chat_id, message):
     """Post a proactive TheChat bot message through the Hermes platform API."""
     from gateway.otel import start_span
 
-    base_url = str(
-        getattr(pconfig, "extra", {}).get("base_url")
-        or os.getenv("THECHAT_BASE_URL", "")
-    ).rstrip("/")
-    token = str(
-        getattr(pconfig, "token", "")
-        or getattr(pconfig, "extra", {}).get("token")
-        or os.getenv("THECHAT_BOT_TOKEN", "")
-        or os.getenv("THECHAT_HERMES_BOT_TOKEN", "")
-    ).strip()
+    base_url = str(getattr(pconfig, "extra", {}).get("base_url") or "").rstrip("/")
+    token = str(getattr(pconfig, "token", "") or "").strip()
     if not base_url:
         return {"error": "TheChat base URL is not configured"}
     if not token:

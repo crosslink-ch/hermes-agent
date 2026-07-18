@@ -704,9 +704,7 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.YUANBAO: lambda cfg: bool(
         cfg.extra.get("app_id") and cfg.extra.get("app_secret")
     ),
-    Platform.THECHAT: lambda cfg: bool(
-        cfg.extra.get("base_url") and (cfg.token or cfg.extra.get("token"))
-    ),
+    Platform.THECHAT: lambda cfg: bool(cfg.extra.get("base_url") and cfg.token),
     Platform.DINGTALK: lambda cfg: bool(
         (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))
         and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
@@ -1885,10 +1883,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
 
     # TheChat platform bridge
     thechat_base_url = os.getenv("THECHAT_BASE_URL", "").strip()
-    thechat_token = (
-        os.getenv("THECHAT_BOT_TOKEN", "").strip()
-        or os.getenv("THECHAT_HERMES_BOT_TOKEN", "").strip()
-    )
+    thechat_token = os.getenv("THECHAT_BOT_TOKEN", "").strip()
     if thechat_base_url and thechat_token:
         if Platform.THECHAT not in config.platforms:
             config.platforms[Platform.THECHAT] = PlatformConfig()
@@ -1896,7 +1891,6 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         config.platforms[Platform.THECHAT].token = thechat_token
         config.platforms[Platform.THECHAT].extra.update({
             "base_url": thechat_base_url.rstrip("/"),
-            "token": thechat_token,
             "poll_interval": _coerce_float(os.getenv("THECHAT_POLL_INTERVAL"), 1.0),
             "webhook_host": os.getenv("THECHAT_WEBHOOK_HOST", "127.0.0.1"),
             "webhook_port": _coerce_int(os.getenv("THECHAT_WEBHOOK_PORT"), 8765),

@@ -75,177 +75,48 @@ async def test_thechat_adapter_title_progress_only_sends_title():
     assert payload["payload"] == {"title": "Investigate checkout"}
 
 
-def test_thechat_session_intent_session_id_is_advisory_without_resume_type():
+@pytest.mark.asyncio
+async def test_thechat_ignores_non_current_session_intent_shapes():
     runner = object.__new__(GatewayRunner)
-    switch_calls = []
-    runner._session_db = SimpleNamespace(
-        resolve_resume_session_id=lambda session_id: (_ for _ in ()).throw(
-            AssertionError("normal sessionIntent.sessionId must not resolve/switch")
-        ),
-        get_session=lambda session_id: (_ for _ in ()).throw(
-            AssertionError("normal sessionIntent.sessionId must not fetch sessions")
-        ),
+    runner._session_db = None
+    source = SessionSource(
+        platform=Platform.THECHAT,
+        chat_id="thechat:conversation:1",
+        user_id="user-1",
     )
-    runner.session_store = SimpleNamespace(
-        switch_session=lambda session_key, target_session_id: switch_calls.append(
-            (session_key, target_session_id)
+    current_entry = SimpleNamespace(
+        session_id="current-session",
+        session_key="thechat-key",
+    )
+
+    for raw_message in (
+        {"session_intent": {"type": "branch", "fromThreadId": "source-thread"}},
+        {"sessionIntent": {"type": "fork", "fromThreadId": "source-thread"}},
+        {"sessionIntent": {"type": "resume", "sessionId": "old-session"}},
+    ):
+        event = MessageEvent(
+            text="continue",
+            message_type=MessageType.TEXT,
+            source=source,
+            raw_message=raw_message,
         )
-    )
 
-    source = SessionSource(
-        platform=Platform.THECHAT,
-        chat_id="thechat:conversation:1",
-        user_id="user-1",
-    )
-    event = MessageEvent(
-        text="continue",
-        message_type=MessageType.TEXT,
-        source=source,
-        raw_message={"sessionIntent": {"sessionId": "stale-or-client-side-session"}},
-    )
-    current_entry = SimpleNamespace(
-        session_id="derived-from-session-key",
-        session_key="thechat-key",
-    )
+        result = await runner._apply_thechat_session_intent_async(
+            event,
+            source,
+            current_entry,
+        )
 
-    result = runner._apply_thechat_session_intent(
-        event,
-        source,
-        current_entry,
-    )
-
-    assert result is current_entry
-    assert switch_calls == []
-    assert not hasattr(event, "hermes_session")
+        assert result is current_entry
+        assert not hasattr(event, "hermes_session")
 
 
-def test_thechat_explicit_resume_session_id_switches_gateway_session():
-    runner = object.__new__(GatewayRunner)
-    runner._session_db = SimpleNamespace(
-        resolve_resume_session_id=lambda session_id: f"{session_id}-tip",
-        get_session=lambda session_id: {"id": session_id},
-        _session_lineage_root_to_tip=lambda session_id: ["root-1", session_id],
-    )
-    switched_entry = SimpleNamespace(
-        session_id="session-2-tip",
-        session_key="thechat-key",
-    )
-    runner.session_store = SimpleNamespace(
-        switch_session=lambda session_key, target_session_id: switched_entry,
-    )
-    runner._clear_session_boundary_security_state = lambda session_key: None
-    runner._evict_cached_agent = lambda session_key: None
-
-    source = SessionSource(
-        platform=Platform.THECHAT,
-        chat_id="thechat:conversation:1",
-        user_id="user-1",
-    )
-    event = MessageEvent(
-        text="continue",
-        message_type=MessageType.TEXT,
-        source=source,
-        raw_message={"sessionIntent": {"type": "resume", "sessionId": "session-2"}},
-    )
-    current_entry = SimpleNamespace(
-        session_id="session-1",
-        session_key="thechat-key",
-    )
-
-    result = runner._apply_thechat_session_intent(
-        event,
-        source,
-        current_entry,
-    )
-
-    assert result is switched_entry
-    assert event.hermes_session["sessionId"] == "session-2-tip"
-    assert event.hermes_session["lineageRootId"] == "root-1"
-    assert event.hermes_session["reason"] == "session_intent.resumed"
-
-
-def test_thechat_pending_branch_creates_branch_session_before_agent_run():
+@pytest.mark.asyncio
+async def test_thechat_branch_resolves_parent_from_current_source_thread_contract():
     runner = object.__new__(GatewayRunner)
     created = {}
     appended = []
     titled = {}
-
-    def create_session(**kwargs):
-        created.update(kwargs)
-
-    def append_message(**kwargs):
-        appended.append(kwargs)
-
-    runner._session_db = SimpleNamespace(
-        resolve_resume_session_id=lambda session_id: session_id,
-        get_session=lambda session_id: {"id": session_id},
-        get_session_title=lambda session_id: "Original",
-        get_next_title_in_lineage=lambda title: f"{title} #2",
-        create_session=create_session,
-        append_message=append_message,
-        set_session_title=lambda session_id, title: titled.update({session_id: title}),
-        _session_lineage_root_to_tip=lambda session_id: ["parent-1", session_id],
-    )
-    runner.config = {}
-
-    def switch_session(session_key, target_session_id):
-        return SimpleNamespace(
-            session_id=target_session_id,
-            session_key=session_key,
-        )
-
-    runner.session_store = SimpleNamespace(
-        load_transcript=lambda session_id: [{"role": "user", "content": "hello"}],
-        switch_session=switch_session,
-    )
-    runner._clear_session_boundary_security_state = lambda session_key: None
-    runner._evict_cached_agent = lambda session_key: None
-
-    source = SessionSource(
-        platform=Platform.THECHAT,
-        chat_id="thechat:conversation:1",
-        user_id="user-1",
-    )
-    event = MessageEvent(
-        text="try another approach",
-        message_type=MessageType.TEXT,
-        source=source,
-        raw_message={
-            "sessionIntent": {
-                "type": "branch",
-                "fromSessionId": "parent-1",
-                "title": "Alternative",
-            },
-        },
-    )
-    current_entry = SimpleNamespace(
-        session_id="old-session",
-        session_key="thechat-key",
-        created_at=datetime(2026, 1, 1, 12, 0, 0),
-        updated_at=datetime(2026, 1, 1, 12, 0, 0),
-    )
-
-    result = runner._apply_thechat_session_intent(
-        event,
-        source,
-        current_entry,
-    )
-
-    assert result.session_key == "thechat-key"
-    assert result.session_id != "old-session"
-    assert created["parent_session_id"] == "parent-1"
-    assert created["model_config"] == {"_branched_from": "parent-1"}
-    assert created["session_id"] == result.session_id
-    assert appended[0]["session_id"] == result.session_id
-    assert titled[result.session_id] == "Alternative"
-    assert event.hermes_session["sessionId"] == result.session_id
-    assert event.hermes_session["reason"] == "branch.created"
-
-
-def test_thechat_branch_can_resolve_parent_from_source_thread_id():
-    runner = object.__new__(GatewayRunner)
-    created = {}
-    appended = []
 
     runner._session_db = SimpleNamespace(
         resolve_resume_session_id=lambda session_id: session_id,
@@ -254,7 +125,7 @@ def test_thechat_branch_can_resolve_parent_from_source_thread_id():
         get_next_title_in_lineage=lambda title: f"{title} #2",
         create_session=lambda **kwargs: created.update(kwargs),
         append_message=lambda **kwargs: appended.append(kwargs),
-        set_session_title=lambda session_id, title: None,
+        set_session_title=lambda session_id, title: titled.update({session_id: title}),
         _session_lineage_root_to_tip=lambda session_id: ["parent-thread-session", session_id],
     )
     runner.config = {}
@@ -303,16 +174,26 @@ def test_thechat_branch_can_resolve_parent_from_source_thread_id():
         updated_at=datetime(2026, 1, 1, 12, 0, 0),
     )
 
-    result = runner._apply_thechat_session_intent(event, source, current_entry)
+    result = await runner._apply_thechat_session_intent_async(
+        event,
+        source,
+        current_entry,
+    )
 
     assert parent_sources[0].thread_id == "source-thread"
     assert created["parent_session_id"] == "parent-thread-session"
     assert created["model_config"] == {"_branched_from": "parent-thread-session"}
+    assert created["session_id"] == result.session_id
     assert appended[0]["session_id"] == result.session_id
+    assert titled[result.session_id] == "Alternative"
     assert result.session_key == "branch-thread-key"
+    session_reference = getattr(event, "hermes_session")
+    assert session_reference["sessionId"] == result.session_id
+    assert session_reference["reason"] == "branch.created"
 
 
-def test_thechat_persisted_branch_marker_is_ignored_after_branch_exists():
+@pytest.mark.asyncio
+async def test_thechat_persisted_branch_marker_is_ignored_after_branch_exists():
     runner = object.__new__(GatewayRunner)
     runner._session_db = None
     runner.session_store = SimpleNamespace(
@@ -345,7 +226,11 @@ def test_thechat_persisted_branch_marker_is_ignored_after_branch_exists():
         updated_at=datetime(2026, 1, 1, 12, 5, 0),
     )
 
-    result = runner._apply_thechat_session_intent(event, source, current_entry)
+    result = await runner._apply_thechat_session_intent_async(
+        event,
+        source,
+        current_entry,
+    )
 
     assert result is current_entry
     assert not hasattr(event, "hermes_session")

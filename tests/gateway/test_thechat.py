@@ -4,7 +4,7 @@ from typing import Any, cast
 import httpx
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import Platform, PlatformConfig, load_gateway_config
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource, build_session_key
 from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
@@ -67,6 +67,25 @@ def _make_adapter():
     return adapter
 
 
+def test_config_loads_only_current_thechat_token_location(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("THECHAT_BASE_URL", "https://thechat.test")
+    monkeypatch.setenv("THECHAT_HERMES_BOT_TOKEN", "obsolete-token")
+    monkeypatch.delenv("THECHAT_BOT_TOKEN", raising=False)
+
+    config = load_gateway_config()
+
+    assert Platform.THECHAT not in config.platforms
+
+    monkeypatch.setenv("THECHAT_BOT_TOKEN", "current-token")
+    config = load_gateway_config()
+    thechat_config = config.platforms[Platform.THECHAT]
+
+    assert thechat_config.token == "current-token"
+    assert thechat_config.extra["base_url"] == "https://thechat.test"
+    assert "token" not in thechat_config.extra
+
+
 def _context(invocation_id):
     return {
         "invocation_id": invocation_id,
@@ -99,6 +118,32 @@ def _event(
         source=source,
         message_id=message_id,
     )
+
+
+def _platform_item(
+    *,
+    text="hello from TheChat",
+    thread_id=None,
+    instructions=None,
+):
+    return {
+        "id": "event-1",
+        "chatId": "direct:user-1",
+        "chatType": "dm",
+        "threadId": thread_id,
+        "invocationId": "invocation-1",
+        "messageId": "message-1",
+        "text": text,
+        "instructions": instructions,
+        "sender": {"id": "user-1", "name": "User"},
+        "bot": {"id": "bot-1", "userId": "bot-user-1", "name": "Hermes"},
+        "conversation": {
+            "id": "conversation-1",
+            "type": "dm",
+            "name": "Hermes DM",
+            "workspaceId": "workspace-1",
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -933,7 +978,7 @@ async def test_connect_registers_slash_commands(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_connect_succeeds_when_command_registration_fails(monkeypatch):
+async def test_connect_fails_when_current_command_registration_contract_fails(monkeypatch):
     class _FailingCommandsClient(_FakeClient):
         async def post(self, path, json):
             if path == "/bots/me/commands":
@@ -956,10 +1001,9 @@ async def test_connect_succeeds_when_command_registration_fails(monkeypatch):
 
     monkeypatch.setattr(adapter, "_poll_loop", poll_loop)
 
-    assert await adapter.connect() is True
-    assert adapter.is_connected
-
-    await adapter.disconnect()
+    assert await adapter.connect() is False
+    assert not adapter.is_connected
+    assert adapter._client is None
 
 
 @pytest.mark.asyncio
@@ -973,21 +1017,10 @@ async def test_webhook_event_dispatches_to_gateway_message_handler():
     adapter.handle_message = cast(Any, handle)
 
     await adapter._handle_platform_event_safely(
-        {
-            "chatId": "direct:user-1",
-            "chatType": "dm",
-            "invocationId": "invocation-1",
-            "messageId": "message-1",
-            "text": "hello from webhook",
-            "instructions": "reply concisely",
-            "sender": {"id": "user-1", "name": "User"},
-            "bot": {"id": "bot-1", "name": "Hermes"},
-            "conversation": {
-                "id": "conversation-1",
-                "name": "Hermes DM",
-                "workspaceId": "workspace-1",
-            },
-        }
+        _platform_item(
+            text="hello from webhook",
+            instructions="reply concisely",
+        )
     )
 
     assert len(handled) == 1
@@ -1011,21 +1044,10 @@ async def test_threaded_platform_event_sets_source_thread_and_context_key():
     adapter.handle_message = cast(Any, handle)
 
     await adapter._handle_platform_event_safely(
-        {
-            "chatId": "direct:user-1",
-            "chatType": "dm",
-            "threadId": "task-thread-1",
-            "invocationId": "invocation-1",
-            "messageId": "message-1",
-            "text": "hello from threaded task",
-            "sender": {"id": "user-1", "name": "User"},
-            "bot": {"id": "bot-1", "name": "Hermes"},
-            "conversation": {
-                "id": "conversation-1",
-                "name": "Hermes DM",
-                "workspaceId": "workspace-1",
-            },
-        }
+        _platform_item(
+            text="hello from threaded task",
+            thread_id="task-thread-1",
+        )
     )
 
     assert len(handled) == 1
@@ -1039,16 +1061,7 @@ async def test_threaded_platform_event_sets_source_thread_and_context_key():
 
 @pytest.mark.asyncio
 async def test_polling_event_dispatches_to_gateway_message_handler():
-    event = {
-        "chatId": "direct:user-1",
-        "chatType": "dm",
-        "invocationId": "invocation-1",
-        "messageId": "message-1",
-        "text": "hello from polling",
-        "sender": {"id": "user-1", "name": "User"},
-        "bot": {"id": "bot-1", "name": "Hermes"},
-        "conversation": {"id": "conversation-1", "name": "Hermes DM"},
-    }
+    event = _platform_item(text="hello from polling")
     adapter = TheChatAdapter(
         PlatformConfig(
             enabled=True,
@@ -1113,9 +1126,9 @@ def test_webhook_authorization_uses_bot_token():
     )
 
 
-def test_webhook_payload_extracts_wrapped_and_direct_events():
+def test_webhook_payload_requires_current_envelope_and_event_shape():
     adapter = _make_adapter()
-    event = {"invocationId": "invocation-1", "chatId": "chat-1"}
+    event = _platform_item()
 
     assert (
         adapter._extract_webhook_event(
@@ -1123,6 +1136,26 @@ def test_webhook_payload_extracts_wrapped_and_direct_events():
         )
         is event
     )
-    assert adapter._extract_webhook_event(event) is event
+    with pytest.raises(ValueError):
+        adapter._extract_webhook_event(event)
     with pytest.raises(ValueError):
         adapter._extract_webhook_event({"type": "unknown"})
+    with pytest.raises(ValueError):
+        adapter._extract_webhook_event(
+            {
+                "type": "thechat.hermes_platform.event",
+                "event": {"invocationId": "invocation-1", "chatId": "chat-1"},
+            }
+        )
+
+    branch_event = _platform_item()
+    branch_event["sessionIntent"] = {
+        "type": "branch",
+        "fromThreadId": "source-thread",
+        "title": "Alternative",
+    }
+    assert adapter._validate_platform_event(branch_event) is branch_event
+
+    branch_event["sessionIntent"] = {"type": "resume", "sessionId": "old-session"}
+    with pytest.raises(ValueError):
+        adapter._validate_platform_event(branch_event)

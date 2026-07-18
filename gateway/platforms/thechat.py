@@ -54,42 +54,23 @@ class TheChatAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.THECHAT)
         self.config.extra.setdefault("group_sessions_per_user", False)
-        self.base_url = str(
-            config.extra.get("base_url") or os.getenv("THECHAT_BASE_URL", "")
-        ).rstrip("/")
-        self.token = str(
-            config.token
-            or config.extra.get("token")
-            or os.getenv("THECHAT_BOT_TOKEN")
-            or os.getenv("THECHAT_HERMES_BOT_TOKEN")
-            or ""
-        )
-        self.poll_interval = float(
-            config.extra.get("poll_interval")
-            or os.getenv("THECHAT_POLL_INTERVAL", "1.0")
-        )
+        self.base_url = str(config.extra.get("base_url") or "").rstrip("/")
+        self.token = str(config.token or "")
+        self.poll_interval = float(config.extra.get("poll_interval") or 1.0)
         self._client: Optional[httpx.AsyncClient] = None
         self._poll_task: Optional[asyncio.Task] = None
         self.webhook_host = str(
-            config.extra.get("webhook_host")
-            or os.getenv("THECHAT_WEBHOOK_HOST")
-            or _DEFAULT_WEBHOOK_HOST
+            config.extra.get("webhook_host") or _DEFAULT_WEBHOOK_HOST
         )
         self.webhook_port = int(
-            config.extra.get("webhook_port")
-            or os.getenv("THECHAT_WEBHOOK_PORT")
-            or _DEFAULT_WEBHOOK_PORT
+            config.extra.get("webhook_port", _DEFAULT_WEBHOOK_PORT)
         )
         self.webhook_path = self._normalize_webhook_path(
             str(
-                config.extra.get("webhook_path")
-                or os.getenv("THECHAT_WEBHOOK_PATH")
-                or _DEFAULT_WEBHOOK_PATH
+                config.extra.get("webhook_path") or _DEFAULT_WEBHOOK_PATH
             )
         )
-        configured_webhook_url = str(
-            config.extra.get("webhook_url") or os.getenv("THECHAT_WEBHOOK_URL") or ""
-        ).strip()
+        configured_webhook_url = str(config.extra.get("webhook_url") or "").strip()
         self.webhook_url = configured_webhook_url
         self._web_app: Optional[Any] = None
         self._web_runner: Optional[Any] = None
@@ -134,12 +115,11 @@ class TheChatAdapter(BasePlatformAdapter):
             if self.webhook_url:
                 await self._start_webhook_server()
                 await self._register_webhook()
+            await self._register_commands()
         except Exception as exc:
             logger.error("TheChat: connection setup failed: %s", exc)
             await self.disconnect()
             return False
-
-        await self._register_commands()
 
         self._mark_connected()
         if self.webhook_url:
@@ -494,25 +474,23 @@ class TheChatAdapter(BasePlatformAdapter):
     def _context_from_platform_event(
         self,
         item: Any,
-        *,
-        fallback_thread_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         if not isinstance(item, dict):
             return None
         invocation_id = item.get("invocationId")
         if not invocation_id:
             return None
-        bot = item.get("bot") or {}
-        conversation = item.get("conversation") or {}
-        thread_id = str(item.get("threadId") or item.get("thread_id") or fallback_thread_id or "") or None
+        bot = item["bot"]
+        conversation = item["conversation"]
+        thread_id = str(item.get("threadId") or "") or None
         session_intent = item.get("sessionIntent")
         context: Dict[str, Any] = {
             "invocation_id": str(invocation_id),
-            "bot_id": str(bot.get("id") or ""),
-            "bot_name": str(bot.get("name") or "Hermes"),
-            "conversation_id": str(conversation.get("id") or ""),
+            "bot_id": str(bot["id"]),
+            "bot_name": str(bot["name"]),
+            "conversation_id": str(conversation["id"]),
             "conversation_name": conversation.get("name"),
-            "chat_type": item.get("chatType") or "group",
+            "chat_type": item["chatType"],
             "thread_id": thread_id,
         }
         if isinstance(session_intent, dict):
@@ -536,10 +514,7 @@ class TheChatAdapter(BasePlatformAdapter):
             # the queued turn is replayed later using the same platform event.
             # Rehydrate the context from raw_message so the deferred response and
             # tool-progress still route to the original TheChat task/thread.
-            context = self._context_from_platform_event(
-                event.raw_message,
-                fallback_thread_id=event.source.thread_id,
-            )
+            context = self._context_from_platform_event(event.raw_message)
             if context and event_key:
                 self._event_contexts[event_key] = context
         if context:
@@ -626,9 +601,7 @@ class TheChatAdapter(BasePlatformAdapter):
         self._web_app = app
         self._web_runner = runner
         self._web_site = site
-        if self.webhook_port == 0 and not (
-            self.config.extra.get("webhook_url") or os.getenv("THECHAT_WEBHOOK_URL")
-        ):
+        if self.webhook_port == 0 and not self.webhook_url:
             sockets = getattr(getattr(site, "_server", None), "sockets", None) or []
             if sockets:
                 self.webhook_port = int(sockets[0].getsockname()[1])
@@ -649,31 +622,22 @@ class TheChatAdapter(BasePlatformAdapter):
         """Register the gateway's slash commands with TheChat.
 
         Telegram setMyCommands-style: TheChat stores the list on the bot
-        record and surfaces it as a command menu in its clients.  Best-effort
-        — older TheChat servers without the endpoint must not break connect.
+        record and surfaces it as a command menu in its clients.
         """
         if not self._client:
-            return
-        try:
-            from hermes_cli.commands import thechat_menu_commands
+            raise RuntimeError("TheChat client is not connected")
+        from hermes_cli.commands import thechat_menu_commands
 
-            commands, hidden_count = thechat_menu_commands()
-            response = await self._client.post(
-                "/bots/me/commands", json={"commands": commands}
-            )
-            if getattr(response, "status_code", None) == 404:
-                logger.info(
-                    "TheChat: server does not support command registration; skipping"
-                )
-                return
-            response.raise_for_status()
-            logger.info(
-                "TheChat: registered %d slash commands (%d hidden by cap)",
-                len(commands),
-                hidden_count,
-            )
-        except Exception as exc:
-            logger.warning("TheChat: failed to register slash commands: %s", exc)
+        commands, hidden_count = thechat_menu_commands()
+        response = await self._client.post(
+            "/bots/me/commands", json={"commands": commands}
+        )
+        response.raise_for_status()
+        logger.info(
+            "TheChat: registered %d slash commands (%d hidden by cap)",
+            len(commands),
+            hidden_count,
+        )
 
     def _is_authorized_webhook_request(self, headers: Any) -> bool:
         return headers.get("Authorization", "") == f"Bearer {self.token}"
@@ -691,7 +655,7 @@ class TheChatAdapter(BasePlatformAdapter):
 
         task = asyncio.create_task(
             self._handle_platform_event_safely(event),
-            name=f"thechat-webhook-{event.get('invocationId') or uuid.uuid4()}",
+            name=f"thechat-webhook-{event['invocationId']}",
         )
         self._webhook_tasks.add(task)
         task.add_done_callback(self._webhook_tasks.discard)
@@ -700,11 +664,53 @@ class TheChatAdapter(BasePlatformAdapter):
     def _extract_webhook_event(self, payload: Any) -> Dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Webhook payload must be a JSON object")
-        if isinstance(payload.get("event"), dict):
-            return payload["event"]
-        if "invocationId" in payload and "chatId" in payload:
-            return payload
-        raise ValueError("Webhook payload does not contain a TheChat event")
+        if payload.get("type") != "thechat.hermes_platform.event":
+            raise ValueError("Webhook payload has an invalid TheChat event type")
+        event = payload.get("event")
+        if not isinstance(event, dict):
+            raise ValueError("Webhook payload does not contain a TheChat event")
+        return self._validate_platform_event(event)
+
+    def _validate_platform_event(self, item: Any) -> Dict[str, Any]:
+        """Validate the current TheChat ``HermesPlatformEvent`` contract."""
+        if not isinstance(item, dict):
+            raise ValueError("TheChat event must be a JSON object")
+        required = {
+            "id",
+            "invocationId",
+            "chatId",
+            "chatType",
+            "threadId",
+            "text",
+            "messageId",
+            "instructions",
+            "sender",
+            "bot",
+            "conversation",
+        }
+        missing = sorted(required.difference(item))
+        if missing:
+            raise ValueError(f"TheChat event is missing required fields: {', '.join(missing)}")
+        if item["chatType"] not in {"dm", "group"}:
+            raise ValueError("TheChat event has an invalid chatType")
+        nested_fields = {
+            "sender": {"id", "name"},
+            "bot": {"id", "userId", "name"},
+            "conversation": {"id", "type", "name", "workspaceId"},
+        }
+        for key, fields in nested_fields.items():
+            value = item[key]
+            if not isinstance(value, dict) or not fields.issubset(value):
+                raise ValueError(f"TheChat event has an invalid {key} object")
+        session_intent = item.get("sessionIntent")
+        if session_intent is not None:
+            if (
+                not isinstance(session_intent, dict)
+                or session_intent.get("type") != "branch"
+                or not {"fromThreadId", "title"}.issubset(session_intent)
+            ):
+                raise ValueError("TheChat event has an invalid sessionIntent")
+        return item
 
     async def _poll_loop(self) -> None:
         assert self._client is not None
@@ -746,13 +752,14 @@ class TheChatAdapter(BasePlatformAdapter):
                     )
 
     async def _handle_platform_event(self, item: Dict[str, Any]) -> None:
+        item = self._validate_platform_event(item)
         chat_id = str(item["chatId"])
         invocation_id = str(item["invocationId"])
-        thread_id = str(item.get("threadId") or item.get("thread_id") or "") or None
-        bot = item.get("bot") or {}
-        conversation = item.get("conversation") or {}
-        sender = item.get("sender") or {}
-        message_id = str(item.get("messageId") or invocation_id)
+        thread_id = str(item.get("threadId") or "") or None
+        bot = item["bot"]
+        conversation = item["conversation"]
+        sender = item["sender"]
+        message_id = str(item["messageId"])
         session_intent = item.get("sessionIntent")
         session_intent_type = (
             str(session_intent.get("type") or "")
@@ -766,14 +773,14 @@ class TheChatAdapter(BasePlatformAdapter):
                 "messaging.operation": "receive",
                 "thechat.chat_id": chat_id,
                 "thechat.invocation_id": invocation_id,
-                "thechat.bot_id": str(bot.get("id") or ""),
-                "thechat.conversation_id": str(conversation.get("id") or ""),
-                "thechat.chat_type": item.get("chatType") or "group",
+                "thechat.bot_id": str(bot["id"]),
+                "thechat.conversation_id": str(conversation["id"]),
+                "thechat.chat_type": item["chatType"],
                 "thechat.thread_id": thread_id or "",
                 "thechat.session_intent.type": session_intent_type,
             },
         ) as span:
-            context = self._context_from_platform_event(item, fallback_thread_id=thread_id)
+            context = self._context_from_platform_event(item)
             if context is None:
                 raise ValueError("TheChat event missing invocation context")
             self._contexts[self._context_key(chat_id, thread_id)] = context
@@ -781,16 +788,16 @@ class TheChatAdapter(BasePlatformAdapter):
                 self._contexts[chat_id] = context
             self._event_contexts[message_id] = context
 
-            text = str(item.get("text") or "").strip()
+            text = str(item["text"]).strip()
             span.set_attribute("thechat.message_id", message_id)
             span.set_attribute("thechat.message.length", len(text))
             source = self.build_source(
                 chat_id=chat_id,
                 chat_name=conversation.get("name") or context["bot_name"],
-                chat_type="dm" if item.get("chatType") == "dm" else "group",
-                user_id=str(sender.get("id") or ""),
-                user_name=str(sender.get("name") or "TheChat User"),
-                guild_id=str(conversation.get("workspaceId") or "") or None,
+                chat_type="dm" if item["chatType"] == "dm" else "group",
+                user_id=str(sender["id"]),
+                user_name=str(sender["name"]),
+                guild_id=str(conversation["workspaceId"] or "") or None,
                 thread_id=thread_id,
                 message_id=message_id,
             )
@@ -802,6 +809,6 @@ class TheChatAdapter(BasePlatformAdapter):
                 source=source,
                 raw_message=item,
                 message_id=message_id,
-                channel_prompt=item.get("instructions"),
+                channel_prompt=item["instructions"],
             )
             await self.handle_message(event)
