@@ -8,6 +8,7 @@ formatting, capacity rejection, and crash handling.
 import json
 import os
 import queue
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -267,6 +268,32 @@ def test_completion_is_persisted_and_delivery_can_be_acknowledged(tmp_path, monk
     assert ad.mark_completion_delivered(dispatched["delegation_id"])
     assert ad.restore_undelivered_completions(queue.Queue()) == 0
     assert ad.get_durable_delegation(dispatched["delegation_id"])["delivery_state"] == "delivered"
+
+
+def test_durable_store_honors_forced_delete_on_existing_wal_db(tmp_path, monkeypatch):
+    """The async registry must use the shared state.db journal policy.
+
+    Managed gVisor runtimes force DELETE because WAL locking is unsafe on the
+    mounted tenant PVC.  A direct ``PRAGMA journal_mode=WAL`` here used to
+    switch the shared database back to WAL after startup, racing SessionDB's
+    DELETE override and leaving dashboard/session requests stuck on
+    ``database is locked``.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_SQLITE_JOURNAL_MODE", "delete")
+
+    with sqlite3.connect(tmp_path / "state.db", isolation_level=None) as seed:
+        assert seed.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+
+    with ad._connect() as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='async_delegations'"
+        ).fetchone()[0] == 1
+
+    with sqlite3.connect(tmp_path / "state.db") as verify:
+        assert verify.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
 
 
 def test_real_process_restart_restores_owned_completion_once(tmp_path):
