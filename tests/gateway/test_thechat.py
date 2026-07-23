@@ -734,6 +734,36 @@ async def test_send_exec_approval_posts_structured_approval_request():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval_kwargs", "expected_choices"),
+    [
+        ({"allow_permanent": False}, ["once", "session", "deny"]),
+        (
+            {"allow_permanent": True, "smart_denied": True},
+            ["once", "deny"],
+        ),
+    ],
+)
+async def test_send_exec_approval_honors_gateway_choice_policy(
+    approval_kwargs,
+    expected_choices,
+):
+    adapter = _make_adapter()
+    adapter._contexts[CONVERSATION_ID] = _context("invocation-policy")
+
+    result = await adapter.send_exec_approval(
+        CONVERSATION_ID,
+        "rm -rf /important",
+        session_key="agent:main:thechat:dm:chat-1",
+        **approval_kwargs,
+    )
+
+    assert result.success is True
+    client = cast(_FakeClient, adapter._client)
+    assert client.posts[0]["json"]["payload"]["choices"] == expected_choices
+
+
+@pytest.mark.asyncio
 async def test_send_approval_resolution_targets_requesting_invocation():
     """approval.resolved must land on the invocation that sent approval.request.
 

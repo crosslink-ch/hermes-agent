@@ -403,9 +403,18 @@ class TheChatAdapter(BasePlatformAdapter):
         session_key: str,
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
+        allow_permanent: bool = True,
+        smart_denied: bool = False,
     ) -> SendResult:
         """Send command approval as structured TheChat invocation progress."""
         command_preview = command[:4000] + "..." if len(command) > 4000 else command
+        if smart_denied:
+            choices = ["once", "deny"]
+        else:
+            choices = ["once", "session"]
+            if allow_permanent:
+                choices.append("always")
+            choices.append("deny")
         # Remember which invocation asked, keyed by session. The /approve or
         # /deny reply arrives as its own TheChat invocation and replaces the
         # per-chat context, so the later approval.resolved event must be
@@ -426,7 +435,7 @@ class TheChatAdapter(BasePlatformAdapter):
                     "command": command,
                     "description": description,
                     "sessionKey": session_key,
-                    "choices": ["once", "session", "always", "deny"],
+                    "choices": choices,
                 },
             },
             metadata=metadata,
