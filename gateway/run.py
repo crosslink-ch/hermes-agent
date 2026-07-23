@@ -2442,9 +2442,33 @@ def _event_media_is_stt_input(event, index: int) -> bool:
     message_type = getattr(event, "message_type", None)
     if message_type in {MessageType.AUDIO, MessageType.DOCUMENT}:
         return False
+    if message_type == MessageType.VOICE:
+        return True
+
+    # TheChat has no native voice-note attachment kind. Its message-level type
+    # reflects the highest-priority item in a mixed batch, so an audio file sent
+    # beside an image arrives as PHOTO and must retain file semantics.
+    source = getattr(event, "source", None)
+    if getattr(source, "platform", None) == Platform.THECHAT:
+        return False
+
+    # Preserve latest-main behavior for platforms whose native voice notes are
+    # identified by an audio MIME even when their message-level type is TEXT.
+    return _event_media_type_at(event, index).startswith("audio/")
+
+
+def _event_media_is_voice(event, index: int) -> bool:
+    """True only for platform-native voice notes that should go through STT."""
     return (
-        message_type == MessageType.VOICE
-        or _event_media_type_at(event, index).startswith("audio/")
+        _event_media_is_audio(event, index)
+        and getattr(event, "message_type", None) == MessageType.VOICE
+    )
+
+
+def _event_media_is_audio_file(event, index: int) -> bool:
+    """True for ordinary audio files, including mixed TheChat batches."""
+    return _event_media_is_audio(event, index) and not _event_media_is_stt_input(
+        event, index
     )
 
 
@@ -12722,7 +12746,6 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             image_paths = []
             audio_paths = []
             for i, path in enumerate(event.media_urls):
-                mtype = event.media_types[i] if i < len(event.media_types) else ""
                 # Classify images per-attachment: trust this attachment's own
                 # MIME, and only honour the message-level PHOTO type when the
                 # per-attachment MIME is unknown. Otherwise a document (or any
@@ -12730,13 +12753,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # mis-routed here as an image and the provider 400s.
                 if _event_media_is_image(event, i):
                     image_paths.append(path)
-                # MessageType.AUDIO = audio file attachment (e.g. .mp3, .m4a) — never STT
-                # MessageType.VOICE = voice message (Opus/OGG) — always STT
-                if event.message_type == MessageType.AUDIO:
+                if _event_media_is_audio_file(event, i):
                     audio_file_paths.append(path)
                 elif not _pending_stt_prepared and _event_media_is_stt_input(event, i):
                     audio_paths.append(path)
-                if mtype.startswith("video/") or (not mtype and event.message_type == MessageType.VIDEO):
+                if _event_media_is_video(event, i):
                     video_paths.append(path)
 
             if image_paths:
@@ -18143,11 +18164,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         return user_text, successful_transcripts
 
     def _pending_event_audio_paths(self, event) -> List[str]:
-        """Return STT-eligible paths from a pending voice message."""
+        """Return effective STT-eligible paths from a pending voice message."""
         audio_paths: List[str] = []
         media_urls = getattr(event, "media_urls", None) or []
         for i, path in enumerate(media_urls):
-            if _event_media_is_stt_input(event, i):
+            # Match the normal inbound path: ordinary audio-file semantics take
+            # precedence over the generic MIME-based STT fallback.
+            if (
+                not _event_media_is_audio_file(event, i)
+                and _event_media_is_stt_input(event, i)
+            ):
                 audio_paths.append(path)
         return audio_paths
 

@@ -19,20 +19,26 @@ populate media_types.
 
 from types import SimpleNamespace
 
+from gateway.config import Platform
 from gateway.platforms.base import MessageType
 from gateway.run import (
+    GatewayRunner,
     _build_media_placeholder,
+    _event_media_is_audio_file,
     _event_media_is_audio,
     _event_media_is_image,
+    _event_media_is_stt_input,
     _event_media_is_video,
+    _event_media_is_voice,
 )
 
 
-def _evt(media_urls, media_types, message_type):
+def _evt(media_urls, media_types, message_type, *, platform=None):
     return SimpleNamespace(
         media_urls=media_urls,
         media_types=media_types,
         message_type=message_type,
+        source=SimpleNamespace(platform=platform) if platform else None,
     )
 
 
@@ -52,11 +58,40 @@ def test_unknown_mime_falls_back_to_photo_message_type():
     assert _event_media_is_image(evt, 0) is True
 
 
-def test_audio_classified_per_attachment():
-    evt = _evt(["/c/clip.ogg", "/c/shot.png"], ["audio/ogg", "image/png"], MessageType.PHOTO)
+def test_thechat_mixed_audio_classified_per_attachment():
+    evt = _evt(
+        ["/c/clip.ogg", "/c/shot.png"],
+        ["audio/ogg", "image/png"],
+        MessageType.PHOTO,
+        platform=Platform.THECHAT,
+    )
     assert _event_media_is_audio(evt, 0) is True
     assert _event_media_is_audio(evt, 1) is False
     assert _event_media_is_image(evt, 1) is True
+    assert _event_media_is_stt_input(evt, 0) is False
+    assert _event_media_is_audio_file(evt, 0) is True
+    assert _event_media_is_voice(evt, 0) is False
+    runner = object.__new__(GatewayRunner)
+    assert runner._pending_event_audio_paths(evt) == []
+
+
+def test_other_platform_audio_mime_preserves_stt_fallback():
+    evt = _evt(
+        ["/c/voice.ogg"],
+        ["audio/ogg"],
+        MessageType.TEXT,
+        platform=Platform.DISCORD,
+    )
+    assert _event_media_is_stt_input(evt, 0) is True
+    assert _event_media_is_audio_file(evt, 0) is False
+    runner = object.__new__(GatewayRunner)
+    assert runner._pending_event_audio_paths(evt) == ["/c/voice.ogg"]
+
+
+def test_voice_notes_remain_stt_inputs():
+    evt = _evt(["/c/voice.ogg"], ["audio/ogg"], MessageType.VOICE)
+    assert _event_media_is_voice(evt, 0) is True
+    assert _event_media_is_audio_file(evt, 0) is False
 
 
 def test_video_classified_per_attachment():
