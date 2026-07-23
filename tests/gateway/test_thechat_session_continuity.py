@@ -46,7 +46,12 @@ async def test_thechat_adapter_message_uses_only_current_payload_fields():
 
     assert result.success is True
     assert client.posts[-1][0] == "/hermes-platform/messages"
-    assert "session" not in client.posts[-1][1]
+    assert client.posts[-1][1] == {
+        "conversationId": CONVERSATION_ID,
+        "content": "hello",
+        "attachmentIds": [],
+        "invocationId": "inv-1",
+    }
 
 
 @pytest.mark.asyncio
