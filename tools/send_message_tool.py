@@ -14,7 +14,6 @@ import ssl
 import time
 import uuid
 from email.utils import formatdate
-from typing import cast
 
 from agent.redact import redact_sensitive_text
 from agent.secret_scope import get_secret
@@ -789,114 +788,6 @@ async def _send_via_adapter(
     }
 
 
-async def _send_thechat_media(
-    pconfig,
-    chat_id: str,
-    message: str,
-    chunks,
-    *,
-    thread_id=None,
-    media_files=None,
-    force_document=False,
-):
-    """Deliver proactive TheChat media via a live or outbound-only adapter."""
-    from gateway.config import Platform
-    from gateway.platforms.thechat import TheChatAdapter
-
-    adapter = None
-    owned_adapter = False
-    try:
-        from gateway.run import _gateway_runner_ref
-
-        runner = _gateway_runner_ref()
-        if runner is not None:
-            adapter = runner.adapters.get(Platform.THECHAT)
-    except Exception:
-        adapter = None
-
-    if adapter is None:
-        adapter = TheChatAdapter(pconfig)
-        if not await adapter.connect_outbound():
-            return {"error": "TheChat outbound adapter could not connect"}
-        owned_adapter = True
-
-    adapter = cast(TheChatAdapter, adapter)
-
-    metadata = {"thread_id": thread_id} if thread_id else None
-    media_files = media_files or []
-    caption, body_text = _media_caption_split(
-        message,
-        media_files,
-        max_caption_len=_DEFAULT_CAPTION_LIMIT,
-    )
-    results = []
-    try:
-        if body_text.strip():
-            for chunk in chunks:
-                if not str(chunk or "").strip():
-                    continue
-                result = await adapter.send(
-                    chat_id=chat_id,
-                    content=chunk,
-                    metadata=metadata,
-                )
-                if not result.success:
-                    return {"error": f"TheChat text delivery failed: {result.error}"}
-                results.append(result)
-
-        for media_path, is_voice in media_files:
-            ext = os.path.splitext(media_path)[1].lower()
-            media_caption = caption if len(media_files) == 1 else None
-            if force_document:
-                result = await adapter.send_document(
-                    chat_id=chat_id,
-                    file_path=media_path,
-                    caption=media_caption,
-                    metadata=metadata,
-                )
-            elif ext in _IMAGE_EXTS:
-                result = await adapter.send_image_file(
-                    chat_id=chat_id,
-                    image_path=media_path,
-                    caption=media_caption,
-                    metadata=metadata,
-                )
-            elif ext in _VIDEO_EXTS:
-                result = await adapter.send_video(
-                    chat_id=chat_id,
-                    video_path=media_path,
-                    caption=media_caption,
-                    metadata=metadata,
-                )
-            elif is_voice or ext in _AUDIO_EXTS:
-                result = await adapter.send_voice(
-                    chat_id=chat_id,
-                    audio_path=media_path,
-                    caption=media_caption,
-                    metadata=metadata,
-                )
-            else:
-                result = await adapter.send_document(
-                    chat_id=chat_id,
-                    file_path=media_path,
-                    caption=media_caption,
-                    metadata=metadata,
-                )
-            if not result.success:
-                return {"error": f"TheChat media delivery failed: {result.error}"}
-            results.append(result)
-
-        if not results:
-            return {"error": "TheChat media delivery produced no messages"}
-        return {
-            "success": True,
-            "message_id": results[-1].message_id,
-        }
-    finally:
-        if owned_adapter:
-            await adapter.disconnect()
-
-
 async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False):
     """Route a message to the appropriate platform sender.
 
@@ -1152,22 +1043,11 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
-    if platform == Platform.THECHAT and media_files:
-        return await _send_thechat_media(
-            pconfig,
-            chat_id,
-            message,
-            chunks,
-            thread_id=thread_id,
-            media_files=media_files,
-            force_document=force_document,
-        )
-
     # --- Non-media platforms ---
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and thechat; "
+                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and whatsapp; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -1175,7 +1055,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu, whatsapp and thechat"
+            "native send_message media delivery is currently only supported for telegram, discord, matrix, weixin, signal, yuanbao, feishu and whatsapp"
         )
 
     last_result = None
@@ -1258,9 +1138,8 @@ async def _send_thechat(pconfig, chat_id: str, content: str, *, thread_id=None):
             "retryable": False,
         }
     payload = {
-        "conversationId": chat_id,
+        "chatId": chat_id,
         "content": content,
-        "attachmentIds": [],
         "platformMessageId": f"send-message-tool:{uuid.uuid4()}",
         "complete": False,
     }

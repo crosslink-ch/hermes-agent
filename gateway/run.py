@@ -2174,21 +2174,6 @@ def _event_media_is_audio(event, index: int) -> bool:
     return getattr(event, "message_type", None) in {MessageType.VOICE, MessageType.AUDIO}
 
 
-def _event_media_is_voice(event, index: int) -> bool:
-    """True only for platform-native voice notes that should go through STT."""
-    return (
-        _event_media_is_audio(event, index)
-        and getattr(event, "message_type", None) == MessageType.VOICE
-    )
-
-
-def _event_media_is_audio_file(event, index: int) -> bool:
-    """True for ordinary audio attachments, including mixed attachment batches."""
-    return _event_media_is_audio(event, index) and not _event_media_is_voice(
-        event, index
-    )
-
-
 def _event_media_is_video(event, index: int) -> bool:
     """True if the attachment at *index* is video (per-attachment MIME first)."""
     mtype = _event_media_type_at(event, index)
@@ -11124,6 +11109,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             image_paths = []
             audio_paths = []
             for i, path in enumerate(event.media_urls):
+                mtype = event.media_types[i] if i < len(event.media_types) else ""
                 # Classify images per-attachment: trust this attachment's own
                 # MIME, and only honour the message-level PHOTO type when the
                 # per-attachment MIME is unknown. Otherwise a document (or any
@@ -11131,11 +11117,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # mis-routed here as an image and the provider 400s.
                 if _event_media_is_image(event, i):
                     image_paths.append(path)
-                if _event_media_is_voice(event, i):
-                    audio_paths.append(path)
-                elif _event_media_is_audio_file(event, i):
+                # MessageType.AUDIO = audio file attachment (e.g. .mp3, .m4a) — never STT
+                # MessageType.VOICE = voice message (Opus/OGG) — always STT
+                if event.message_type == MessageType.AUDIO:
                     audio_file_paths.append(path)
-                if _event_media_is_video(event, i):
+                elif event.message_type == MessageType.VOICE or (
+                    mtype.startswith("audio/")
+                    and event.message_type not in {MessageType.AUDIO, MessageType.DOCUMENT}
+                ):
+                    audio_paths.append(path)
+                if mtype.startswith("video/") or (not mtype and event.message_type == MessageType.VIDEO):
                     video_paths.append(path)
 
             if image_paths:

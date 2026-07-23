@@ -156,7 +156,8 @@ async def test_thechat_queue_command_completes_ack_without_second_stuck_working_
     queue_ack = next(
         payload
         for payload in client.message_payloads()
-        if str(payload.get("content", "")).startswith("Queued for the next turn")
+        if payload.get("invocationId") == "inv-2"
+        and str(payload.get("content", "")).startswith("Queued for the next turn")
     )
     assert queue_ack["threadId"] == "thread-1"
 
@@ -168,13 +169,9 @@ async def test_thechat_queue_command_completes_ack_without_second_stuck_working_
     assert client.active_invocations() == []
 
     messages = client.message_payloads()
-    first_response = next(
-        payload for payload in messages if payload.get("content") == "response to message 1"
-    )
-    queued_response = next(
-        payload
-        for payload in messages
-        if payload.get("content") == "response to queued: Message 2"
-    )
+    first_response = next(payload for payload in messages if payload.get("content") == "response to message 1")
+    queued_response = next(payload for payload in messages if payload.get("content") == "response to queued: Message 2")
+    assert first_response["invocationId"] == "inv-1"
     assert first_response["threadId"] == "thread-1"
+    assert queued_response["invocationId"] == "inv-2"
     assert queued_response["threadId"] == "thread-1"

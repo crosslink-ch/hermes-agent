@@ -163,13 +163,8 @@ async def test_send_uses_reply_to_context_instead_of_latest_chat_context():
 
     assert result.success is True
     assert adapter._client.posts[0]["path"] == "/hermes-platform/messages"
-    assert adapter._client.posts[0]["json"] == {
-        "conversationId": CONVERSATION_ID,
-        "content": "first response",
-        "attachmentIds": [],
-        "invocationId": "invocation-first",
-        "botId": "bot-1",
-    }
+    assert adapter._client.posts[0]["json"]["invocationId"] == "invocation-first"
+    assert adapter._client.posts[0]["json"]["complete"] is False
     assert first["delivered"] is True
     assert "delivered" not in second
 
@@ -184,7 +179,7 @@ async def test_send_does_not_use_notify_metadata_as_completion_signal():
 
     assert result.success is True
     assert adapter._client.posts[0]["path"] == "/hermes-platform/messages"
-    assert adapter._client.posts[0]["json"]["attachmentIds"] == []
+    assert adapter._client.posts[0]["json"]["complete"] is False
 
 
 @pytest.mark.asyncio
@@ -197,9 +192,10 @@ async def test_send_can_post_without_invocation_context():
     assert result.success is True
     assert adapter._client.posts[0]["path"] == "/hermes-platform/messages"
     assert adapter._client.posts[0]["json"] == {
-        "conversationId": chat_id,
+        "chatId": chat_id,
         "content": "cron says hello",
-        "attachmentIds": [],
+        "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
+        "complete": False,
     }
 
 
@@ -254,9 +250,10 @@ async def test_send_keeps_thread_metadata_after_invocation_context_cleanup():
     assert result.success is True
     assert client.posts[0]["path"] == "/hermes-platform/messages"
     assert client.posts[0]["json"] == {
-        "conversationId": CONVERSATION_ID,
+        "chatId": CONVERSATION_ID,
         "content": "late clarify response",
-        "attachmentIds": [],
+        "platformMessageId": client.posts[0]["json"]["platformMessageId"],
+        "complete": False,
         "threadId": "thread-1",
     }
 
@@ -351,11 +348,13 @@ async def test_active_stop_command_marks_thechat_command_invocation_completed():
         {
             "path": "/hermes-platform/messages",
             "json": {
-                "conversationId": CONVERSATION_ID,
+                "chatId": CONVERSATION_ID,
                 "content": "Stopped.",
-                "attachmentIds": [],
+                "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
+                "complete": False,
                 "invocationId": "invocation-stop",
                 "botId": "bot-1",
+                "conversationId": CONVERSATION_ID,
             },
         },
         {
@@ -404,11 +403,13 @@ async def test_active_non_canceling_commands_mark_thechat_invocation_completed(
         {
             "path": "/hermes-platform/messages",
             "json": {
-                "conversationId": CONVERSATION_ID,
+                "chatId": CONVERSATION_ID,
                 "content": response_text,
-                "attachmentIds": [],
+                "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
+                "complete": False,
                 "invocationId": "invocation-command",
                 "botId": "bot-1",
+                "conversationId": CONVERSATION_ID,
             },
         },
         {
@@ -450,11 +451,13 @@ async def test_active_queue_command_ack_marks_invocation_completed_immediately()
         {
             "path": "/hermes-platform/messages",
             "json": {
-                "conversationId": CONVERSATION_ID,
+                "chatId": CONVERSATION_ID,
                 "content": "Queued for the next turn.",
-                "attachmentIds": [],
+                "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
+                "complete": False,
                 "invocationId": "invocation-queue",
                 "botId": "bot-1",
+                "conversationId": CONVERSATION_ID,
             },
         },
         {
@@ -504,11 +507,13 @@ async def test_busy_command_ack_marks_thechat_invocation_completed():
         {
             "path": "/hermes-platform/messages",
             "json": {
-                "conversationId": CONVERSATION_ID,
+                "chatId": CONVERSATION_ID,
                 "content": "Interrupting current task.",
-                "attachmentIds": [],
+                "platformMessageId": adapter._client.posts[0]["json"]["platformMessageId"],
+                "complete": False,
                 "invocationId": "invocation-command",
                 "botId": "bot-1",
+                "conversationId": CONVERSATION_ID,
             },
         },
         {

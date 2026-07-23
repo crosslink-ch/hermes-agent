@@ -22,11 +22,9 @@ from types import SimpleNamespace
 from gateway.platforms.base import MessageType
 from gateway.run import (
     _build_media_placeholder,
-    _event_media_is_audio_file,
     _event_media_is_audio,
     _event_media_is_image,
     _event_media_is_video,
-    _event_media_is_voice,
 )
 
 
@@ -59,14 +57,6 @@ def test_audio_classified_per_attachment():
     assert _event_media_is_audio(evt, 0) is True
     assert _event_media_is_audio(evt, 1) is False
     assert _event_media_is_image(evt, 1) is True
-    assert _event_media_is_audio_file(evt, 0) is True
-    assert _event_media_is_voice(evt, 0) is False
-
-
-def test_voice_notes_remain_stt_inputs():
-    evt = _evt(["/c/voice.ogg"], ["audio/ogg"], MessageType.VOICE)
-    assert _event_media_is_voice(evt, 0) is True
-    assert _event_media_is_audio_file(evt, 0) is False
 
 
 def test_video_classified_per_attachment():
