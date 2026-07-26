@@ -115,11 +115,75 @@ class MetadataEditProgressCaptureAdapter(ProgressCaptureAdapter):
         return SendResult(success=True, message_id=message_id)
 
 
+class RetryableFirstEditProgressCaptureAdapter(ProgressCaptureAdapter):
+    """Fail one progress edit transiently, then accept later edits."""
+
+    def __init__(self, platform=Platform.TELEGRAM):
+        super().__init__(platform=platform)
+        self.edit_outcomes = []
+
+    async def edit_message(self, chat_id, message_id, content) -> SendResult:
+        self.edits.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "content": content,
+            }
+        )
+        if not self.edit_outcomes:
+            self.edit_outcomes.append(False)
+            return SendResult(
+                success=False,
+                error="temporary network failure",
+                retryable=True,
+                error_kind="transient",
+            )
+        self.edit_outcomes.append(True)
+        return SendResult(success=True, message_id=message_id)
+
+
+class RetryableOverflowEditProgressAdapter(SmallLimitProgressAdapter):
+    """Fail the first split edit transiently, then keep editing."""
+
+    def __init__(self, platform=Platform.TELEGRAM):
+        super().__init__(platform=platform)
+        self.retryable_edit_failures = 0
+
+    async def edit_message(self, chat_id, message_id, content) -> SendResult:
+        if self.retryable_edit_failures == 0:
+            self.retryable_edit_failures += 1
+            self.edits.append(
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "content": content,
+                }
+            )
+            return SendResult(
+                success=False,
+                error="temporary network failure",
+                retryable=True,
+                error_kind="transient",
+            )
+        return await super().edit_message(chat_id, message_id, content)
+
+
 class NonEditingProgressCaptureAdapter(ProgressCaptureAdapter):
     SUPPORTS_MESSAGE_EDITING = False
 
     async def edit_message(self, chat_id, message_id, content) -> SendResult:
         raise AssertionError("non-editable adapters should not receive edit_message calls")
+
+
+class LiveStatusCaptureAdapter(ProgressCaptureAdapter):
+    supports_status_text = True
+
+    def __init__(self, platform=Platform.SLACK):
+        super().__init__(platform=platform)
+        self.status_updates = []
+
+    def set_status_text(self, chat_id, text):
+        self.status_updates.append({"chat_id": chat_id, "text": text})
 
 
 class StructuredProgressCaptureAdapter(ProgressCaptureAdapter):
@@ -156,6 +220,27 @@ class FakeAgent:
             time.sleep(0.35)
             cb("tool.started", "browser_navigate", "https://example.com", {})
             time.sleep(0.35)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class StatusAndToolProgressAgent:
+    """Emit both status and tool progress to exercise their metadata paths."""
+
+    def __init__(self, **kwargs):
+        self.status_callback = kwargs.get("status_callback")
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        assert self.status_callback is not None
+        assert self.tool_progress_callback is not None
+        self.status_callback("lifecycle", "Compacting context for test")
+        self.tool_progress_callback("tool.started", "terminal", "pwd", {})
+        time.sleep(0.4)
         return {
             "final_response": "done",
             "messages": [],
@@ -214,6 +299,31 @@ class DelayedProgressAgent:
         time.sleep(0.45)
         self.tool_progress_callback("tool.started", "terminal", "second command", {})
         time.sleep(0.1)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class RetryableEditProgressAgent:
+    """Keep the turn alive long enough to retry the same progress bubble."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        callback = self.tool_progress_callback
+        assert callback is not None
+        callback("tool.started", "terminal", "first command", {})
+        time.sleep(0.5)
+        callback("tool.started", "terminal", "second command", {})
+        time.sleep(1.7)
+        callback("tool.started", "terminal", "third command", {})
+        time.sleep(0.5)
+        callback("tool.started", "terminal", "fourth command", {})
+        time.sleep(0.6)
         return {
             "final_response": "done",
             "messages": [],
@@ -461,8 +571,12 @@ async def test_run_agent_progress_uses_event_message_id_for_slack_dm(monkeypatch
 
     assert result["final_response"] == "done"
     assert adapter.sent
-    assert adapter.sent[0]["metadata"] == {"thread_id": "1234567890.000001"}
-    assert all(call["metadata"] == {"thread_id": "1234567890.000001"} for call in adapter.typing)
+    expected_metadata = {
+        "thread_id": "1234567890.000001",
+        "message_id": "1234567890.000001",
+    }
+    assert adapter.sent[0]["metadata"] == expected_metadata
+    assert all(call["metadata"] == expected_metadata for call in adapter.typing)
 
 
 @pytest.mark.asyncio
@@ -715,6 +829,48 @@ class QueuedCommentaryAgent:
         }
 
 
+class QueuedSilenceAgent:
+    """First turn is intentionally silent; queued follow-up still runs."""
+
+    calls = 0
+
+    def __init__(self, **kwargs):
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        type(self).calls += 1
+        return {
+            "final_response": "NO_REPLY" if type(self).calls == 1 else "follow-up processed",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class QueuedFailedEmptyAgent:
+    """First turn fails empty; its normalized error must send before follow-up."""
+
+    calls = 0
+
+    def __init__(self, **kwargs):
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        type(self).calls += 1
+        if type(self).calls == 1:
+            return {
+                "final_response": "",
+                "messages": [],
+                "api_calls": 1,
+                "failed": True,
+                "error": "provider exploded",
+            }
+        return {
+            "final_response": "follow-up processed",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
 class BackgroundReviewAgent:
     def __init__(self, **kwargs):
         self.background_review_callback = kwargs.get("background_review_callback")
@@ -808,6 +964,9 @@ async def _run_with_agent(
     chat_id="-1001",
     chat_type="group",
     thread_id="17585",
+    event_message_id=None,
+    scope_id=None,
+    adapter_extra=None,
     adapter_cls=ProgressCaptureAdapter,
 ):
     if config_data:
@@ -824,6 +983,8 @@ async def _run_with_agent(
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     adapter = adapter_cls(platform=platform)
+    if adapter_extra:
+        adapter.config.extra.update(adapter_extra)
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     if config_data and "streaming" in config_data:
@@ -835,6 +996,7 @@ async def _run_with_agent(
         chat_id=chat_id,
         chat_type=chat_type,
         thread_id=thread_id,
+        scope_id=scope_id,
     )
     session_key = f"agent:main:{platform.value}:{chat_type}:{chat_id}"
     if thread_id:
@@ -854,8 +1016,129 @@ async def _run_with_agent(
         source=source,
         session_id=session_id,
         session_key=session_key,
+        event_message_id=event_message_id,
     )
     return adapter, result
+
+
+@pytest.mark.asyncio
+async def test_slack_flat_progress_and_status_do_not_recreate_synthetic_thread(
+    monkeypatch, tmp_path
+):
+    event_message_id = "1700000000.000100"
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        StatusAndToolProgressAgent,
+        session_id="sess-slack-flat-progress",
+        config_data={
+            "display": {"platforms": {"slack": {"tool_progress": "all"}}}
+        },
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="channel",
+        thread_id=event_message_id,
+        event_message_id=event_message_id,
+        scope_id="T_ALPHA",
+        adapter_extra={"reply_in_thread": False},
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.sent
+    expected_metadata = {"slack_team_id": "T_ALPHA"}
+    assert all(call["metadata"] == expected_metadata for call in adapter.sent)
+    assert all(call["metadata"] == expected_metadata for call in adapter.typing)
+
+
+@pytest.mark.asyncio
+async def test_slack_live_status_receives_tool_events_when_chat_progress_is_off(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        FakeAgent,
+        session_id="sess-slack-live-status-only",
+        config_data={
+            "display": {
+                "platforms": {
+                    "slack": {"tool_progress": "off", "live_status": "full"}
+                }
+            }
+        },
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="channel",
+        thread_id=None,
+        adapter_cls=LiveStatusCaptureAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.sent == []
+    assert len(adapter.status_updates) == 2
+    assert all(update["chat_id"] == "C123" for update in adapter.status_updates)
+    assert all(update["text"] for update in adapter.status_updates)
+
+
+@pytest.mark.asyncio
+async def test_retryable_progress_edit_keeps_same_message_id(monkeypatch, tmp_path):
+    """A transient edit failure must not create a replacement progress bubble."""
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        RetryableEditProgressAgent,
+        session_id="sess-progress-retry-same-message",
+        config_data={
+            "display": {
+                "tool_progress": "all",
+                "interim_assistant_messages": False,
+            }
+        },
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="direct",
+        thread_id="1700000000.000100",
+        adapter_cls=RetryableFirstEditProgressCaptureAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    assert isinstance(adapter, RetryableFirstEditProgressCaptureAdapter)
+    assert len(adapter.sent) == 1
+    assert adapter.edit_outcomes[0] is False
+    assert any(adapter.edit_outcomes[1:])
+    assert {call["message_id"] for call in adapter.edits} == {"progress-1"}
+    assert "fourth command" in adapter.edits[-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_retryable_overflow_edit_keeps_editable_bubble_identity(monkeypatch, tmp_path):
+    """A transient split edit must retain can_edit and the current message ID."""
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        ManyProgressLinesAgent,
+        session_id="sess-progress-retry-overflow-same-message",
+        config_data={
+            "display": {
+                "tool_progress": "all",
+                "interim_assistant_messages": False,
+            }
+        },
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="direct",
+        thread_id="1700000000.000100",
+        adapter_cls=RetryableOverflowEditProgressAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    assert isinstance(adapter, RetryableOverflowEditProgressAdapter)
+    assert adapter.retryable_edit_failures == 1
+    assert len(adapter.sent) >= 2
+    assert adapter.edits[0]["message_id"] == "progress-1"
+    assert any(call["message_id"] == "progress-1" for call in adapter.edits[1:])
+    assert adapter.oversized_sends == []
+    assert adapter.oversized_edits == []
 
 
 @pytest.mark.asyncio
@@ -903,11 +1186,17 @@ async def test_thechat_structured_activity_keeps_notices_reasoning_and_tools_dis
         chat_id="11111111-1111-4111-8111-111111111111",
         chat_type="dm",
         thread_id=None,
+        event_message_id="msg-origin-1",
         adapter_cls=StructuredProgressCaptureAdapter,
     )
 
     assert result["final_response"] == "done"
     assert isinstance(adapter, StructuredProgressCaptureAdapter)
+    assert adapter.progress_events
+    assert all(
+        call["metadata"] == {"message_id": "msg-origin-1"}
+        for call in adapter.progress_events
+    )
     event_types = [call["event"]["type"] for call in adapter.progress_events]
     assert event_types == [
         "notice.lifecycle",
@@ -1189,6 +1478,52 @@ async def test_run_agent_queued_message_does_not_treat_commentary_as_final(monke
     assert result["final_response"] == "final response 2"
     assert "I'll inspect the repo first." in sent_texts
     assert "final response 1" in sent_texts
+
+
+@pytest.mark.asyncio
+async def test_run_agent_suppresses_silent_first_turn_and_processes_queued_followup(
+    monkeypatch, tmp_path,
+):
+    """Regression: queued direct-send must not leak NO_REPLY to the channel."""
+    QueuedSilenceAgent.calls = 0
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        QueuedSilenceAgent,
+        session_id="sess-queued-silence",
+        pending_text="queued follow-up",
+        platform=Platform.SLACK,
+        chat_id="C123",
+        thread_id="1712345678.000100",
+    )
+
+    sent_texts = [call["content"] for call in adapter.sent]
+    assert QueuedSilenceAgent.calls == 2
+    assert result["final_response"] == "follow-up processed"
+    assert "NO_REPLY" not in sent_texts
+
+
+@pytest.mark.asyncio
+async def test_run_agent_sends_normalized_failure_before_queued_followup(
+    monkeypatch, tmp_path,
+):
+    """Queued delivery uses finalized output, not the raw empty agent result."""
+    QueuedFailedEmptyAgent.calls = 0
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        QueuedFailedEmptyAgent,
+        session_id="sess-queued-failed-empty",
+        pending_text="queued follow-up",
+        platform=Platform.SLACK,
+        chat_id="C123",
+        thread_id="1712345678.000100",
+    )
+
+    sent_texts = [call["content"] for call in adapter.sent]
+    assert QueuedFailedEmptyAgent.calls == 2
+    assert result["final_response"] == "follow-up processed"
+    assert any("The request failed: provider exploded" in text for text in sent_texts)
 
 
 @pytest.mark.asyncio
@@ -1785,3 +2120,48 @@ async def test_run_agent_suppresses_thinking_when_thinking_off(monkeypatch, tmp_
         [c["content"] for c in adapter.sent] + [c["content"] for c in adapter.edits]
     )
     assert "weighing the options here" not in blob
+
+
+class TestSlackReplyInThreadProgressRouting:
+    """#18859: reply_in_thread=false must stop progress from creating threads."""
+
+    def test_slack_reply_in_thread_false_drops_synthetic_thread(self):
+        from gateway.run import _resolve_progress_thread_id
+
+        # source.thread_id == event ts is the adapter's synthetic
+        # session-keying thread for top-level messages — not a real thread.
+        assert _resolve_progress_thread_id(
+            Platform.SLACK,
+            source_thread_id="1700000000.000100",
+            event_message_id="1700000000.000100",
+            reply_in_thread=False,
+        ) is None
+
+    def test_slack_reply_in_thread_false_keeps_real_thread(self):
+        from gateway.run import _resolve_progress_thread_id
+
+        assert _resolve_progress_thread_id(
+            Platform.SLACK,
+            source_thread_id="1700000000.000100",
+            event_message_id="1700000000.000500",
+            reply_in_thread=False,
+        ) == "1700000000.000100"
+
+    def test_slack_reply_in_thread_false_skips_event_id_fallback(self):
+        from gateway.run import _resolve_progress_thread_id
+
+        assert _resolve_progress_thread_id(
+            Platform.SLACK,
+            source_thread_id=None,
+            event_message_id="1700000000.000100",
+            reply_in_thread=False,
+        ) is None
+
+    def test_slack_default_keeps_event_id_fallback(self):
+        from gateway.run import _resolve_progress_thread_id
+
+        assert _resolve_progress_thread_id(
+            Platform.SLACK,
+            source_thread_id=None,
+            event_message_id="1700000000.000100",
+        ) == "1700000000.000100"
