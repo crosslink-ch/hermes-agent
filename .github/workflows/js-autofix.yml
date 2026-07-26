@@ -8,7 +8,9 @@ name: auto-fix lint issues & formatting
 # check in typecheck.yml fails only when un-fixable errors remain.
 #
 # NOTE: AUTOFIX_BOT_PAT pushes DO trigger further workflow runs (unlike
-# secrets.GITHUB_TOKEN). The concurrency group (ts-autofix-${{ github.ref }})
+# secrets.GITHUB_TOKEN). Crosslink repositories can fall back to github.token
+# when the upstream automation credentials are not configured. The concurrency
+# group (ts-autofix-${{ github.ref }})
 # with cancel-in-progress: true prevents an infinite loop — a re-triggered
 # run cancels the in-flight one, and since the second run finds no new fixes
 # (the first run already applied them), it exits with an empty patch.
