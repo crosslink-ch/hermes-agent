@@ -563,9 +563,13 @@ def apply_wal_with_fallback(
     *,
     db_label: str = "state.db",
 ) -> str:
-    """Set ``journal_mode=WAL`` on ``conn``, falling back to DELETE on failure.
+    """Apply the configured journal policy, defaulting to WAL with fallback.
 
-    Returns the journal mode actually set (``"wal"`` or ``"delete"``).
+    Returns the journal mode actually set: ``"wal"``, ``"delete"``,
+    ``"truncate"``, or ``"persist"``. An explicit non-WAL
+    ``HERMES_SQLITE_JOURNAL_MODE`` override takes precedence over the automatic
+    WAL-reset safety gate; an explicit ``wal`` value keeps the normal guarded
+    WAL path below.
 
     On WAL-incompatible filesystems (NFS, SMB, some FUSE), SQLite raises
     ``OperationalError("locking protocol")`` when setting WAL.  We fall
@@ -597,9 +601,9 @@ def apply_wal_with_fallback(
     Shared by :class:`SessionDB` and ``hermes_cli.kanban_db.connect`` so
     both databases get identical fallback behavior.
 
-    Never downgrades to DELETE if the on-disk DB header reports WAL — see
-    _on_disk_journal_mode.  That holds for both the NFS path and the
-    WAL-reset vulnerability path.
+    Without an explicit non-WAL operator override, never downgrades to DELETE
+    if the on-disk DB header reports WAL — see ``_on_disk_journal_mode``. That
+    holds for both the NFS path and the WAL-reset vulnerability path.
     """
     forced_mode = _forced_sqlite_journal_mode()
     if forced_mode is not None:

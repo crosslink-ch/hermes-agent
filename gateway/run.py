@@ -8118,9 +8118,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             self._gateway_loop = asyncio.get_running_loop()
         except RuntimeError:
             self._gateway_loop = None
-        self._publish_http_route_manifest(force=True)
         if self._gateway_loop is not None:
             self._start_loop_liveness_guards(self._gateway_loop)
+        self._publish_http_route_manifest(force=True)
         logger.info("Session storage: %s", self.config.sessions_dir)
 
         # Sanity-check that systemd's TimeoutStopSec covers our drain
@@ -21126,17 +21126,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         _source_message_metadata = self._thread_metadata_for_source(
             source, event_message_id
         )
-        _progress_metadata = (
-            _source_message_metadata
-            if _progress_thread_id == source.thread_id
-            else self._thread_metadata_for_target(
+
+        def _metadata_for_progress_target(
+            thread_id: Optional[str],
+        ) -> Optional[Dict[str, Any]]:
+            if thread_id is not None and thread_id == source.thread_id:
+                return _source_message_metadata
+            metadata = self._thread_metadata_for_target(
                 source.platform,
                 source.chat_id,
-                _progress_thread_id,
+                thread_id,
                 chat_type=getattr(source, "chat_type", None),
                 reply_to_message_id=event_message_id,
             )
-        ) if _progress_thread_id else _source_message_metadata
+            if source.platform == Platform.SLACK:
+                team_id = getattr(source, "scope_id", None)
+                if team_id:
+                    metadata = dict(metadata or {})
+                    metadata["slack_team_id"] = str(team_id)
+            return metadata
+
+        _progress_metadata = _metadata_for_progress_target(_progress_thread_id)
         _progress_metadata = _non_conversational_metadata(_progress_metadata, platform=source.platform)
         _progress_reply_to = (
             event_message_id
@@ -21598,17 +21608,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "reply_to_message_id": event_message_id,
             }
         else:
-            _status_thread_metadata = (
-                _source_message_metadata
-                if _progress_thread_id == source.thread_id
-                else self._thread_metadata_for_target(
-                    source.platform,
-                    source.chat_id,
-                    _progress_thread_id,
-                    chat_type=getattr(source, "chat_type", None),
-                    reply_to_message_id=event_message_id,
-                )
-            ) if _progress_thread_id else _source_message_metadata
+            _status_thread_metadata = _metadata_for_progress_target(
+                _progress_thread_id
+            )
 
         def _thechat_notice_event_shape(event_type: str) -> tuple[str, str]:
             normalized = re.sub(

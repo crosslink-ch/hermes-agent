@@ -16,6 +16,7 @@ from agent.context_compressor import (
     _NO_USER_TASK_SENTINEL,
 )
 from agent.conversation_compression import (
+    _TODO_INTERNAL_NOTE_PREFIX,
     _ensure_compressed_has_user_turn,
     compress_context,
 )
@@ -246,13 +247,30 @@ def test_compress_context_todo_snapshot_stays_synthetic_across_two_boundaries(
     )
     assert first_handoff[COMPRESSED_SUMMARY_HAS_USER_TURN_KEY] is False
     assert "First boundary" in first_handoff["content"]
-    assert any(
+    todo_notes = [
+        message
+        for message in first
+        if message.get("role") == "assistant"
+        and str(message.get("content") or "").startswith(
+            _TODO_INTERNAL_NOTE_PREFIX
+        )
+    ]
+    assert len(todo_notes) == 1
+    assert TODO_INJECTION_HEADER in todo_notes[0]["content"]
+    assert not any(
         message.get("role") == "user"
-        and str(message.get("content") or "").startswith(TODO_INJECTION_HEADER)
+        and TODO_INJECTION_HEADER in str(message.get("content") or "")
         for message in first
     )
     projected = db.get_messages_as_conversation(session_id)
     assert projected
+    assert any(
+        message.get("role") == "assistant"
+        and str(message.get("content") or "").startswith(
+            _TODO_INTERNAL_NOTE_PREFIX
+        )
+        for message in projected
+    )
     assert all(
         COMPRESSED_SUMMARY_METADATA_KEY not in message
         and COMPRESSED_SUMMARY_HAS_USER_TURN_KEY not in message
@@ -280,6 +298,21 @@ def test_compress_context_todo_snapshot_stays_synthetic_across_two_boundaries(
     assert handoff[COMPRESSED_SUMMARY_HAS_USER_TURN_KEY] is False
     assert "Second boundary" in handoff["content"]
     assert "User asked:" not in handoff["content"]
+    second_notes = [
+        message
+        for message in second
+        if message.get("role") == "assistant"
+        and str(message.get("content") or "").startswith(
+            _TODO_INTERNAL_NOTE_PREFIX
+        )
+    ]
+    assert len(second_notes) == 1
+    assert TODO_INJECTION_HEADER in second_notes[0]["content"]
+    assert not any(
+        message.get("role") == "user"
+        and TODO_INJECTION_HEADER in str(message.get("content") or "")
+        for message in second
+    )
     db.close()
 
 

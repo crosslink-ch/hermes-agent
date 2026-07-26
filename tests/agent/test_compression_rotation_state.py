@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.context_compressor import ContextCompressor
+from agent.conversation_compression import _TODO_INTERNAL_NOTE_PREFIX
 from hermes_state import SessionDB
 
 
@@ -66,6 +67,15 @@ def _build_agent_with_db(db: SessionDB, session_id: str, platform: str = "telegr
 
 def _msgs(n=20):
     return [{"role": "user", "content": f"m{i}"} for i in range(n)]
+
+
+def _todo_notes(messages):
+    return [
+        message
+        for message in messages
+        if message.get("role") == "assistant"
+        and str(message.get("content") or "").startswith(_TODO_INTERNAL_NOTE_PREFIX)
+    ]
 
 
 def _bound_context_compressor(db: SessionDB, session_id: str) -> ContextCompressor:
@@ -656,10 +666,10 @@ class TestCooldownPersistFailureIsNotAClearedRow:
         assert compressor._ineffective_compression_count == 0
 
 
-class TestTodoSnapshotMergedNotDuplicated:
-    """Todo snapshots preserve tail content without duplicate user turns."""
+class TestTodoSnapshotInternalNote:
+    """Todo snapshots remain internal while preserving the latest user turn."""
 
-    def test_snapshot_merges_into_trailing_user(self, tmp_path: Path):
+    def test_snapshot_precedes_trailing_user_as_internal_note(self, tmp_path: Path):
         db = SessionDB(db_path=tmp_path / "state.db")
         parent = "PARENT_TODO_MERGE"
         db.create_session(parent, source="cli")
@@ -681,17 +691,20 @@ class TestTodoSnapshotMergedNotDuplicated:
             _msgs(), "sys", approx_tokens=120_000
         )
 
-        assert len(compressed) == 3
+        assert len(compressed) == 4
         tail = compressed[-1]
-        assert tail["role"] == "user"
-        assert "tail" in tail["content"]
-        assert "task A" in tail["content"]
+        assert tail == {"role": "user", "content": "tail"}
+        notes = _todo_notes(compressed)
+        assert len(notes) == 1
+        assert "task A" in notes[0]["content"]
+        assert compressed[-2] is notes[0]
         assert not any(
-            previous.get("role") == current.get("role") == "user"
-            for previous, current in zip(compressed, compressed[1:])
+            "task A" in str(message.get("content") or "")
+            for message in compressed
+            if message.get("role") == "user"
         )
 
-    def test_multimodal_snapshot_merges_into_trailing_user_on_rotation(
+    def test_multimodal_tail_is_unchanged_when_internal_note_is_inserted(
         self, tmp_path: Path
     ):
         db = SessionDB(db_path=tmp_path / "state.db")
@@ -722,22 +735,22 @@ class TestTodoSnapshotMergedNotDuplicated:
             _msgs(), "sys", approx_tokens=120_000
         )
 
-        assert len(compressed) == 3
+        assert len(compressed) == 4
         tail = compressed[-1]
         assert tail["role"] == "user"
-        assert isinstance(tail["content"], list)
-        assert tail["content"][: len(original_parts)] == original_parts
-        assert any(
-            isinstance(part, dict) and "inspect image" in (part.get("text") or "")
-            for part in tail["content"]
-        )
+        assert tail["content"] == original_parts
+        notes = _todo_notes(compressed)
+        assert len(notes) == 1
+        assert "inspect image" in notes[0]["content"]
+        assert compressed[-2] is notes[0]
         assert not any(
-            previous.get("role") == current.get("role") == "user"
-            for previous, current in zip(compressed, compressed[1:])
+            "inspect image" in str(message.get("content") or "")
+            for message in compressed
+            if message.get("role") == "user"
         )
 
 
-    def test_snapshot_merge_is_persisted_in_place(self, tmp_path: Path):
+    def test_snapshot_note_is_persisted_in_place(self, tmp_path: Path):
         db = SessionDB(db_path=tmp_path / "state.db")
         parent = "PARENT_TODO_INPLACE"
         db.create_session(parent, source="cli")
@@ -758,15 +771,14 @@ class TestTodoSnapshotMergedNotDuplicated:
         agent._compress_context(_msgs(), "sys", approx_tokens=120_000)
 
         db_msgs = db.get_messages(agent.session_id)
-        assert not any(
-            previous.get("role") == current.get("role") == "user"
-            for previous, current in zip(db_msgs, db_msgs[1:])
-        )
         last_user = [message for message in db_msgs if message["role"] == "user"][-1]
-        assert "last user msg" in last_user["content"]
-        assert "do thing" in last_user["content"]
+        assert last_user["content"] == "last user msg"
+        notes = _todo_notes(db_msgs)
+        assert len(notes) == 1
+        assert "do thing" in notes[0]["content"]
+        assert db_msgs.index(notes[0]) < db_msgs.index(last_user)
 
-    def test_multimodal_snapshot_merge_is_persisted_in_place(self, tmp_path: Path):
+    def test_multimodal_snapshot_note_is_persisted_in_place(self, tmp_path: Path):
         db = SessionDB(db_path=tmp_path / "state.db")
         parent = "PARENT_TODO_MULTIMODAL_INPLACE"
         db.create_session(parent, source="cli")
@@ -796,32 +808,23 @@ class TestTodoSnapshotMergedNotDuplicated:
             _msgs(), "sys", approx_tokens=120_000
         )
 
-        assert len(compressed) == 3
+        assert len(compressed) == 4
         tail = compressed[-1]
         assert tail["role"] == "user"
-        assert isinstance(tail["content"], list)
-        assert tail["content"][: len(original_parts)] == original_parts
-        assert any(
-            isinstance(part, dict) and "inspect image" in (part.get("text") or "")
-            for part in tail["content"]
-        )
-        assert not any(
-            previous.get("role") == current.get("role") == "user"
-            for previous, current in zip(compressed, compressed[1:])
-        )
+        assert tail["content"] == original_parts
+        notes = _todo_notes(compressed)
+        assert len(notes) == 1
+        assert "inspect image" in notes[0]["content"]
+        assert compressed[-2] is notes[0]
 
         db_msgs = db.get_messages(agent.session_id)
         persisted_tail = db_msgs[-1]
         assert persisted_tail["role"] == "user"
-        assert persisted_tail["content"][: len(original_parts)] == original_parts
-        assert any(
-            isinstance(part, dict) and "inspect image" in (part.get("text") or "")
-            for part in persisted_tail["content"]
-        )
-        assert not any(
-            previous.get("role") == current.get("role") == "user"
-            for previous, current in zip(db_msgs, db_msgs[1:])
-        )
+        assert persisted_tail["content"] == original_parts
+        persisted_notes = _todo_notes(db_msgs)
+        assert len(persisted_notes) == 1
+        assert "inspect image" in persisted_notes[0]["content"]
+        assert db_msgs[-2] is persisted_notes[0]
 
 
 class TestTodoSnapshotScaffoldingTails:
@@ -863,27 +866,24 @@ class TestTodoSnapshotScaffoldingTails:
             _msgs(), "sys", approx_tokens=120_000
         )
 
-        tail = compressed[-1]
-        assert tail["role"] == "user"
-        assert tail.get("_todo_snapshot_synthetic") is True
-        assert "task A" in tail["content"]
-        # The continuation marker keeps its exact text so it stays
-        # recognizable as scaffolding after SessionDB projection.
         marker_rows = [
             message
             for message in compressed
             if message.get("content") == COMPRESSION_CONTINUATION_USER_CONTENT
         ]
         assert len(marker_rows) == 1
-        # Zero-user provenance: neither the marker nor the snapshot may read
-        # as a real user turn once SessionDB projection strips the flags
-        # (#69292). The fixture's stub summary text is not a real handoff
-        # prefix, so assert on the projected scaffolding rows directly.
+        notes = _todo_notes(compressed)
+        assert len(notes) == 1
+        assert "task A" in notes[0]["content"]
+        assert not any(
+            "task A" in str(message.get("content") or "")
+            for message in compressed
+            if message.get("role") == "user"
+        )
+        # Zero-user provenance: the continuation marker remains synthetic after
+        # SessionDB projection, while todo continuity is assistant-authored.
         assert not ContextCompressor._transcript_has_real_user_turn(
-            [
-                {"role": "user", "content": marker_rows[0]["content"]},
-                {"role": "user", "content": tail["content"]},
-            ]
+            [{"role": "user", "content": marker_rows[0]["content"]}]
         )
 
     def test_snapshot_stays_standalone_after_summary_as_user_tail(
@@ -903,9 +903,6 @@ class TestTodoSnapshotScaffoldingTails:
             _msgs(), "sys", approx_tokens=120_000
         )
 
-        tail = compressed[-1]
-        assert tail.get("_todo_snapshot_synthetic") is True
-        assert "task A" in tail["content"]
         # The summary handoff prefix must stay at the START of its own
         # message for downstream summary detection.
         summary_rows = [
@@ -914,15 +911,18 @@ class TestTodoSnapshotScaffoldingTails:
             if str(message.get("content") or "").startswith(SUMMARY_PREFIX)
         ]
         assert len(summary_rows) == 1
-        # Zero-user provenance (#69292): after SessionDB projection strips
-        # the flags, both the summary-as-user handoff and the standalone
-        # snapshot must still classify as synthetic — the merge would have
-        # buried the header/prefix markers mid-content.
+        notes = _todo_notes(compressed)
+        assert len(notes) == 1
+        assert "task A" in notes[0]["content"]
+        assert not any(
+            "task A" in str(message.get("content") or "")
+            for message in compressed
+            if message.get("role") == "user"
+        )
+        # Zero-user provenance remains false because the summary is synthetic
+        # and todo continuity now has an assistant role.
         assert not ContextCompressor._transcript_has_real_user_turn(
-            [
-                {"role": "user", "content": summary_rows[0]["content"]},
-                {"role": "user", "content": tail["content"]},
-            ]
+            [{"role": "user", "content": summary_rows[0]["content"]}]
         )
 
     def test_stale_snapshot_row_is_refreshed_not_stacked(self, tmp_path: Path):
@@ -940,16 +940,15 @@ class TestTodoSnapshotScaffoldingTails:
             _msgs(), "sys", approx_tokens=120_000
         )
 
-        tail = compressed[-1]
-        assert tail.get("_todo_snapshot_synthetic") is True
-        assert "task A" in tail["content"]
-        assert "old finished task" not in tail["content"]
-        snapshot_rows = [
-            message
+        notes = _todo_notes(compressed)
+        assert len(notes) == 1
+        assert "task A" in notes[0]["content"]
+        assert "old finished task" not in notes[0]["content"]
+        assert not any(
+            str(message.get("content") or "").startswith(TODO_INJECTION_HEADER)
             for message in compressed
-            if str(message.get("content") or "").startswith(TODO_INJECTION_HEADER)
-        ]
-        assert len(snapshot_rows) == 1
+            if message.get("role") == "user"
+        )
 
     def test_previously_merged_snapshot_is_stripped_before_reinjection(
         self, tmp_path: Path
@@ -973,14 +972,13 @@ class TestTodoSnapshotScaffoldingTails:
 
         tail = compressed[-1]
         assert tail["role"] == "user"
-        assert "please fix the login bug" in tail["content"]
-        assert "task A" in tail["content"]
-        assert "old finished task" not in tail["content"]
-        assert tail["content"].count(TODO_INJECTION_HEADER) == 1
-        assert not any(
-            previous.get("role") == current.get("role") == "user"
-            for previous, current in zip(compressed, compressed[1:])
-        )
+        assert tail["content"] == "please fix the login bug"
+        assert TODO_INJECTION_HEADER not in tail["content"]
+        notes = _todo_notes(compressed)
+        assert len(notes) == 1
+        assert "task A" in notes[0]["content"]
+        assert "old finished task" not in notes[0]["content"]
+        assert compressed[-2] is notes[0]
 
     def test_empty_todo_store_injects_nothing(self, tmp_path: Path):
         from tools.todo_tool import TODO_INJECTION_HEADER

@@ -175,6 +175,17 @@ class NonEditingProgressCaptureAdapter(ProgressCaptureAdapter):
         raise AssertionError("non-editable adapters should not receive edit_message calls")
 
 
+class LiveStatusCaptureAdapter(ProgressCaptureAdapter):
+    supports_status_text = True
+
+    def __init__(self, platform=Platform.SLACK):
+        super().__init__(platform=platform)
+        self.status_updates = []
+
+    def set_status_text(self, chat_id, text):
+        self.status_updates.append({"chat_id": chat_id, "text": text})
+
+
 class StructuredProgressCaptureAdapter(ProgressCaptureAdapter):
     SUPPORTS_MESSAGE_EDITING = False
 
@@ -209,6 +220,27 @@ class FakeAgent:
             time.sleep(0.35)
             cb("tool.started", "browser_navigate", "https://example.com", {})
             time.sleep(0.35)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class StatusAndToolProgressAgent:
+    """Emit both status and tool progress to exercise their metadata paths."""
+
+    def __init__(self, **kwargs):
+        self.status_callback = kwargs.get("status_callback")
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        assert self.status_callback is not None
+        assert self.tool_progress_callback is not None
+        self.status_callback("lifecycle", "Compacting context for test")
+        self.tool_progress_callback("tool.started", "terminal", "pwd", {})
+        time.sleep(0.4)
         return {
             "final_response": "done",
             "messages": [],
@@ -932,6 +964,9 @@ async def _run_with_agent(
     chat_id="-1001",
     chat_type="group",
     thread_id="17585",
+    event_message_id=None,
+    scope_id=None,
+    adapter_extra=None,
     adapter_cls=ProgressCaptureAdapter,
 ):
     if config_data:
@@ -948,6 +983,8 @@ async def _run_with_agent(
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
 
     adapter = adapter_cls(platform=platform)
+    if adapter_extra:
+        adapter.config.extra.update(adapter_extra)
     runner = _make_runner(adapter)
     gateway_run = importlib.import_module("gateway.run")
     if config_data and "streaming" in config_data:
@@ -959,6 +996,7 @@ async def _run_with_agent(
         chat_id=chat_id,
         chat_type=chat_type,
         thread_id=thread_id,
+        scope_id=scope_id,
     )
     session_key = f"agent:main:{platform.value}:{chat_type}:{chat_id}"
     if thread_id:
@@ -978,8 +1016,68 @@ async def _run_with_agent(
         source=source,
         session_id=session_id,
         session_key=session_key,
+        event_message_id=event_message_id,
     )
     return adapter, result
+
+
+@pytest.mark.asyncio
+async def test_slack_flat_progress_and_status_do_not_recreate_synthetic_thread(
+    monkeypatch, tmp_path
+):
+    event_message_id = "1700000000.000100"
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        StatusAndToolProgressAgent,
+        session_id="sess-slack-flat-progress",
+        config_data={
+            "display": {"platforms": {"slack": {"tool_progress": "all"}}}
+        },
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="channel",
+        thread_id=event_message_id,
+        event_message_id=event_message_id,
+        scope_id="T_ALPHA",
+        adapter_extra={"reply_in_thread": False},
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.sent
+    expected_metadata = {"slack_team_id": "T_ALPHA"}
+    assert all(call["metadata"] == expected_metadata for call in adapter.sent)
+    assert all(call["metadata"] == expected_metadata for call in adapter.typing)
+
+
+@pytest.mark.asyncio
+async def test_slack_live_status_receives_tool_events_when_chat_progress_is_off(
+    monkeypatch, tmp_path
+):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        FakeAgent,
+        session_id="sess-slack-live-status-only",
+        config_data={
+            "display": {
+                "platforms": {
+                    "slack": {"tool_progress": "off", "live_status": "full"}
+                }
+            }
+        },
+        platform=Platform.SLACK,
+        chat_id="C123",
+        chat_type="channel",
+        thread_id=None,
+        adapter_cls=LiveStatusCaptureAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    assert adapter.sent == []
+    assert len(adapter.status_updates) == 2
+    assert all(update["chat_id"] == "C123" for update in adapter.status_updates)
+    assert all(update["text"] for update in adapter.status_updates)
 
 
 @pytest.mark.asyncio
@@ -1088,11 +1186,17 @@ async def test_thechat_structured_activity_keeps_notices_reasoning_and_tools_dis
         chat_id="11111111-1111-4111-8111-111111111111",
         chat_type="dm",
         thread_id=None,
+        event_message_id="msg-origin-1",
         adapter_cls=StructuredProgressCaptureAdapter,
     )
 
     assert result["final_response"] == "done"
     assert isinstance(adapter, StructuredProgressCaptureAdapter)
+    assert adapter.progress_events
+    assert all(
+        call["metadata"] == {"message_id": "msg-origin-1"}
+        for call in adapter.progress_events
+    )
     event_types = [call["event"]["type"] for call in adapter.progress_events]
     assert event_types == [
         "notice.lifecycle",

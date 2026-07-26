@@ -1098,6 +1098,72 @@ def _strip_stale_todo_snapshot(content: Any) -> Any:
     return content
 
 
+_TODO_INTERNAL_NOTE_PREFIX = (
+    "[Internal continuity note preserved across context compression — "
+    "not a user message and not the latest request.]"
+)
+
+
+def _inject_todo_snapshot_internal_note(messages: list, todo_snapshot: str) -> None:
+    """Refresh todo continuity state without turning it into human intent."""
+    snapshot = str(todo_snapshot or "").strip()
+    cleaned: list = []
+
+    for message in messages:
+        if not isinstance(message, dict):
+            cleaned.append(message)
+            continue
+
+        text = _message_text(message).strip()
+        if message.get("role") == "assistant" and (
+            message.get("_todo_snapshot_internal")
+            or text.startswith(_TODO_INTERNAL_NOTE_PREFIX)
+        ):
+            continue
+
+        if message.get("role") == "user":
+            original = message.get("content")
+            stripped = _strip_stale_todo_snapshot(original)
+            if stripped != original:
+                has_content = bool(
+                    _message_text({"content": stripped}).strip()
+                ) or (isinstance(stripped, list) and bool(stripped))
+                if not has_content:
+                    continue
+                message["content"] = stripped
+                message.pop("_todo_snapshot_synthetic", None)
+
+        cleaned.append(message)
+
+    messages[:] = cleaned
+    if not snapshot:
+        return
+
+    note = {
+        "role": "assistant",
+        "content": f"{_TODO_INTERNAL_NOTE_PREFIX}\n{snapshot}",
+        "_todo_snapshot_internal": True,
+    }
+
+    insert_at = len(messages)
+    for idx in range(len(messages) - 1, -1, -1):
+        if _is_real_user_message(messages[idx]):
+            insert_at = idx
+            break
+    else:
+        # Zero-user sessions retain upstream's synthetic continuation row for
+        # strict role templates; the internal note belongs immediately before it.
+        for idx in range(len(messages) - 1, -1, -1):
+            if (
+                isinstance(messages[idx], dict)
+                and messages[idx].get("role") == "user"
+            ):
+                insert_at = idx
+                break
+
+    messages.insert(insert_at, note)
+
+
 def _merge_anchor_into_user_message(target: dict, anchor: dict) -> None:
     """Fold the human anchor into an existing user-role scaffolding turn.
 
@@ -1950,56 +2016,8 @@ def compress_context(
                     )
 
         todo_snapshot = agent._todo_store.format_for_injection()
-        if todo_snapshot:
-            # Fold the snapshot into a trailing REAL user message so
-            # compression never introduces a synthetic user/user pair. Any
-            # snapshot merged at an earlier boundary is stripped first so
-            # repeated compactions refresh rather than accumulate todo state
-            # (#26981). Scaffolding tails (continuation marker, summary
-            # handoff, a bare stale snapshot row) must never absorb the
-            # snapshot: merging would upgrade them to "real user" evidence
-            # and break zero-user provenance (#69292), so those keep the
-            # flagged standalone append and the real-user preservation pass
-            # continues to see todo scaffolding, not human intent.
-            from agent.context_compressor import _append_text_to_content
-
-            merged = False
-            _tail = (
-                compressed[-1]
-                if compressed and isinstance(compressed[-1], dict)
-                else None
-            )
-            if _tail is not None and _tail.get("role") == "user":
-                _stripped = _strip_stale_todo_snapshot(_tail.get("content"))
-                _probe = {
-                    key: value for key, value in _tail.items() if key != "content"
-                }
-                _probe["content"] = _stripped
-                if _is_real_user_message(_probe):
-                    _snapshot_text = (
-                        f"\n\n{todo_snapshot}"
-                        if isinstance(_stripped, str) and _stripped
-                        else todo_snapshot
-                    )
-                    _tail["content"] = _append_text_to_content(
-                        _stripped, _snapshot_text
-                    )
-                    merged = True
-                elif _stripped != _tail.get("content") and not _message_text(
-                    {"role": "user", "content": _stripped}
-                ).strip():
-                    # The tail was nothing but an earlier snapshot row —
-                    # refresh it in place instead of stacking a duplicate.
-                    _tail["content"] = todo_snapshot
-                    _tail["_todo_snapshot_synthetic"] = True
-                    merged = True
-            if not merged:
-                compressed.append({
-                    "role": "user",
-                    "content": todo_snapshot,
-                    "_todo_snapshot_synthetic": True,
-                })
         _ensure_compressed_has_user_turn(messages, compressed)
+        _inject_todo_snapshot_internal_note(compressed, todo_snapshot)
 
         cached_system_prompt = agent._cached_system_prompt
         agent._invalidate_system_prompt()

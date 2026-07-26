@@ -36,6 +36,9 @@ outputs:
   token:
     description: A GitHub App installation access token (1-hour TTL), or GITHUB_TOKEN on forks.
     value: ${{ steps.app-token.outputs.token || steps.fallback.outputs.token }}
+  has_app:
+    description: Whether both App credentials were present and an App token was requested.
+    value: ${{ steps.check.outputs.has_app }}
 
 runs:
   using: composite
@@ -45,8 +48,9 @@ runs:
       shell: bash
       env:
         CLIENT_ID: ${{ inputs.client-id }}
+        PRIVATE_KEY: ${{ inputs.private-key }}
       run: |
-        if [ -n "$CLIENT_ID" ]; then
+        if [ -n "$CLIENT_ID" ] && [ -n "$PRIVATE_KEY" ]; then
           echo "has_app=true" >> "$GITHUB_OUTPUT"
         else
           echo "has_app=false" >> "$GITHUB_OUTPUT"

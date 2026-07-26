@@ -133,6 +133,59 @@ class TestApplyWalWalResetGate:
         assert "wal_checkpoint" not in joined_lower
         assert "journal_mode=delete" not in joined_lower
 
+    def test_forced_delete_overrides_vulnerable_existing_wal(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_SQLITE_JOURNAL_MODE", "delete")
+        monkeypatch.setattr(
+            hermes_state, "is_sqlite_wal_reset_vulnerable", lambda version_info=None: True
+        )
+        path = tmp_path / "forced-delete-prior-wal.db"
+        seed = sqlite3.connect(str(path))
+        try:
+            assert seed.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+            seed.execute("CREATE TABLE t (x INTEGER)")
+            seed.execute("INSERT INTO t VALUES (42)")
+            seed.commit()
+        finally:
+            seed.close()
+
+        conn = sqlite3.connect(str(path))
+        try:
+            assert apply_wal_with_fallback(conn, db_label=path.name) == "delete"
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+            assert conn.execute("SELECT x FROM t").fetchone()[0] == 42
+        finally:
+            conn.close()
+
+    def test_invalid_override_fails_before_vulnerability_gate(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_SQLITE_JOURNAL_MODE", "banana")
+
+        def unexpected_vulnerability_probe(version_info=None):
+            raise AssertionError("journal override must be validated first")
+
+        monkeypatch.setattr(
+            hermes_state,
+            "is_sqlite_wal_reset_vulnerable",
+            unexpected_vulnerability_probe,
+        )
+        with sqlite3.connect(str(tmp_path / "invalid-override.db")) as conn:
+            with pytest.raises(ValueError, match="HERMES_SQLITE_JOURNAL_MODE"):
+                apply_wal_with_fallback(conn)
+
+    def test_forced_wal_still_respects_vulnerable_fresh_db_gate(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HERMES_SQLITE_JOURNAL_MODE", "wal")
+        monkeypatch.setattr(
+            hermes_state, "is_sqlite_wal_reset_vulnerable", lambda version_info=None: True
+        )
+        with sqlite3.connect(str(tmp_path / "forced-wal-vulnerable.db")) as conn:
+            assert apply_wal_with_fallback(conn, db_label="forced-wal.db") == "delete"
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+
     def test_fixed_sqlite_still_enables_wal(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             hermes_state, "is_sqlite_wal_reset_vulnerable", lambda version_info=None: False

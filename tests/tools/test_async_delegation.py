@@ -16,6 +16,7 @@ import time
 
 import pytest
 
+import hermes_state
 from tools import async_delegation as ad
 from tools.process_registry import process_registry, format_process_notification
 
@@ -294,6 +295,38 @@ def test_durable_store_honors_forced_delete_on_existing_wal_db(tmp_path, monkeyp
 
     with sqlite3.connect(tmp_path / "state.db") as verify:
         assert verify.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+
+
+def test_connect_closes_new_connection_when_wal_policy_initialization_fails(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    real_connect = sqlite3.connect
+    opened = []
+
+    class TrackingConnection(sqlite3.Connection):
+        closed_by_connect_guard = False
+
+        def close(self):
+            self.closed_by_connect_guard = True
+            return super().close()
+
+    def tracking_connect(*args, **kwargs):
+        conn = real_connect(*args, factory=TrackingConnection, **kwargs)
+        opened.append(conn)
+        return conn
+
+    def fail_wal_policy(*_args, **_kwargs):
+        raise RuntimeError("journal policy failed")
+
+    monkeypatch.setattr(ad.sqlite3, "connect", tracking_connect)
+    monkeypatch.setattr(hermes_state, "apply_wal_with_fallback", fail_wal_policy)
+
+    with pytest.raises(RuntimeError, match="journal policy failed"):
+        ad._connect()
+
+    assert len(opened) == 1
+    assert opened[0].closed_by_connect_guard is True
 
 
 def test_real_process_restart_restores_owned_completion_once(tmp_path):
