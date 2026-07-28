@@ -1473,11 +1473,12 @@ class TheChatAdapter(BasePlatformAdapter):
         description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None,
         allow_permanent: bool = True,
+        allow_session: bool = True,
         smart_denied: bool = False,
     ) -> SendResult:
         """Send command approval as structured TheChat invocation progress."""
         command_preview = command[:4000] + "..." if len(command) > 4000 else command
-        if smart_denied:
+        if smart_denied or not allow_session:
             choices = ["once", "deny"]
         else:
             choices = ["once", "session"]
