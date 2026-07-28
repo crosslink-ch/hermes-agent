@@ -1860,8 +1860,9 @@ class TestParseTargetRefTheChat:
         assert captured["headers"] == {"Authorization": "Bearer bot-token"}
         assert captured["path"] == "/hermes-platform/messages"
         assert captured["payload"] == {
-            "chatId": chat_id,
+            "conversationId": chat_id,
             "content": "cron update",
+            "attachmentIds": [],
             "platformMessageId": captured["payload"]["platformMessageId"],
             "complete": False,
         }
