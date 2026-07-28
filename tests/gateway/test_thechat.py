@@ -732,9 +732,28 @@ async def test_send_exec_approval_posts_structured_approval_request():
 @pytest.mark.parametrize(
     ("approval_kwargs", "expected_choices"),
     [
-        ({"allow_permanent": False}, ["once", "session", "deny"]),
         (
-            {"allow_permanent": True, "smart_denied": True},
+            {
+                "allow_permanent": False,
+                "allow_session": True,
+                "smart_denied": False,
+            },
+            ["once", "session", "deny"],
+        ),
+        (
+            {
+                "allow_permanent": True,
+                "allow_session": False,
+                "smart_denied": False,
+            },
+            ["once", "deny"],
+        ),
+        (
+            {
+                "allow_permanent": True,
+                "allow_session": True,
+                "smart_denied": True,
+            },
             ["once", "deny"],
         ),
     ],
