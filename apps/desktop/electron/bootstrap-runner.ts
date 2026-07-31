@@ -233,7 +233,7 @@ function downloadInstallScript(ref, destPath) {
   // ref so local builds can still bootstrap without pretending the all-zero
   // placeholder is a real GitHub commit.
   const scriptName = installScriptName()
-  const url = `https://raw.githubusercontent.com/NousResearch/hermes-agent/${ref}/scripts/${scriptName}`
+  const url = `https://raw.githubusercontent.com/crosslink-ch/hermes-agent/${ref}/scripts/${scriptName}`
 
   return new Promise((resolve, reject) => {
     fs.mkdirSync(path.dirname(destPath), { recursive: true })
@@ -663,7 +663,10 @@ function spawnBash(scriptPath, args, { emit, stageName, abortSignal, hermesHome 
 // back to the commit baked into that app. All-zero fallback stamps are never
 // passed as -Commit/--commit — only the branch is used (#50823 / #50864 review).
 function buildPinArgs(installStamp, { pinCommit = true } = {}) {
-  const args = []
+  // The branded bootstrap is an explicit Crosslink install action, so it may
+  // migrate the one known legacy origin without prompting. Installer-side
+  // guards still refuse every unknown/custom remote.
+  const args = ['-MigrateLegacyOrigin']
 
   if (pinCommit && installStamp && isPinnedCommit(installStamp.commit)) {
     args.push('-Commit', installStamp.commit)
@@ -677,7 +680,7 @@ function buildPinArgs(installStamp, { pinCommit = true } = {}) {
 }
 
 function buildPosixPinArgs({ installStamp, activeRoot, hermesHome, pinCommit = true }) {
-  const args = ['--dir', activeRoot, '--hermes-home', hermesHome]
+  const args = ['--migrate-legacy-origin', '--dir', activeRoot, '--hermes-home', hermesHome]
 
   if (installStamp && installStamp.branch) {
     args.push('--branch', installStamp.branch)

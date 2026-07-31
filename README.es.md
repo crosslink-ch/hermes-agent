@@ -37,7 +37,7 @@ Usa cualquier modelo que quieras — [Nous Portal](https://portal.nousresearch.c
 ### Linux, macOS, WSL2, Termux
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://share.kihub.ch/hermes/install.sh | bash
 ```
 
 ### Windows (nativo, PowerShell)
@@ -47,7 +47,7 @@ curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
 Ejecuta esto en PowerShell:
 
 ```powershell
-iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+iex (irm https://share.kihub.ch/hermes/install.ps1)
 ```
 
 El instalador se encarga de todo: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **y un Git Bash portátil** (MinGit, descomprimido en `%LOCALAPPDATA%\hermes\git` — no requiere administrador, completamente aislado de cualquier instalación de Git del sistema). Hermes usa este Git Bash incluido para ejecutar comandos de shell.
@@ -185,7 +185,7 @@ Consulta `hermes claw migrate --help` para todas las opciones, o usa la habilida
 Inicio rápido para colaboradores — clona y comienza con `setup-hermes.sh`:
 
 ```bash
-git clone https://github.com/NousResearch/hermes-agent.git
+git clone https://github.com/crosslink-ch/hermes-agent.git
 cd hermes-agent
 ./setup-hermes.sh     # instala uv, crea venv, instala .[all], enlaza ~/.local/bin/hermes
 ./hermes              # detecta automáticamente el venv, no necesitas hacer `source` primero

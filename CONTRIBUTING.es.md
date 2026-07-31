@@ -81,7 +81,7 @@ Esto no es una barra de calidad — es una decisión de acoplamiento y mantenimi
 ### Clonar e instalar
 
 ```bash
-git clone https://github.com/NousResearch/hermes-agent.git
+git clone https://github.com/crosslink-ch/hermes-agent.git
 cd hermes-agent
 
 # Crear venv con Python 3.11

@@ -51,7 +51,7 @@ That does not stop Hermes from working well as a phone-native CLI agent — it j
 Hermes now ships a Termux-aware installer path:
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://share.kihub.ch/hermes/install.sh | bash
 ```
 
 On Termux, the installer automatically:
@@ -87,7 +87,7 @@ Why these packages?
 ### 2. Clone Hermes
 
 ```bash
-git clone https://github.com/NousResearch/hermes-agent.git
+git clone https://github.com/crosslink-ch/hermes-agent.git
 cd hermes-agent
 ```
 

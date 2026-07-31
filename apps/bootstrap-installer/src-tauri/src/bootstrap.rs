@@ -859,7 +859,10 @@ async fn run_install_script(
 }
 
 fn build_pin_args(script: &install_script::ResolvedScript) -> Vec<String> {
-    let mut out = Vec::new();
+    // A branded bootstrap is an explicit Crosslink install action. The script
+    // may migrate only the known Nous legacy origin; custom origins remain
+    // protected by the installer-side guard.
+    let mut out = vec!["-MigrateLegacyOrigin".to_string()];
     if let Some(c) = &script.commit {
         out.push("-Commit".to_string());
         out.push(c.clone());
@@ -978,6 +981,26 @@ mod tests {
             std::fs::write(&exe, b"stub").unwrap();
             exe
         }
+    }
+
+    #[test]
+    fn branded_bootstrap_explicitly_migrates_only_the_known_legacy_origin() {
+        let script = install_script::ResolvedScript {
+            path: PathBuf::from("install.ps1"),
+            source: install_script::ScriptSource::Cached,
+            commit: Some("abcdef1234567890".to_string()),
+            branch: Some("main".to_string()),
+        };
+
+        let args = build_pin_args(&script);
+        assert_eq!(
+            args.first().map(String::as_str),
+            Some("-MigrateLegacyOrigin")
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-Commit", "abcdef1234567890"]));
+        assert!(args.windows(2).any(|pair| pair == ["-Branch", "main"]));
     }
 
     // The relaunch / install target is derived from the rebuilt desktop app.

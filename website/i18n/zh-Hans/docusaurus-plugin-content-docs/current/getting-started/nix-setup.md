@@ -35,11 +35,11 @@ Hermes Agent 提供了一个 Nix flake，支持三个层级的集成：
 
 ```bash
 # 直接运行（首次使用时构建，之后使用缓存）
-nix run github:NousResearch/hermes-agent -- setup
-nix run github:NousResearch/hermes-agent -- chat
+nix run github:crosslink-ch/hermes-agent -- setup
+nix run github:crosslink-ch/hermes-agent -- chat
 
 # 或持久化安装
-nix profile install github:NousResearch/hermes-agent
+nix profile install github:crosslink-ch/hermes-agent
 hermes setup
 hermes chat
 ```
@@ -50,7 +50,7 @@ hermes chat
 <summary><strong>从本地克隆构建</strong></summary>
 
 ```bash
-git clone https://github.com/NousResearch/hermes-agent.git
+git clone https://github.com/crosslink-ch/hermes-agent.git
 cd hermes-agent
 nix build
 ./result/bin/hermes setup
@@ -75,7 +75,7 @@ nix build
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    hermes-agent.url = "github:NousResearch/hermes-agent";
+    hermes-agent.url = "github:crosslink-ch/hermes-agent";
   };
 
   outputs = { nixpkgs, hermes-agent, ... }: {
@@ -685,7 +685,7 @@ services.hermes-agent = {
 
 ```nix
 {
-  inputs.hermes-agent.url = "github:NousResearch/hermes-agent";
+  inputs.hermes-agent.url = "github:crosslink-ch/hermes-agent";
   outputs = { hermes-agent, nixpkgs, ... }: {
     nixpkgs.overlays = [ hermes-agent.overlays.default ];
     # 然后：
