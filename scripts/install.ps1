@@ -5,7 +5,7 @@
 # Uses uv for fast Python provisioning and package management.
 #
 # Usage:
-#   iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+#   iex (irm https://share.kihub.ch/hermes/install.ps1)
 #
 # Or download and run with options:
 #   .\install.ps1 -NoVenv -SkipSetup
@@ -29,6 +29,9 @@ param(
     # existing tree pass -ForceCommit.
     [switch]$ForceCommit,
     [string]$Tag = "",
+    # Explicitly retarget a known legacy Nous installation to the Crosslink
+    # distribution. Unknown/custom origins are never changed automatically.
+    [switch]$MigrateLegacyOrigin,
     [string]$HermesHome = $(if ($env:HERMES_HOME) { $env:HERMES_HOME } else { "$env:LOCALAPPDATA\hermes" }),
     [string]$InstallDir = $(if ($env:HERMES_HOME) { "$env:HERMES_HOME\hermes-agent" } else { "$env:LOCALAPPDATA\hermes\hermes-agent" }),
 
@@ -373,8 +376,11 @@ $script:ResolvedPathReport = @{
 # Configuration
 # ============================================================================
 
-$RepoUrlSsh = "git@github.com:NousResearch/hermes-agent.git"
-$RepoUrlHttps = "https://github.com/NousResearch/hermes-agent.git"
+$RepoSlug = "crosslink-ch/hermes-agent"
+$RepoUrlSsh = "git@github.com:$RepoSlug.git"
+$RepoUrlHttps = "https://github.com/$RepoSlug.git"
+$DistributionRepoCanonical = "github.com/crosslink-ch/hermes-agent"
+$LegacyRepoCanonical = "github.com/nousresearch/hermes-agent"
 $PythonVersion = "3.11"
 # Minor versions the installer accepts when the requested $PythonVersion isn't
 # available, in preference order.  uv discovers both uv-managed and system
@@ -1776,6 +1782,72 @@ function Install-SystemPackages {
 # Installation
 # ============================================================================
 
+function ConvertTo-CanonicalRepositoryRemote {
+    param([string]$Url)
+
+    if ([string]::IsNullOrWhiteSpace($Url)) { return "" }
+    $value = $Url.Trim()
+    if ($value -match '^(?i)git@github\.com:(.+)$') {
+        $value = "github.com/" + $Matches[1]
+    } elseif ($value -match '^(?i)ssh://git@github\.com/(.+)$') {
+        $value = "github.com/" + $Matches[1]
+    } elseif ($value -match '^(?i)https?://([^/]+)/(.+)$') {
+        $value = $Matches[1] + "/" + $Matches[2]
+    }
+    $value = $value.Trim().TrimEnd('/')
+    if ($value.EndsWith(".git", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $value = $value.Substring(0, $value.Length - 4)
+    }
+    return $value.ToLowerInvariant()
+}
+
+function Ensure-DistributionOrigin {
+    $originUrl = ""
+    try {
+        $originUrl = (& git -C $InstallDir remote get-url origin 2>$null).Trim()
+    } catch {}
+
+    $canonical = ConvertTo-CanonicalRepositoryRemote $originUrl
+    if ($canonical -eq $DistributionRepoCanonical) { return }
+
+    if ($canonical -eq $LegacyRepoCanonical) {
+        $shouldMigrate = [bool]$MigrateLegacyOrigin
+        if (-not $shouldMigrate -and -not $NonInteractive) {
+            $canPrompt = $false
+            try {
+                $canPrompt = (
+                    [Environment]::UserInteractive `
+                    -and (-not [Console]::IsInputRedirected) `
+                    -and ($Host.Name -eq "ConsoleHost")
+                )
+            } catch { $canPrompt = $false }
+            if ($canPrompt) {
+                Write-Warn "This installation currently follows NousResearch/hermes-agent."
+                Write-Warn "Crosslink Hermes should follow $RepoSlug for future updates."
+                $answer = Read-Host "Migrate this managed checkout to Crosslink now? [y/N]"
+                $shouldMigrate = $answer -match '^(?i)y(es)?$'
+            }
+        }
+
+        if (-not $shouldMigrate) {
+            throw "Legacy Nous origin detected. Re-run with -MigrateLegacyOrigin to retarget it, or change origin manually. No files were modified."
+        }
+
+        $targetUrl = if ($originUrl -match '^(?i)(git@|ssh://)') { $RepoUrlSsh } else { $RepoUrlHttps }
+        Write-Info "Migrating managed checkout origin to $targetUrl..."
+        & git -C $InstallDir remote set-url origin $targetUrl
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to migrate the legacy origin (git exited $LASTEXITCODE)."
+        }
+        Write-Success "Managed checkout now follows $RepoSlug"
+        return
+    }
+
+    $displayOrigin = if ($originUrl) { $originUrl } else { "<missing origin>" }
+    Write-Warn "Existing checkout uses a custom origin ($displayOrigin)."
+    Write-Info "Leaving the custom origin unchanged."
+}
+
 function Install-Repository {
     Write-Info "Installing to $InstallDir..."
 
@@ -1822,6 +1894,7 @@ function Install-Repository {
         }
 
         if ($repoValid) {
+            Ensure-DistributionOrigin
             Write-Info "Existing installation found, updating..."
             Push-Location $InstallDir
             # Wrap the entire fetch+checkout block in EAP=Continue so git's
@@ -2062,13 +2135,13 @@ function Install-Repository {
                 # for.  GitHub supports archive URLs for commits, tags, and
                 # branches; we honour Commit > Tag > Branch.
                 if ($Commit) {
-                    $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/$Commit.zip"
+                    $zipUrl = "https://github.com/$RepoSlug/archive/$Commit.zip"
                     $zipLabel = $Commit
                 } elseif ($Tag) {
-                    $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/tags/$Tag.zip"
+                    $zipUrl = "https://github.com/$RepoSlug/archive/refs/tags/$Tag.zip"
                     $zipLabel = $Tag
                 } else {
-                    $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/heads/$Branch.zip"
+                    $zipUrl = "https://github.com/$RepoSlug/archive/refs/heads/$Branch.zip"
                     $zipLabel = $Branch
                 }
                 $zipPath = "$env:TEMP\hermes-agent-$zipLabel.zip"
@@ -2988,14 +3061,12 @@ function Install-NodeDeps {
         $browserLog = "$env:TEMP\hermes-npm-browser-$(Get-Random).log"
         $browserNpmOk = _Run-NpmInstall "Browser tools" $InstallDir $browserLog $npmExe
 
-        # Install Playwright Chromium (mirrors scripts/install.sh behaviour for
-        # Linux).  Without this, tools/browser_tool.py::check_browser_requirements
-        # returns False (no Chromium under %LOCALAPPDATA%\ms-playwright), and the
-        # browser_* tools are silently filtered out of the agent's tool schema.
-        # System Chrome at "C:\Program Files\Google\Chrome\..." is NOT used by
-        # agent-browser -- it expects a Playwright-managed Chromium.
+        # Install the Chrome-for-Testing build managed by the already-installed
+        # agent-browser package. tools/browser_tool.py detects that cache; using
+        # the package's own installer keeps its browser and native CLI versions
+        # aligned without adding a second raw Playwright dependency.
         if ($browserNpmOk) {
-            Write-Info "Installing browser engine (Playwright Chromium)..."
+            Write-Info "Installing browser engine (agent-browser Chrome)..."
             # npx lives next to npm in the same bin dir.  Prefer .cmd to dodge
             # the same execution-policy gotcha that affects npm.ps1 (see above).
             $npmDir = Split-Path $npmExe -Parent
@@ -3009,8 +3080,8 @@ function Install-NodeDeps {
                 if ($npxCmd) { $npxExe = $npxCmd.Source }
             }
             if (-not $npxExe) {
-                Write-Warn "npx not found -- cannot install Playwright Chromium."
-                Write-Info "Run manually later: cd `"$InstallDir`"; npx playwright install chromium"
+                Write-Warn "npx not found -- cannot install agent-browser Chrome."
+                Write-Info "Run manually later: cd `"$InstallDir`"; npx agent-browser install"
             } else {
                 $pwLog = "$env:TEMP\hermes-playwright-install-$(Get-Random).log"
                 Push-Location $InstallDir
@@ -3019,65 +3090,38 @@ function Install-NodeDeps {
                 # rationale).
                 $prevEAP = $ErrorActionPreference
                 try {
-                    # Playwright Chromium is ~170MB compressed and the
-                    # download regularly takes 3-10 minutes on a fresh
-                    # VM.  Tee the output to console + log so the user
-                    # sees download progress in real time instead of
-                    # staring at a silent prompt that looks hung.  See
-                    # _Run-NpmInstall above for the same pattern and
-                    # the rationale behind 2>&1 before the pipe.
+                    # agent-browser downloads Chrome for Testing and regularly
+                    # takes several minutes on a fresh VM. Tee progress to the
+                    # console + log, relax EAP around native stderr, and trust
+                    # the process exit code as the success signal.
                     Write-Info "(this can take several minutes -- streaming progress below)"
-                    # --yes auto-accepts npx's "Need to install playwright@X.Y.Z"
-                    # confirmation prompt.  Without it, npx 7+ blocks on stdin
-                    # waiting for a y/N answer that never comes when this is
-                    # invoked through a pipeline (Tee-Object disconnects stdin
-                    # from the user's TTY), and the install hangs indefinitely
-                    # after printing "Need to install the following packages:
-                    # playwright@X.Y.Z".
-                    #
-                    # Relax EAP around the playwright invocation: playwright
-                    # emits a "Chromium downloaded to ..." success banner to
-                    # stderr after a successful install.  Under EAP=Stop, the
-                    # 2>&1 merge wraps those stderr lines as ErrorRecord
-                    # objects and throws -- causing this catch block to fire
-                    # with a mangled banner as the error message even though
-                    # the install actually succeeded.  Check $LASTEXITCODE
-                    # instead, which is the reliable signal.
-                    #
-                    # The ForEach-Object { "$_" } coercion BEFORE Tee-Object
-                    # is a cosmetic polish: with bare 2>&1, PowerShell still
-                    # renders stderr lines through its NativeCommandError
-                    # formatter (the red "npx.cmd : ..." block).  Coercing
-                    # each pipeline item to a string strips that wrapper so
-                    # the user sees clean playwright output instead of the
-                    # alarming-looking error formatting.
                     $ErrorActionPreference = "Continue"
-                    & $npxExe --yes playwright install chromium 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $pwLog
+                    & $npxExe agent-browser install 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $pwLog
                     $pwCode = $LASTEXITCODE
                     $ErrorActionPreference = $prevEAP
                     if ($pwCode -eq 0) {
-                        Write-Success "Playwright Chromium installed (browser tools ready)"
+                        Write-Success "agent-browser Chrome installed (browser tools ready)"
                         Remove-Item -Force $pwLog -ErrorAction SilentlyContinue
                     } else {
-                        Write-Warn "Playwright Chromium install failed -- exit code $pwCode"
-                        Write-Warn "Browser tools will not work until Chromium is installed."
+                        Write-Warn "agent-browser Chrome install failed -- exit code $pwCode"
+                        Write-Warn "Browser tools will not work until Chrome is installed."
                         if (Test-Path $pwLog) {
                             $pwErr = Get-Content $pwLog -Raw -ErrorAction SilentlyContinue
                             if ($pwErr) {
                                 $snippet = if ($pwErr.Length -gt 1200) { $pwErr.Substring(0, 1200) + "..." } else { $pwErr }
-                                Write-Info "  playwright output:"
+                                Write-Info "  agent-browser output:"
                                 foreach ($line in $snippet -split "`n") {
                                     Write-Host "    $line" -ForegroundColor DarkGray
                                 }
                                 Write-Info "  Full log: $pwLog"
                             }
                         }
-                        Write-Info "Run manually later: cd `"$InstallDir`"; npx playwright install chromium"
+                        Write-Info "Run manually later: cd `"$InstallDir`"; npx agent-browser install"
                     }
                 } catch {
                     if ($prevEAP) { $ErrorActionPreference = $prevEAP }
-                    Write-Warn "Playwright Chromium install could not be launched: $_"
-                    Write-Info "Run manually later: cd `"$InstallDir`"; npx playwright install chromium"
+                    Write-Warn "agent-browser Chrome install could not be launched: $_"
+                    Write-Info "Run manually later: cd `"$InstallDir`"; npx agent-browser install"
                 } finally {
                     Pop-Location
                 }
@@ -4256,7 +4300,7 @@ try {
     Write-Err "Installation failed: $_"
     Write-Host ""
     Write-Info "If the error is unclear, try downloading and running the script directly:"
-    Write-Host "  Invoke-WebRequest -Uri 'https://hermes-agent.nousresearch.com/install.ps1' -OutFile install.ps1" -ForegroundColor Yellow
+    Write-Host "  Invoke-WebRequest -Uri 'https://share.kihub.ch/hermes/install.ps1' -OutFile install.ps1" -ForegroundColor Yellow
     Write-Host "  .\install.ps1" -ForegroundColor Yellow
     Write-Host ""
 }

@@ -47,7 +47,7 @@ Options:
                         Requests map to DIR/<host>/<path>; no URL is forwarded.
   --installer PATH      With `install`, serve PATH at the canonical install.sh
                         URL. Default: scripts/install.sh in this worktree.
-  --from-main           With `install`, fetch the real upstream main installer
+  --from-main           With `install`, fetch the Crosslink main installer
                         and repository, then advance fake main to this folder
                         after a successful install for update testing.
                         Shorthand for --install-ref refs/heads/main.
@@ -95,7 +95,7 @@ Examples:
   # skipping `hermes setup` & the browser tools for speed.
   scripts/dev-sandbox.sh install --persistent -- --skip-setup --skip-browser
 
-  # Install the official upstream main. You're dropped into a shell where
+  # Install the official Crosslink main. You're dropped into a shell where
   # you can run `hermes update`.
   scripts/dev-sandbox.sh install --persistent --from-main
 
@@ -109,13 +109,13 @@ SEED_DIR=""
 HTTP_ROOT=""
 INSTALL_SHORTCUT=false
 INSTALLER_PATH=""
-# Which upstream commit the sandbox installs before the update routes run.
-# Empty means "install this worktree's own installer" (no upstream fetch); set,
+# Which distribution commit the sandbox installs before the update routes run.
+# Empty means "install this worktree's own installer" (no remote fetch); set,
 # it is anything git can resolve -- a branch, a tag (v2026.7.7), or a SHA
 # reachable from main -- so "can a user two releases back still update?" is
 # expressible. --from-main is shorthand for refs/heads/main.
 INSTALL_REF=""
-UPSTREAM_URL="${HERMES_DEV_SANDBOX_UPSTREAM:-https://github.com/NousResearch/hermes-agent.git}"
+UPSTREAM_URL="${HERMES_DEV_SANDBOX_UPSTREAM:-https://github.com/crosslink-ch/hermes-agent.git}"
 
 if [ "${1:-}" = install ]; then
   INSTALL_SHORTCUT=true
@@ -221,7 +221,7 @@ mkdir -p "$SANDBOX_ROOT"/{root,home,etc}
 UPSTREAM_REPO=""
 UPSTREAM_COMMIT=""
 if [ -n "$INSTALL_REF" ]; then
-  echo "[sandbox] fetching upstream $INSTALL_REF for installer/update test" >&2
+  echo "[sandbox] fetching Crosslink $INSTALL_REF for installer/update test" >&2
   UPSTREAM_REPO="$(mktemp -d -t hermes-sandbox-upstream.XXXXXX)"
   git -C "$UPSTREAM_REPO" init -q
   # Fetch the ref as given. A branch or tag name resolves on its own; a raw SHA
@@ -239,7 +239,7 @@ if [ -n "$INSTALL_REF" ]; then
     :
   else
     rm -rf -- "$UPSTREAM_REPO"
-    echo "error: could not resolve upstream ref: $INSTALL_REF" >&2
+    echo "error: could not resolve Crosslink ref: $INSTALL_REF" >&2
     echo '       Use a branch (main), a tag (v2026.7.7), or a SHA reachable from main.' >&2
     exit 1
   fi
@@ -266,16 +266,16 @@ if [ -n "$HTTP_ROOT" ]; then
   cp -a "$HTTP_ROOT/." "$SANDBOX_ROOT/root/http/"
 fi
 if [ "$INSTALL_SHORTCUT" = true ]; then
-  mkdir -p "$SANDBOX_ROOT/root/http/hermes-agent.nousresearch.com"
+  mkdir -p "$SANDBOX_ROOT/root/http/share.kihub.ch/hermes"
   if [ -n "$INSTALL_REF" ]; then
     git -C "$UPSTREAM_REPO" show "$UPSTREAM_COMMIT:scripts/install.sh" \
-      > "$SANDBOX_ROOT/root/http/hermes-agent.nousresearch.com/install.sh"
+      > "$SANDBOX_ROOT/root/http/share.kihub.ch/hermes/install.sh"
   else
-    cp -a "$INSTALLER_PATH" "$SANDBOX_ROOT/root/http/hermes-agent.nousresearch.com/install.sh"
+    cp -a "$INSTALLER_PATH" "$SANDBOX_ROOT/root/http/share.kihub.ch/hermes/install.sh"
   fi
   set -- bash -c '
     set +e
-    curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- "$@"
+    curl -fsSL https://share.kihub.ch/hermes/install.sh | bash -s -- "$@"
     install_status=$?
     if [ "$install_status" -eq 0 ] && [ -f /work/promote-main ]; then
       next_main=$(cat /work/promote-main)
@@ -455,7 +455,7 @@ chmod 700 "$SANDBOX_ROOT/root/usr/bin/ssh"
 cp "$SANDBOX_ASSETS/proxy.py" "$SANDBOX_ROOT/root/proxy.py"
 
 if [ -n "$INSTALL_REF" ]; then
-  echo "[sandbox] fake main: upstream $INSTALL_REF ($UPSTREAM_COMMIT)" >&2
+  echo "[sandbox] fake main: Crosslink $INSTALL_REF ($UPSTREAM_COMMIT)" >&2
   echo "[sandbox] prepared update: current folder ($SOURCE_REF)" >&2
 else
   echo "[sandbox] fake main: current folder ($SOURCE_REF)" >&2

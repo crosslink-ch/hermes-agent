@@ -84,21 +84,37 @@ test('existing checkout detection requires git metadata', () => {
 test('fresh bootstrap args include the packaged commit pin', () => {
   const installStamp = { commit: 'a'.repeat(40), branch: 'main' }
 
-  assert.deepEqual(buildPinArgs(installStamp), ['-Commit', installStamp.commit, '-Branch', 'main'])
+  assert.deepEqual(buildPinArgs(installStamp), [
+    '-MigrateLegacyOrigin',
+    '-Commit',
+    installStamp.commit,
+    '-Branch',
+    'main'
+  ])
   assert.deepEqual(
     buildPosixPinArgs({
       installStamp,
       activeRoot: '/tmp/hermes-agent',
       hermesHome: '/tmp/hermes'
     }),
-    ['--dir', '/tmp/hermes-agent', '--hermes-home', '/tmp/hermes', '--branch', 'main', '--commit', installStamp.commit]
+    [
+      '--migrate-legacy-origin',
+      '--dir',
+      '/tmp/hermes-agent',
+      '--hermes-home',
+      '/tmp/hermes',
+      '--branch',
+      'main',
+      '--commit',
+      installStamp.commit
+    ]
   )
 })
 
 test('existing-checkout bootstrap args keep branch but skip the packaged commit pin', () => {
   const installStamp = { commit: 'a'.repeat(40), branch: 'main' }
 
-  assert.deepEqual(buildPinArgs(installStamp, { pinCommit: false }), ['-Branch', 'main'])
+  assert.deepEqual(buildPinArgs(installStamp, { pinCommit: false }), ['-MigrateLegacyOrigin', '-Branch', 'main'])
   assert.deepEqual(
     buildPosixPinArgs({
       installStamp,
@@ -106,7 +122,7 @@ test('existing-checkout bootstrap args keep branch but skip the packaged commit 
       hermesHome: '/tmp/hermes',
       pinCommit: false
     }),
-    ['--dir', '/tmp/hermes-agent', '--hermes-home', '/tmp/hermes', '--branch', 'main']
+    ['--migrate-legacy-origin', '--dir', '/tmp/hermes-agent', '--hermes-home', '/tmp/hermes', '--branch', 'main']
   )
 })
 
@@ -120,14 +136,14 @@ test('fallback install stamps use an unpinned branch ref', () => {
     pinned: false
   })
   // Must NOT pass -Commit / --commit for the all-zero placeholder.
-  assert.deepEqual(buildPinArgs(stamp), ['-Branch', 'main'])
+  assert.deepEqual(buildPinArgs(stamp), ['-MigrateLegacyOrigin', '-Branch', 'main'])
   assert.deepEqual(
     buildPosixPinArgs({
       installStamp: stamp,
       activeRoot: '/tmp/hermes',
       hermesHome: '/tmp/home'
     }),
-    ['--dir', '/tmp/hermes', '--hermes-home', '/tmp/home', '--branch', 'main']
+    ['--migrate-legacy-origin', '--dir', '/tmp/hermes', '--hermes-home', '/tmp/home', '--branch', 'main']
   )
 })
 
