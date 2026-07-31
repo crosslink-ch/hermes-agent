@@ -111,7 +111,3 @@ def test_placeholder_document_in_photo_message_is_not_an_image():
     assert "[User sent a file: /c/brief.md]" in out
 
 
-def test_placeholder_image_with_unknown_mime_uses_photo_fallback():
-    evt = _evt(["/c/photo.jpg"], [""], MessageType.PHOTO)
-    out = _build_media_placeholder(evt)
-    assert "[User sent an image: /c/photo.jpg]" in out

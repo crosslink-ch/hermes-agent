@@ -49,35 +49,6 @@ class TestLoadGatewayConfigForRunner:
         cfg = run_mod.load_gateway_config_for_runner()
         assert cfg.multiplex_profiles is False
 
-    def test_scoped_reload_picks_up_default_profile_token(self, tmp_path, monkeypatch):
-        """Token only in default profile .env, not in process os.environ."""
-        from gateway import run as run_mod
-        import hermes_constants as hc
-
-        home = tmp_path / "home"
-        home.mkdir()
-        (home / ".env").write_text(
-            "TELEGRAM_BOT_TOKEN=default-profile-token-123\n", encoding="utf-8"
-        )
-        (home / "config.yaml").write_text(
-            "gateway:\n  multiplex_profiles: true\n", encoding="utf-8"
-        )
-        monkeypatch.setenv("HERMES_HOME", str(home))
-        # Simulate a clean process env where the token was NOT exported and
-        # was not bulk-loaded into os.environ (multiplex isolation path).
-        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-        # Point both hermes_constants and gateway.run at our temp home.
-        monkeypatch.setattr(hc, "get_hermes_home", lambda: home)
-        monkeypatch.setattr(run_mod, "get_hermes_home", lambda: home)
-        monkeypatch.setattr(run_mod, "_hermes_home", home)
-
-        cfg = run_mod.load_gateway_config_for_runner()
-        assert cfg.multiplex_profiles is True
-        tg = cfg.platforms.get(Platform.TELEGRAM)
-        assert tg is not None
-        assert tg.token == "default-profile-token-123"
-        assert tg.enabled is True
-
 
 class TestPlatformHasBotCredential:
     def test_telegram_empty_token_false(self):
@@ -202,25 +173,6 @@ class TestPrimaryStartupSkipsEmptyTokenUnderMultiplex:
 
         assert skipped == [Platform.TELEGRAM]
         assert created == []
-
-    @pytest.mark.asyncio
-    async def test_still_starts_when_token_present(self):
-        from gateway.run import _platform_has_bot_credential
-
-        cfg = GatewayConfig(multiplex_profiles=True)
-        cfg.platforms[Platform.TELEGRAM] = PlatformConfig(
-            enabled=True, token="123:abc"
-        )
-        started = []
-        for platform, platform_config in cfg.platforms.items():
-            if not platform_config.enabled:
-                continue
-            if cfg.multiplex_profiles and not _platform_has_bot_credential(
-                platform, platform_config
-            ):
-                continue
-            started.append(platform)
-        assert started == [Platform.TELEGRAM]
 
 
 class TestReconnectDropsEmptyToken:

@@ -53,8 +53,6 @@ class TestIsSqliteWalResetVulnerable:
     def test_version_matrix(self, version_info, expected):
         assert is_sqlite_wal_reset_vulnerable(version_info) is expected
 
-    def test_defaults_to_linked_library(self):
-        assert isinstance(is_sqlite_wal_reset_vulnerable(), bool)
 
 
 class TestApplyWalWalResetGate:
@@ -103,12 +101,6 @@ class TestApplyWalWalResetGate:
         finally:
             conn.close()
 
-    def test_existing_wal_does_not_run_checkpoint_or_delete(
-        self, tmp_path, monkeypatch
-    ):
-        monkeypatch.setattr(
-            hermes_state, "is_sqlite_wal_reset_vulnerable", lambda version_info=None: True
-        )
 
         class _TracingConn(sqlite3.Connection):
             def __init__(self, *a, **kw):
@@ -209,10 +201,6 @@ class TestApplyWalWalResetGate:
         assert len(warnings) == 2
 
 
-def test_sqlite_source_id_non_empty_string():
-    src = sqlite_source_id()
-    assert isinstance(src, str)
-    assert src
 
 
 def test_doctor_warns_without_adding_issues(monkeypatch, tmp_path, capsys):

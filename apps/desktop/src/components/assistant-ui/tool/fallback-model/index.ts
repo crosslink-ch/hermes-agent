@@ -57,7 +57,7 @@ export function countDiffLineStats(diff: string): DiffLineStats {
   return { added, removed }
 }
 
-function fileEditPath(args: Record<string, unknown>, result: Record<string, unknown>): string {
+export function fileEditPath(args: Record<string, unknown>, result: Record<string, unknown>): string {
   return (
     firstStringField(args, ['path', 'file', 'filepath']) ||
     firstStringField(result, ['path', 'file', 'filepath', 'resolved_path']) ||
@@ -65,7 +65,7 @@ function fileEditPath(args: Record<string, unknown>, result: Record<string, unkn
   )
 }
 
-function fileEditBasename(path: string): string {
+export function fileEditBasename(path: string): string {
   const normalized = path.replace(/\\/g, '/').trim()
 
   return normalized.split('/').filter(Boolean).pop() || normalized
@@ -128,9 +128,14 @@ function readFileDisplayTarget(args: Record<string, unknown>, result: Record<str
   return [fileEditBasename(path), lineLabel].filter(Boolean).join(' ')
 }
 
+// The real command, preferring the actual argument over the backend's
+// display preview. `context` is a *summarized* preview ("sleep 70 + 2
+// commands") the gateway sends on tool.start before real args arrive — fine
+// as a placeholder for the live title, wrong for the `$` transcript, which
+// must show what actually ran.
 function shellCommand(args: Record<string, unknown>): string {
   return (
-    firstStringField(args, ['context', 'preview']) || firstStringField(args, ['command', 'code']) || contextValue(args)
+    firstStringField(args, ['command', 'code']) || firstStringField(args, ['context', 'preview']) || contextValue(args)
   )
 }
 
@@ -511,6 +516,16 @@ function toolResultCount(
     }
   }
 
+  // Memory success payloads put the live total on `entry_count` — keep the noun
+  // as entry/entries instead of falling through the generic `*_count` path.
+  if (part.toolName === 'memory') {
+    const entryTotal = countFromUnknown(resultRecord.entry_count)
+
+    if (entryTotal !== null) {
+      return countMetric(entryTotal, 'entry')
+    }
+  }
+
   const directCount = countFromRecord(resultRecord, fallbackNounByTool)
 
   if (directCount !== null) {
@@ -580,7 +595,7 @@ function summarizeBrowserSnapshot(snapshot: string): string {
   return labels.length ? `${stats}\nTop controls: ${labels.join(', ')}` : stats
 }
 
-function firstStringField(record: Record<string, unknown>, keys: readonly string[]): string {
+export function firstStringField(record: Record<string, unknown>, keys: readonly string[]): string {
   for (const key of keys) {
     const value = record[key]
 
@@ -694,14 +709,20 @@ function toolStatus(part: ToolPart, resultRecord: Record<string, unknown>): Tool
     return 'running'
   }
 
+  // Explicit success wins over isError / nested-error heuristics. Memory writes
+  // return `{ success: true }` when the batch landed; a stale outer `isError`
+  // envelope must not paint a real save amber.
+  if (resultRecord.success === true || resultRecord.ok === true) {
+    return 'success'
+  }
+
   if (!toolErrorText(part, resultRecord)) {
     return 'success'
   }
 
   // A rejected memory write is a budget negotiation, not a failure: the store
-  // refuses an over-limit batch and the agent immediately retries a smaller
-  // one. Painting the row destructive-red puts an alarm next to routine
-  // bookkeeping the user never has to act on. Amber says "noted" instead.
+  // refuses an over-limit batch and the agent retries smaller. Soft warning —
+  // never destructive-red beside routine bookkeeping.
   return part.toolName === 'memory' ? 'warning' : 'error'
 }
 
@@ -1079,6 +1100,13 @@ function toolDetailText(
     if (output || lines) {
       return [output, lines].filter(Boolean).join('\n')
     }
+
+    // A terminal row with no output already shows its command in the `$`
+    // transcript above; the generic fallback would print the same string a
+    // second time. `execute_code` has no transcript, so it keeps the fallback.
+    if (part.toolName === 'terminal') {
+      return ''
+    }
   }
 
   if (part.toolName === 'web_extract') {
@@ -1383,8 +1411,18 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
   const resultRecord = parseMaybeObject(part.result)
   const meta = toolMeta(part.toolName)
   const status = toolStatus(part, resultRecord)
-  const error = toolErrorText(part, resultRecord)
-  const baseTitle = part.result === undefined ? meta.pending : meta.done
+  // Skip residual error-heuristic text once status is success (stale isError
+  // envelope over a landed memory write would otherwise foul the subtitle).
+  const error = status === 'success' ? '' : toolErrorText(part, resultRecord)
+  // Over-budget memory refusals stay amber — don't claim "Saved".
+  const memoryMissed = part.toolName === 'memory' && part.result !== undefined && status !== 'success'
+
+  const baseTitle =
+    part.result === undefined
+      ? meta.pending
+      : memoryMissed
+        ? translateNow('assistant.tool.memoryWriteNoted')
+        : meta.done
 
   const titleParts = dynamicTitle(
     part,
