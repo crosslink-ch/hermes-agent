@@ -34,7 +34,16 @@ except ImportError:  # pragma: no cover - exercised by check_thechat_requirement
 
 from gateway.config import Platform, PlatformConfig
 from gateway.http_routes import loopback_route
-from gateway.inbound_event_ledger import reserve_inbound_event
+from gateway.inbound_event_ledger import (
+    InboundEventCapacityError,
+    InboundEventConflictError,
+    accept_inbound_event,
+    claim_inbound_event,
+    complete_inbound_event,
+    fail_inbound_event,
+    list_recoverable_inbound_events,
+    renew_inbound_event_lease,
+)
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -53,6 +62,9 @@ _DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 _DEFAULT_WEBHOOK_PORT = 8765
 _DEFAULT_WEBHOOK_PATH = "/thechat/webhook"
 _WEBHOOK_MAX_AGE_SECONDS = 300
+_WEBHOOK_INBOX_LEASE_SECONDS = 60.0
+_WEBHOOK_INBOX_RECOVERY_INTERVAL_SECONDS = 1.0
+_WEBHOOK_INBOX_MAX_ATTEMPTS = 5
 _ATTACHMENT_TRANSFER_TIMEOUT_SECONDS = 20.0
 _ATTACHMENT_CONNECT_TIMEOUT_SECONDS = 5.0
 _ATTACHMENT_POLL_TIMEOUT_SECONDS = 120.0
@@ -149,6 +161,8 @@ class TheChatAdapter(BasePlatformAdapter):
         self._web_runner: Optional[Any] = None
         self._web_site: Optional[Any] = None
         self._webhook_tasks: set[asyncio.Task] = set()
+        self._webhook_recovery_task: Optional[asyncio.Task] = None
+        self._webhook_lease_owner = f"{os.getpid()}:{uuid.uuid4().hex}"
         self._webhook_secret = ""
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self._event_contexts: Dict[str, Dict[str, Any]] = {}
@@ -217,6 +231,9 @@ class TheChatAdapter(BasePlatformAdapter):
 
         self._mark_connected()
         if self.webhook_url:
+            self._webhook_recovery_task = asyncio.create_task(
+                self._webhook_recovery_loop()
+            )
             logger.info(
                 "TheChat adapter connected to %s in webhook mode at %s",
                 self.base_url,
@@ -232,6 +249,13 @@ class TheChatAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         self._running = False
+        if self._webhook_recovery_task:
+            self._webhook_recovery_task.cancel()
+            try:
+                await self._webhook_recovery_task
+            except asyncio.CancelledError:
+                pass
+            self._webhook_recovery_task = None
         if self._poll_task:
             self._poll_task.cancel()
             try:
@@ -1763,8 +1787,117 @@ class TheChatAdapter(BasePlatformAdapter):
         ).hexdigest()
         return hmac.compare_digest(signature, expected)
 
+    def _inbound_event_source(self) -> str:
+        return f"thechat:{self.base_url}"
+
+    def _schedule_durable_webhook_event(self, event_id: str) -> None:
+        task = asyncio.create_task(
+            self._process_durable_webhook_event(event_id),
+            name=f"thechat-webhook-{event_id}",
+        )
+        self._webhook_tasks.add(task)
+        task.add_done_callback(self._webhook_tasks.discard)
+
+    async def _webhook_recovery_loop(self) -> None:
+        while self._running:
+            try:
+                event_ids = await asyncio.to_thread(
+                    list_recoverable_inbound_events,
+                    source=self._inbound_event_source(),
+                    max_attempts=_WEBHOOK_INBOX_MAX_ATTEMPTS,
+                )
+                for event_id in event_ids:
+                    self._schedule_durable_webhook_event(event_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("TheChat: failed to scan durable webhook inbox")
+            await asyncio.sleep(_WEBHOOK_INBOX_RECOVERY_INTERVAL_SECONDS)
+
+    async def _renew_durable_webhook_lease(self, event_id: str) -> None:
+        interval = _WEBHOOK_INBOX_LEASE_SECONDS / 3
+        while True:
+            await asyncio.sleep(interval)
+            renewed = await asyncio.to_thread(
+                renew_inbound_event_lease,
+                source=self._inbound_event_source(),
+                event_id=event_id,
+                lease_owner=self._webhook_lease_owner,
+                lease_seconds=_WEBHOOK_INBOX_LEASE_SECONDS,
+            )
+            if not renewed:
+                return
+
+    async def _process_durable_webhook_event(self, event_id: str) -> None:
+        try:
+            claim = await asyncio.to_thread(
+                claim_inbound_event,
+                source=self._inbound_event_source(),
+                event_id=event_id,
+                lease_owner=self._webhook_lease_owner,
+                lease_seconds=_WEBHOOK_INBOX_LEASE_SECONDS,
+                max_attempts=_WEBHOOK_INBOX_MAX_ATTEMPTS,
+            )
+        except Exception:
+            logger.exception("TheChat: failed to claim durable webhook event %s", event_id)
+            return
+        if claim is None:
+            return
+
+        lease_task = asyncio.create_task(
+            self._renew_durable_webhook_lease(event_id),
+            name=f"thechat-webhook-lease-{event_id}",
+        )
+        try:
+            payload = json.loads(claim.payload)
+            event = self._extract_webhook_event(payload)
+            succeeded = await self._handle_platform_event_safely(event)
+            if succeeded:
+                await asyncio.to_thread(
+                    complete_inbound_event,
+                    source=self._inbound_event_source(),
+                    event_id=event_id,
+                    lease_owner=self._webhook_lease_owner,
+                )
+            else:
+                await asyncio.to_thread(
+                    fail_inbound_event,
+                    source=self._inbound_event_source(),
+                    event_id=event_id,
+                    lease_owner=self._webhook_lease_owner,
+                    error="platform event handler failed",
+                    retry_delay_seconds=min(60.0, float(2 ** (claim.attempt - 1))),
+                )
+        except asyncio.CancelledError:
+            await asyncio.to_thread(
+                fail_inbound_event,
+                source=self._inbound_event_source(),
+                event_id=event_id,
+                lease_owner=self._webhook_lease_owner,
+                error="webhook processing interrupted",
+                retry_delay_seconds=0.0,
+            )
+            raise
+        except Exception as exc:
+            logger.exception("TheChat: durable webhook processing failed for %s", event_id)
+            await asyncio.to_thread(
+                fail_inbound_event,
+                source=self._inbound_event_source(),
+                event_id=event_id,
+                lease_owner=self._webhook_lease_owner,
+                error=str(exc),
+                retry_delay_seconds=min(60.0, float(2 ** (claim.attempt - 1))),
+            )
+        finally:
+            lease_task.cancel()
+            await asyncio.gather(lease_task, return_exceptions=True)
+
     async def _handle_webhook(self, request):
-        body = await request.text()
+        body_bytes = await request.read()
+        try:
+            body = body_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
         if not self._is_authorized_webhook_request(request.headers, body):
             return web.json_response({"error": "Unauthorized"}, status=401)
         try:
@@ -1776,21 +1909,13 @@ class TheChatAdapter(BasePlatformAdapter):
             return web.json_response({"error": "Invalid JSON"}, status=400)
 
         try:
-            receipt = await asyncio.to_thread(
-                reserve_inbound_event,
-                source=f"thechat:{self.base_url}",
+            acceptance = await asyncio.to_thread(
+                accept_inbound_event,
+                source=self._inbound_event_source(),
                 event_id=event["invocationId"],
-                payload=body,
+                payload=body_bytes,
             )
-        except Exception:
-            logger.exception("TheChat: failed to reserve signed webhook event")
-            return web.json_response(
-                {"error": "Webhook receiver temporarily unavailable"},
-                status=503,
-            )
-        if receipt == "duplicate":
-            return web.json_response({"ok": True, "duplicate": True})
-        if receipt == "conflict":
+        except InboundEventConflictError:
             logger.warning(
                 "TheChat: rejected conflicting payload for invocation %s",
                 event["invocationId"],
@@ -1799,14 +1924,28 @@ class TheChatAdapter(BasePlatformAdapter):
                 {"error": "Conflicting webhook invocation"},
                 status=409,
             )
+        except InboundEventCapacityError:
+            logger.error("TheChat: durable webhook inbox is at capacity")
+            return web.json_response(
+                {"error": "Webhook receiver temporarily unavailable"},
+                status=503,
+            )
+        except Exception:
+            logger.exception("TheChat: failed to durably accept signed webhook event")
+            return web.json_response(
+                {"error": "Webhook receiver temporarily unavailable"},
+                status=503,
+            )
+        if acceptance.status == "completed":
+            return web.json_response({"ok": True, "duplicate": True})
 
-        task = asyncio.create_task(
-            self._handle_platform_event_safely(event),
-            name=f"thechat-webhook-{event['invocationId']}",
+        # New and pending duplicates both schedule a claimant. SQLite leases
+        # ensure only one task processes the payload, while a duplicate request
+        # repairs the scheduling side of an ambiguous earlier acknowledgement.
+        self._schedule_durable_webhook_event(event["invocationId"])
+        return web.json_response(
+            {"ok": True, "duplicate": acceptance.status == "pending"}
         )
-        self._webhook_tasks.add(task)
-        task.add_done_callback(self._webhook_tasks.discard)
-        return web.json_response({"ok": True})
 
     def _extract_webhook_event(self, payload: Any) -> Dict[str, Any]:
         if not isinstance(payload, dict):
@@ -1905,9 +2044,10 @@ class TheChatAdapter(BasePlatformAdapter):
                 logger.warning("TheChat: polling failed: %s", exc)
             await asyncio.sleep(self.poll_interval)
 
-    async def _handle_platform_event_safely(self, item: Dict[str, Any]) -> None:
+    async def _handle_platform_event_safely(self, item: Dict[str, Any]) -> bool:
         try:
             await self._handle_platform_event(item)
+            return True
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1926,6 +2066,7 @@ class TheChatAdapter(BasePlatformAdapter):
                         "TheChat: failed to report platform event processing failure",
                         exc_info=True,
                     )
+            return False
 
     async def _handle_platform_event(self, item: Dict[str, Any]) -> None:
         item = self._validate_platform_event(item)

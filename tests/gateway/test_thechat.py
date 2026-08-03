@@ -161,8 +161,8 @@ class _WebhookRequest:
         self._body = body
         self.headers = headers
 
-    async def text(self):
-        return self._body
+    async def read(self):
+        return self._body.encode()
 
 
 def _signed_webhook_request(adapter, payload, *, timestamp=None):
@@ -1262,8 +1262,9 @@ async def test_signed_webhook_replays_are_deduplicated_durably(tmp_path, monkeyp
     adapter._webhook_secret = "whsec-test"
     handled = []
 
-    async def handle(event):
-        handled.append(event["invocationId"])
+    async def handle(item):
+        handled.append(item["invocationId"])
+        return True
 
     adapter._handle_platform_event_safely = handle
     payload = {
@@ -1325,6 +1326,54 @@ async def test_signed_webhook_replays_are_deduplicated_durably(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_accepted_webhook_is_recovered_after_worker_cancellation(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _make_adapter()
+    adapter._webhook_secret = "whsec-test"
+    started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def block_until_cancelled(item):
+        assert item["invocationId"] == INVOCATION_ID
+        started.set()
+        await never.wait()
+        return True
+
+    adapter._handle_platform_event_safely = block_until_cancelled
+    payload = {
+        "type": "thechat.hermes_platform.event",
+        "event": _platform_item(),
+    }
+
+    response = await adapter._handle_webhook(_signed_webhook_request(adapter, payload))
+    assert response.status == 200
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    tasks = list(adapter._webhook_tasks)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    restarted = _make_adapter()
+    restarted._webhook_secret = "whsec-test"
+    recovered = []
+
+    async def handle_recovered(item):
+        recovered.append(item["invocationId"])
+        return True
+
+    restarted._handle_platform_event_safely = handle_recovered
+    await restarted._process_durable_webhook_event(INVOCATION_ID)
+
+    assert recovered == [INVOCATION_ID]
+    replay = await restarted._handle_webhook(
+        _signed_webhook_request(restarted, payload, timestamp=int(time.time()) + 1)
+    )
+    assert replay.status == 200
+    assert json.loads(replay.text) == {"ok": True, "duplicate": True}
+
+
+@pytest.mark.asyncio
 async def test_signed_webhook_fails_closed_when_replay_ledger_is_unavailable(
     tmp_path, monkeypatch
 ):
@@ -1335,7 +1384,7 @@ async def test_signed_webhook_fails_closed_when_replay_ledger_is_unavailable(
     def fail_reservation(**_kwargs):
         raise OSError("state database unavailable")
 
-    monkeypatch.setattr(thechat, "reserve_inbound_event", fail_reservation)
+    monkeypatch.setattr(thechat, "accept_inbound_event", fail_reservation)
     payload = {
         "type": "thechat.hermes_platform.event",
         "event": _platform_item(),
