@@ -1,9 +1,11 @@
 """TheChat platform adapter.
 
 TheChat exposes queued Hermes bot invocations either through REST polling or
-by pushing them to a webhook URL configured on the bot record. This adapter
-feeds those events into the normal Hermes gateway message pipeline and posts
-the gateway response back to TheChat as the configured bot.
+by pushing them to a webhook URL configured on the bot record. Webhook mode
+uses a timestamped HMAC secret returned by authenticated registration, keeping
+the Better Auth bot API key outbound-only. This adapter feeds those events into
+the normal Hermes gateway message pipeline and posts the gateway response back
+to TheChat as the configured bot.
 """
 
 from __future__ import annotations
@@ -11,10 +13,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
+import json
 import logging
 import mimetypes
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
@@ -29,6 +34,7 @@ except ImportError:  # pragma: no cover - exercised by check_thechat_requirement
 
 from gateway.config import Platform, PlatformConfig
 from gateway.http_routes import loopback_route
+from gateway.inbound_event_ledger import reserve_inbound_event
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -46,6 +52,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 _DEFAULT_WEBHOOK_PORT = 8765
 _DEFAULT_WEBHOOK_PATH = "/thechat/webhook"
+_WEBHOOK_MAX_AGE_SECONDS = 300
 _ATTACHMENT_TRANSFER_TIMEOUT_SECONDS = 20.0
 _ATTACHMENT_CONNECT_TIMEOUT_SECONDS = 5.0
 _ATTACHMENT_POLL_TIMEOUT_SECONDS = 120.0
@@ -142,6 +149,7 @@ class TheChatAdapter(BasePlatformAdapter):
         self._web_runner: Optional[Any] = None
         self._web_site: Optional[Any] = None
         self._webhook_tasks: set[asyncio.Task] = set()
+        self._webhook_secret = ""
         self._contexts: Dict[str, Dict[str, Any]] = {}
         self._event_contexts: Dict[str, Dict[str, Any]] = {}
         # session_key -> context of the invocation that requested an exec
@@ -244,6 +252,7 @@ class TheChatAdapter(BasePlatformAdapter):
         if self._client:
             await self._client.aclose()
             self._client = None
+        self._webhook_secret = ""
         self._mark_disconnected()
 
     async def send(
@@ -1698,6 +1707,11 @@ class TheChatAdapter(BasePlatformAdapter):
             "/bots/me/webhook", json={"url": self.webhook_url}
         )
         response.raise_for_status()
+        data = response.json()
+        secret = data.get("webhookSecret") if isinstance(data, dict) else None
+        if not isinstance(secret, str) or not secret:
+            raise RuntimeError("TheChat webhook registration did not return a secret")
+        self._webhook_secret = secret
 
     async def _register_commands(self) -> None:
         """Register the gateway's slash commands with TheChat.
@@ -1720,19 +1734,71 @@ class TheChatAdapter(BasePlatformAdapter):
             hidden_count,
         )
 
-    def _is_authorized_webhook_request(self, headers: Any) -> bool:
-        return headers.get("Authorization", "") == f"Bearer {self.token}"
+    def _is_authorized_webhook_request(
+        self,
+        headers: Any,
+        body: str,
+        *,
+        now: Optional[float] = None,
+    ) -> bool:
+        if not self._webhook_secret:
+            return False
+
+        timestamp_header = headers.get("X-Webhook-Timestamp", "")
+        signature = headers.get("X-Webhook-Signature", "")
+        try:
+            timestamp = int(timestamp_header)
+        except (TypeError, ValueError):
+            return False
+
+        current_time = time.time() if now is None else now
+        if abs(current_time - timestamp) > _WEBHOOK_MAX_AGE_SECONDS:
+            return False
+
+        signed_content = f"{timestamp_header}.{body}".encode()
+        expected = hmac.new(
+            self._webhook_secret.encode(),
+            signed_content,
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(signature, expected)
 
     async def _handle_webhook(self, request):
-        if not self._is_authorized_webhook_request(request.headers):
+        body = await request.text()
+        if not self._is_authorized_webhook_request(request.headers, body):
             return web.json_response({"error": "Unauthorized"}, status=401)
         try:
-            payload = await request.json()
+            payload = json.loads(body)
             event = self._extract_webhook_event(payload)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        try:
+            receipt = await asyncio.to_thread(
+                reserve_inbound_event,
+                source=f"thechat:{self.base_url}",
+                event_id=event["invocationId"],
+                payload=body,
+            )
+        except Exception:
+            logger.exception("TheChat: failed to reserve signed webhook event")
+            return web.json_response(
+                {"error": "Webhook receiver temporarily unavailable"},
+                status=503,
+            )
+        if receipt == "duplicate":
+            return web.json_response({"ok": True, "duplicate": True})
+        if receipt == "conflict":
+            logger.warning(
+                "TheChat: rejected conflicting payload for invocation %s",
+                event["invocationId"],
+            )
+            return web.json_response(
+                {"error": "Conflicting webhook invocation"},
+                status=409,
+            )
 
         task = asyncio.create_task(
             self._handle_platform_event_safely(event),
