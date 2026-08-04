@@ -5522,6 +5522,16 @@ class TurnRunner:
                         effective_session_id,
                         title,
                     )
+                elif (
+                    getattr(ctx.source, "platform", None) == Platform.THECHAT
+                    and getattr(ctx.source, "thread_id", None)
+                ):
+                    thechat_title_callback = self._runner._make_thechat_session_title_callback(
+                        ctx.source,
+                        event_message_id=ctx.event_message_id,
+                    )
+                    if thechat_title_callback is not None:
+                        maybe_auto_title_kwargs["title_callback"] = thechat_title_callback
                 elif self._runner._is_discord_auto_thread_lane(ctx.source) or (
                     self._runner._relay_auto_thread_info(ctx.source) is not None
                 ):
@@ -19552,7 +19562,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         ):
             return None
 
-        adapter = getattr(self, "adapters", {}).get(Platform.THECHAT)
+        adapter = self._adapter_for_source(source)
         sender = getattr(adapter, "send_session_title_update", None) if adapter else None
         if not callable(sender):
             return None
@@ -19595,6 +19605,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 metadata=metadata,
                 context=context_snapshot,
                 loop=loop,
+                adapter=adapter,
             )
 
         return _callback
@@ -19607,6 +19618,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         metadata: Optional[Dict[str, Any]] = None,
         context: Optional[Dict[str, Any]] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        adapter: Optional[Any] = None,
     ) -> None:
         """Schedule a structured TheChat session.title event from auto-title."""
         title = str(title or "").strip()
@@ -19617,7 +19629,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         ):
             return
 
-        adapter = getattr(self, "adapters", {}).get(Platform.THECHAT)
+        if adapter is None:
+            adapter = self._adapter_for_source(source)
         sender = getattr(adapter, "send_session_title_update", None) if adapter else None
         if not callable(sender):
             return
