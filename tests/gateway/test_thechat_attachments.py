@@ -153,7 +153,6 @@ def _platform_event(
         "threadId": thread_id,
         "messageId": "message-1",
         "text": text,
-        "instructions": None,
         "attachments": attachments,
         "sender": {"id": "user-1", "name": "User"},
         "bot": {"id": "bot-1", "userId": "bot-user-1", "name": "Hermes"},
