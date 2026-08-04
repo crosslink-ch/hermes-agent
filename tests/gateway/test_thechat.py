@@ -1,4 +1,8 @@
 import asyncio
+import hashlib
+import hmac
+import json
+import time
 from typing import Any, cast
 
 import httpx
@@ -37,6 +41,8 @@ class _FakeClient:
 
     async def post(self, path, json):
         self.posts.append({"path": path, "json": json})
+        if path == "/bots/me/webhook":
+            return _FakeResponse({"webhookSecret": "whsec-test"})
         return _FakeResponse()
 
     async def aclose(self):
@@ -148,6 +154,32 @@ def _platform_item(
             "workspaceId": "workspace-1",
         },
     }
+
+
+class _WebhookRequest:
+    def __init__(self, body, headers):
+        self._body = body
+        self.headers = headers
+
+    async def read(self):
+        return self._body.encode()
+
+
+def _signed_webhook_request(adapter, payload, *, timestamp=None):
+    body = json.dumps(payload, separators=(",", ":"))
+    timestamp = int(time.time()) if timestamp is None else timestamp
+    signature = hmac.new(
+        adapter._webhook_secret.encode(),
+        f"{timestamp}.{body}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    return _WebhookRequest(
+        body,
+        {
+            "X-Webhook-Timestamp": str(timestamp),
+            "X-Webhook-Signature": signature,
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -1170,17 +1202,198 @@ def test_webhook_url_can_be_configured_explicitly():
     assert adapter.webhook_url == "http://gateway.test/thechat/webhook"
 
 
-def test_webhook_authorization_uses_bot_token():
+@pytest.mark.asyncio
+async def test_webhook_registration_stores_the_one_time_secret():
     adapter = _make_adapter()
 
+    await adapter._register_webhook()
+
+    assert adapter._webhook_secret == "whsec-test"
+
+
+def test_webhook_authorization_uses_registered_hmac_secret():
+    adapter = _make_adapter()
+    adapter._webhook_secret = "whsec-test"
+    body = '{"type":"thechat.hermes_platform.event"}'
+    timestamp = 1_700_000_000
+    signature = hmac.new(
+        b"whsec-test",
+        f"{timestamp}.{body}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    headers = {
+        "X-Webhook-Timestamp": str(timestamp),
+        "X-Webhook-Signature": signature,
+        "Authorization": "Bearer wrong",
+    }
+
+    assert adapter._is_authorized_webhook_request(headers, body, now=timestamp) is True
+    headers["X-Webhook-Signature"] = "0" * 64
+    assert adapter._is_authorized_webhook_request(headers, body, now=timestamp) is False
+
+
+def test_webhook_authorization_rejects_missing_or_stale_signatures():
+    adapter = _make_adapter()
+    body = "{}"
+    timestamp = 1_700_000_000
+
+    assert adapter._is_authorized_webhook_request({}, body, now=timestamp) is False
+
+    adapter._webhook_secret = "whsec-test"
+    signature = hmac.new(
+        b"whsec-test",
+        f"{timestamp}.{body}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    headers = {
+        "X-Webhook-Timestamp": str(timestamp),
+        "X-Webhook-Signature": signature,
+    }
     assert (
-        adapter._is_authorized_webhook_request({"Authorization": "Bearer bot-token"})
-        is True
-    )
-    assert (
-        adapter._is_authorized_webhook_request({"Authorization": "Bearer wrong"})
+        adapter._is_authorized_webhook_request(headers, body, now=timestamp + 301)
         is False
     )
+
+
+@pytest.mark.asyncio
+async def test_signed_webhook_replays_are_deduplicated_durably(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _make_adapter()
+    adapter._webhook_secret = "whsec-test"
+    handled = []
+
+    async def handle(item):
+        handled.append(item["invocationId"])
+        return True
+
+    adapter._handle_platform_event_safely = handle
+    payload = {
+        "type": "thechat.hermes_platform.event",
+        "event": _platform_item(),
+    }
+    timestamp = int(time.time())
+
+    first, concurrent_retry = await asyncio.gather(
+        adapter._handle_webhook(
+            _signed_webhook_request(adapter, payload, timestamp=timestamp)
+        ),
+        adapter._handle_webhook(
+            _signed_webhook_request(adapter, payload, timestamp=timestamp)
+        ),
+    )
+    await asyncio.gather(*adapter._webhook_tasks)
+
+    assert first.status == concurrent_retry.status == 200
+    assert handled == [INVOCATION_ID]
+    assert sorted(
+        json.loads(response.text).get("duplicate", False)
+        for response in (first, concurrent_retry)
+    ) == [False, True]
+
+    fresh_signature_retry = await adapter._handle_webhook(
+        _signed_webhook_request(adapter, payload, timestamp=timestamp + 1)
+    )
+    assert fresh_signature_retry.status == 200
+    assert json.loads(fresh_signature_retry.text) == {"ok": True, "duplicate": True}
+    assert handled == [INVOCATION_ID]
+
+    restarted_adapter = _make_adapter()
+    restarted_adapter._webhook_secret = "whsec-test"
+    restarted_adapter._handle_platform_event_safely = handle
+    after_restart = await restarted_adapter._handle_webhook(
+        _signed_webhook_request(
+            restarted_adapter,
+            payload,
+            timestamp=timestamp + 2,
+        )
+    )
+    assert after_restart.status == 200
+    assert json.loads(after_restart.text) == {"ok": True, "duplicate": True}
+    assert restarted_adapter._webhook_tasks == set()
+    assert handled == [INVOCATION_ID]
+
+    conflicting_payload = json.loads(json.dumps(payload))
+    conflicting_payload["event"]["text"] = "different signed body"
+    conflict = await restarted_adapter._handle_webhook(
+        _signed_webhook_request(
+            restarted_adapter,
+            conflicting_payload,
+            timestamp=timestamp + 3,
+        )
+    )
+    assert conflict.status == 409
+    assert handled == [INVOCATION_ID]
+
+
+@pytest.mark.asyncio
+async def test_accepted_webhook_is_recovered_after_worker_cancellation(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _make_adapter()
+    adapter._webhook_secret = "whsec-test"
+    started = asyncio.Event()
+    never = asyncio.Event()
+
+    async def block_until_cancelled(item):
+        assert item["invocationId"] == INVOCATION_ID
+        started.set()
+        await never.wait()
+        return True
+
+    adapter._handle_platform_event_safely = block_until_cancelled
+    payload = {
+        "type": "thechat.hermes_platform.event",
+        "event": _platform_item(),
+    }
+
+    response = await adapter._handle_webhook(_signed_webhook_request(adapter, payload))
+    assert response.status == 200
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    tasks = list(adapter._webhook_tasks)
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    restarted = _make_adapter()
+    restarted._webhook_secret = "whsec-test"
+    recovered = []
+
+    async def handle_recovered(item):
+        recovered.append(item["invocationId"])
+        return True
+
+    restarted._handle_platform_event_safely = handle_recovered
+    await restarted._process_durable_webhook_event(INVOCATION_ID)
+
+    assert recovered == [INVOCATION_ID]
+    replay = await restarted._handle_webhook(
+        _signed_webhook_request(restarted, payload, timestamp=int(time.time()) + 1)
+    )
+    assert replay.status == 200
+    assert json.loads(replay.text) == {"ok": True, "duplicate": True}
+
+
+@pytest.mark.asyncio
+async def test_signed_webhook_fails_closed_when_replay_ledger_is_unavailable(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _make_adapter()
+    adapter._webhook_secret = "whsec-test"
+
+    def fail_reservation(**_kwargs):
+        raise OSError("state database unavailable")
+
+    monkeypatch.setattr(thechat, "accept_inbound_event", fail_reservation)
+    payload = {
+        "type": "thechat.hermes_platform.event",
+        "event": _platform_item(),
+    }
+
+    response = await adapter._handle_webhook(_signed_webhook_request(adapter, payload))
+
+    assert response.status == 503
+    assert adapter._webhook_tasks == set()
 
 
 def test_webhook_payload_requires_current_envelope_and_event_shape():
