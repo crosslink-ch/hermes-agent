@@ -1969,7 +1969,6 @@ class TheChatAdapter(BasePlatformAdapter):
             "threadId",
             "text",
             "messageId",
-            "instructions",
             "sender",
             "bot",
             "conversation",
@@ -1990,8 +1989,6 @@ class TheChatAdapter(BasePlatformAdapter):
             raise ValueError("TheChat event has an invalid chatType")
         if item["threadId"] is not None and not isinstance(item["threadId"], str):
             raise ValueError("TheChat event has an invalid threadId")
-        if item["instructions"] is not None and not isinstance(item["instructions"], str):
-            raise ValueError("TheChat event has invalid instructions")
         nested_fields = {
             "sender": {"id", "name"},
             "bot": {"id", "userId", "name"},
@@ -2155,7 +2152,6 @@ class TheChatAdapter(BasePlatformAdapter):
                 source=source,
                 raw_message=item,
                 message_id=message_id,
-                channel_prompt=item["instructions"],
                 media_urls=media_urls,
                 media_types=media_types,
             )

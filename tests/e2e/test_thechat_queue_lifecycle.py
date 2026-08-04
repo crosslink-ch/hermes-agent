@@ -100,7 +100,6 @@ def thechat_event(*, invocation_id: str, text: str, message_id: str) -> dict[str
         "threadId": "thread-1",
         "text": text,
         "messageId": message_id,
-        "instructions": None,
         "sender": {"id": "user-1", "name": "Bruno"},
         "bot": {"id": "bot-1", "userId": "bot-user-1", "name": "Koda"},
         "conversation": {

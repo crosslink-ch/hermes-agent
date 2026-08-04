@@ -134,7 +134,6 @@ def _platform_item(
     *,
     text="hello from TheChat",
     thread_id=None,
-    instructions=None,
 ):
     return {
         "id": INVOCATION_ID,
@@ -144,7 +143,6 @@ def _platform_item(
         "invocationId": INVOCATION_ID,
         "messageId": "message-1",
         "text": text,
-        "instructions": instructions,
         "sender": {"id": "user-1", "name": "User"},
         "bot": {"id": "bot-1", "userId": "bot-user-1", "name": "Hermes"},
         "conversation": {
@@ -1108,7 +1106,6 @@ async def test_webhook_event_dispatches_to_gateway_message_handler():
     await adapter._handle_platform_event_safely(
         _platform_item(
             text="hello from webhook",
-            instructions="reply concisely",
         )
     )
 
@@ -1116,7 +1113,7 @@ async def test_webhook_event_dispatches_to_gateway_message_handler():
     event = handled[0]
     assert event.text == "hello from webhook"
     assert event.message_id == "message-1"
-    assert event.channel_prompt == "reply concisely"
+    assert event.channel_prompt is None
     assert event.source.chat_id == CONVERSATION_ID
     assert event.source.chat_type == "dm"
     assert adapter._contexts[CONVERSATION_ID]["invocation_id"] == INVOCATION_ID
