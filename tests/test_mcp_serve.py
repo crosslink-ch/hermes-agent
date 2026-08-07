@@ -1303,6 +1303,7 @@ class TestEventBridgePollE2E:
 
         db_path = tmp_path / "state.db"
         db_path.write_text("placeholder")
+        baseline_mtime_ns = db_path.stat().st_mtime_ns
         session_id = "20260329_150000_history"
         monkeypatch.setattr(
             mcp_serve, "_load_sessions_index",
@@ -1335,7 +1336,8 @@ class TestEventBridgePollE2E:
             "id": 2, "role": "assistant", "content": "arrived after start",
             "timestamp": "2026-03-29T15:05:00",
         })
-        os.utime(db_path, None)  # bump mtime so the poll gate opens
+        bumped_mtime_ns = baseline_mtime_ns + 2_000_000_000
+        os.utime(db_path, ns=(bumped_mtime_ns, bumped_mtime_ns))
         bridge._poll_once(DB())
         events = bridge.poll_events(after_cursor=0)["events"]
         assert len(events) == 1
@@ -1349,6 +1351,7 @@ class TestEventBridgePollE2E:
 
         db_path = tmp_path / "state.db"
         db_path.write_text("placeholder")
+        baseline_mtime_ns = db_path.stat().st_mtime_ns
         index: dict = {}
         messages: dict = {}
         monkeypatch.setattr(mcp_serve, "_load_sessions_index", lambda: dict(index))
@@ -1373,7 +1376,8 @@ class TestEventBridgePollE2E:
             "id": 1, "role": "user", "content": "hello after baseline",
             "timestamp": "2026-03-29T15:10:00",
         }]
-        os.utime(db_path, None)
+        bumped_mtime_ns = baseline_mtime_ns + 2_000_000_000
+        os.utime(db_path, ns=(bumped_mtime_ns, bumped_mtime_ns))
         bridge._poll_once(DB())
 
         events = bridge.poll_events(after_cursor=0)["events"]
