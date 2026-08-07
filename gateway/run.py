@@ -5190,12 +5190,15 @@ class TurnRunner:
         # ------------------------------------------------------------------
         def _clarify_callback_sync(question: str, choices, multi_select: bool = False) -> str:
             from tools import clarify_gateway as _clarify_mod
-            import uuid as _uuid
+            import secrets as _secrets
 
             if not ctx._status_adapter:
                 return ""
 
-            clarify_id = _uuid.uuid4().hex[:10]
+            # Full-width cryptographic id: direct callbacks treat this as the
+            # authority token for one exact waiter, so 40-bit truncated ids are
+            # not sufficient for a long-lived multi-session gateway.
+            clarify_id = _secrets.token_urlsafe(24)
             _clarify_mod.register(
                 clarify_id=clarify_id,
                 session_key=ctx.session_key or "",
@@ -15127,8 +15130,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # so the user can retry; if it times out, the agent unblocks
             # with an empty response.
             if _raw_clarify_reply and not _raw_clarify_reply.startswith("/"):
+                _clarify_resolution: dict[str, str] = {}
                 _resolved = _clarify_mod.resolve_text_response_for_session(
-                    _quick_key, _raw_clarify_reply,
+                    _quick_key,
+                    _raw_clarify_reply,
+                    resolved=_clarify_resolution,
                 )
                 if _resolved:
                     logger.info(
@@ -15150,6 +15156,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 "Failed to resume typing after clarify response",
                                 exc_info=True,
                             )
+                        if (
+                            getattr(
+                                type(_clarify_adapter),
+                                "send_clarify_resolution",
+                                None,
+                            )
+                            is not None
+                        ):
+                            try:
+                                await _clarify_adapter.send_clarify_resolution(
+                                    chat_id=source.chat_id,
+                                    session_key=_clarify_resolution["session_key"],
+                                    request_id=_clarify_resolution["request_id"],
+                                    response=_clarify_resolution["response"],
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "Failed to publish typed clarify resolution",
+                                    exc_info=True,
+                                )
                     # Acknowledge with empty string so adapters that emit
                     # the agent's response don't double-post.  The agent
                     # itself will produce the next user-facing message.

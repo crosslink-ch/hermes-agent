@@ -26,6 +26,7 @@ SESSION_KEY = "agent:main:thechat:dm:chat-1"
 class _FakeResponse:
     def __init__(self, data=None):
         self._data = data or {"messageId": "thechat-message-1"}
+        self.status_code = 200
 
     def raise_for_status(self):
         return None
@@ -78,6 +79,11 @@ def _make_adapter():
     )
     adapter._client = cast(httpx.AsyncClient, _FakeClient())
     return adapter
+
+
+async def _drain_webhook_tasks(adapter):
+    while adapter._webhook_tasks:
+        await asyncio.gather(*list(adapter._webhook_tasks))
 
 
 def test_config_loads_only_current_thechat_token_location(tmp_path, monkeypatch):
@@ -839,6 +845,43 @@ async def test_send_exec_approval_honors_gateway_choice_policy(
 
 
 @pytest.mark.asyncio
+async def test_interaction_request_retries_ambiguous_progress_with_same_id():
+    class _AmbiguousProgressClient(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        async def post(self, path, json):
+            self.posts.append({"path": path, "json": json})
+            if json.get("type") == "approval.request":
+                self.attempts += 1
+                if self.attempts == 1:
+                    raise httpx.ReadTimeout("ambiguous progress response")
+            return _FakeResponse()
+
+    adapter = _make_adapter()
+    client = _AmbiguousProgressClient()
+    adapter._client = cast(httpx.AsyncClient, client)
+    adapter._contexts[CONVERSATION_ID] = _context(INVOCATION_ID)
+
+    result = await adapter.send_exec_approval(
+        CONVERSATION_ID,
+        "pwd",
+        session_key=SESSION_KEY,
+        request_id="stable-progress-request",
+    )
+
+    assert result.success is True
+    assert len(client.posts) == 2
+    assert client.posts[0] == client.posts[1]
+    assert (
+        client.posts[0]["json"]["payload"]["requestId"]
+        == "stable-progress-request"
+    )
+    assert "stable-progress-request" in adapter._interaction_requests
+
+
+@pytest.mark.asyncio
 async def test_send_clarify_posts_structured_request_and_keeps_typed_fallback():
     from tools import clarify_gateway
 
@@ -970,6 +1013,44 @@ async def test_send_approval_resolution_targets_requesting_invocation():
         "resolveAll": False,
         "resolvedCount": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_send_approval_resolution_uses_exact_typed_request_ids():
+    adapter = _make_adapter()
+    adapter._contexts[CONVERSATION_ID] = _context("invocation-first")
+    await adapter.send_exec_approval(
+        CONVERSATION_ID,
+        "first command",
+        session_key=SESSION_KEY,
+        request_id="approval-request-first",
+    )
+    adapter._contexts[CONVERSATION_ID] = _context("invocation-second")
+    await adapter.send_exec_approval(
+        CONVERSATION_ID,
+        "second command",
+        session_key=SESSION_KEY,
+        request_id="approval-request-second",
+    )
+
+    result = await adapter.send_approval_resolution(
+        CONVERSATION_ID,
+        session_key=SESSION_KEY,
+        choice="deny",
+        resolved_count=1,
+        request_ids=["approval-request-second"],
+    )
+
+    assert result.success is True
+    resolution_post = adapter._client.posts[-1]
+    assert resolution_post["path"] == (
+        "/hermes-platform/invocations/invocation-second/progress"
+    )
+    assert resolution_post["json"]["payload"]["requestId"] == (
+        "approval-request-second"
+    )
+    assert "approval-request-first" in adapter._interaction_requests
+    assert "approval-request-second" not in adapter._interaction_requests
 
 
 @pytest.mark.asyncio
@@ -1407,6 +1488,7 @@ async def test_direct_approval_resolves_exact_waiter_without_message_dispatch(
         response = await adapter._handle_webhook(
             _signed_webhook_request(adapter, payload)
         )
+        await _drain_webhook_tasks(adapter)
 
         assert response.status == 200
         assert json.loads(response.text) == {"ok": True, "duplicate": False}
@@ -1429,6 +1511,164 @@ async def test_direct_approval_resolves_exact_waiter_without_message_dispatch(
             "resolvedCount": 1,
         }
     finally:
+        _gateway_queues.pop(SESSION_KEY, None)
+
+
+@pytest.mark.asyncio
+async def test_direct_approval_cannot_jump_fifo_head(tmp_path, monkeypatch):
+    from tools.approval import _ApprovalEntry, _gateway_queues
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _make_adapter()
+    adapter._webhook_secret = "whsec-test"
+    adapter._contexts[CONVERSATION_ID] = _context(INVOCATION_ID)
+    first = _ApprovalEntry({"command": "first"}, request_id="approval-first")
+    second = _ApprovalEntry({"command": "second"}, request_id="approval-second")
+    _gateway_queues[SESSION_KEY] = [first, second]
+    await adapter.send_exec_approval(
+        CONVERSATION_ID, "first", SESSION_KEY, request_id=first.request_id
+    )
+    await adapter.send_exec_approval(
+        CONVERSATION_ID, "second", SESSION_KEY, request_id=second.request_id
+    )
+    try:
+        response = await adapter._handle_webhook(
+            _signed_webhook_request(
+                adapter,
+                _interaction_payload(
+                    interaction_id="later-approval-click",
+                    request_id=second.request_id,
+                ),
+            )
+        )
+
+        assert response.status == 409
+        assert not first.event.is_set()
+        assert not second.event.is_set()
+        assert _gateway_queues[SESSION_KEY] == [first, second]
+        assert second.request_id in adapter._interaction_requests
+    finally:
+        _gateway_queues.pop(SESSION_KEY, None)
+
+
+@pytest.mark.asyncio
+async def test_direct_webhook_acks_before_blocked_resolution_publication(
+    tmp_path, monkeypatch
+):
+    from tools.approval import _ApprovalEntry, _gateway_queues
+
+    class _BlockingResolutionClient(_FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.resolution_started = asyncio.Event()
+            self.release_resolution = asyncio.Event()
+
+        async def post(self, path, json):
+            self.posts.append({"path": path, "json": json})
+            if json.get("type") == "approval.resolved":
+                self.resolution_started.set()
+                await self.release_resolution.wait()
+            return _FakeResponse()
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _make_adapter()
+    client = _BlockingResolutionClient()
+    adapter._client = cast(httpx.AsyncClient, client)
+    adapter._webhook_secret = "whsec-test"
+    adapter._contexts[CONVERSATION_ID] = _context(INVOCATION_ID)
+    entry = _ApprovalEntry({"command": "danger"}, request_id="approval-fast-ack")
+    _gateway_queues[SESSION_KEY] = [entry]
+    await adapter.send_exec_approval(
+        CONVERSATION_ID,
+        "danger",
+        SESSION_KEY,
+        request_id=entry.request_id,
+    )
+    try:
+        response = await asyncio.wait_for(
+            adapter._handle_webhook(
+                _signed_webhook_request(
+                    adapter,
+                    _interaction_payload(
+                        interaction_id="fast-ack",
+                        request_id=entry.request_id,
+                    ),
+                )
+            ),
+            timeout=1.0,
+        )
+
+        assert response.status == 200
+        assert entry.event.is_set()
+        await asyncio.wait_for(client.resolution_started.wait(), timeout=1.0)
+        assert entry.request_id in adapter._interaction_requests
+
+        client.release_resolution.set()
+        await _drain_webhook_tasks(adapter)
+        assert entry.request_id not in adapter._interaction_requests
+        assert [post["json"]["type"] for post in client.posts] == [
+            "approval.request",
+            "approval.resolved",
+        ]
+    finally:
+        client.release_resolution.set()
+        await _drain_webhook_tasks(adapter)
+        _gateway_queues.pop(SESSION_KEY, None)
+
+
+@pytest.mark.asyncio
+async def test_direct_webhook_acks_when_ledger_completion_needs_retry(
+    tmp_path, monkeypatch
+):
+    from tools.approval import _ApprovalEntry, _gateway_queues
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _make_adapter()
+    adapter._webhook_secret = "whsec-test"
+    adapter._contexts[CONVERSATION_ID] = _context(INVOCATION_ID)
+    entry = _ApprovalEntry({"command": "danger"}, request_id="approval-ledger-retry")
+    _gateway_queues[SESSION_KEY] = [entry]
+    await adapter.send_exec_approval(
+        CONVERSATION_ID,
+        "danger",
+        SESSION_KEY,
+        request_id=entry.request_id,
+    )
+    real_complete = thechat.complete_inbound_event
+    completion_attempts = 0
+
+    def flaky_complete(**kwargs):
+        nonlocal completion_attempts
+        completion_attempts += 1
+        if completion_attempts < 3:
+            raise OSError("temporary ledger failure")
+        return real_complete(**kwargs)
+
+    monkeypatch.setattr(thechat, "complete_inbound_event", flaky_complete)
+    payload = _interaction_payload(
+        interaction_id="ledger-retry",
+        request_id=entry.request_id,
+    )
+    try:
+        response = await adapter._handle_webhook(
+            _signed_webhook_request(adapter, payload)
+        )
+
+        assert response.status == 200
+        assert entry.event.is_set()
+        await _drain_webhook_tasks(adapter)
+        assert completion_attempts == 3
+
+        replay = await adapter._handle_webhook(
+            _signed_webhook_request(
+                adapter,
+                payload,
+                timestamp=int(time.time()) + 1,
+            )
+        )
+        assert json.loads(replay.text) == {"ok": True, "duplicate": True}
+    finally:
+        await _drain_webhook_tasks(adapter)
         _gateway_queues.pop(SESSION_KEY, None)
 
 
@@ -1479,6 +1719,7 @@ async def test_direct_clarify_resolves_string_or_json_encoded_list(
         webhook_response = await adapter._handle_webhook(
             _signed_webhook_request(adapter, payload)
         )
+        await _drain_webhook_tasks(adapter)
 
         assert webhook_response.status == 200
         assert clarify_gateway.wait_for_response(request_id, timeout=0.1) == (
@@ -1498,6 +1739,74 @@ async def test_direct_clarify_resolves_string_or_json_encoded_list(
         }
     finally:
         clarify_gateway.clear_session(SESSION_KEY)
+
+
+@pytest.mark.asyncio
+async def test_typed_clarify_winner_rejects_late_direct_callback_and_clears_card(
+    tmp_path, monkeypatch
+):
+    from tools import clarify_gateway
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _make_adapter()
+    adapter._webhook_secret = "whsec-test"
+    adapter._contexts[CONVERSATION_ID] = _context(INVOCATION_ID)
+    request_id = "clarify-typed-winner"
+    clarify_gateway.register(
+        request_id,
+        SESSION_KEY,
+        "Pick one",
+        ["alpha", "beta"],
+    )
+    await adapter.send_clarify(
+        CONVERSATION_ID,
+        "Pick one",
+        ["alpha", "beta"],
+        request_id,
+        SESSION_KEY,
+    )
+    resolved = {}
+    assert clarify_gateway.resolve_text_response_for_session(
+        SESSION_KEY,
+        "2",
+        resolved=resolved,
+    ) is True
+
+    losing = await adapter._handle_webhook(
+        _signed_webhook_request(
+            adapter,
+            _interaction_payload(
+                interaction_id="late-direct-clarify",
+                request_type="clarify.request",
+                request_id=request_id,
+                response="alpha",
+            ),
+        )
+    )
+    assert losing.status == 409
+    assert request_id in adapter._interaction_requests
+
+    published = await adapter.send_clarify_resolution(
+        chat_id=CONVERSATION_ID,
+        session_key=SESSION_KEY,
+        request_id=resolved["request_id"],
+        response=resolved["response"],
+    )
+    assert published.success is True
+    assert request_id not in adapter._interaction_requests
+    assert cast(_FakeClient, adapter._client).posts[-1]["json"] == {
+        "botId": "bot-1",
+        "conversationId": CONVERSATION_ID,
+        "type": "clarify.resolved",
+        "status": "completed",
+        "label": "Input received",
+        "payload": {
+            "requestId": request_id,
+            "sessionKey": SESSION_KEY,
+            "response": "beta",
+        },
+    }
+    assert clarify_gateway.wait_for_response(request_id, timeout=0.1) == "beta"
 
 
 @pytest.mark.asyncio
@@ -1662,6 +1971,7 @@ async def test_direct_interaction_duplicate_and_conflicting_reuse(
         first = await adapter._handle_webhook(
             _signed_webhook_request(adapter, payload)
         )
+        await _drain_webhook_tasks(adapter)
         duplicate = await adapter._handle_webhook(
             _signed_webhook_request(adapter, payload, timestamp=int(time.time()) + 1)
         )

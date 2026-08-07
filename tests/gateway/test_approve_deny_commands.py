@@ -181,17 +181,29 @@ class TestBlockingGatewayApproval:
         assert not first.event.is_set()
         assert not second.event.is_set()
 
+        # An id-targeted callback has no authority to jump the FIFO head.
         assert resolve_gateway_approval(
             session_key, "deny", request_id=second.request_id
-        ) == 1
+        ) == 0
         assert not first.event.is_set()
-        assert second.event.is_set()
-        assert second.result == "deny"
+        assert not second.event.is_set()
 
-        # Callers that omit request_id retain the historical FIFO behavior.
-        assert resolve_gateway_approval(session_key, "once") == 1
+        # The head can be resolved by its exact id, after which the next
+        # request becomes authoritative. Callers that omit request_id retain
+        # the historical FIFO behavior.
+        resolved_ids = []
+        assert resolve_gateway_approval(
+            session_key,
+            "once",
+            request_id=first.request_id,
+            resolved_request_ids=resolved_ids,
+        ) == 1
+        assert resolved_ids == [first.request_id]
         assert first.event.is_set()
         assert first.result == "once"
+        assert resolve_gateway_approval(session_key, "deny") == 1
+        assert second.event.is_set()
+        assert second.result == "deny"
 
     def test_notify_callback_receives_queued_request_id(self):
         from tools import approval as approval_module
@@ -386,7 +398,8 @@ class TestApprovalResolutionNotice:
         runner.adapters = {Platform.TELEGRAM: adapter}
         source = _make_source()
         session_key = runner._session_key_for_source(source)
-        _gateway_queues[session_key] = [_ApprovalEntry({"command": "cmd"})]
+        entry = _ApprovalEntry({"command": "cmd"})
+        _gateway_queues[session_key] = [entry]
 
         await runner._handle_approve_command(_make_event("/approve session"))
 
@@ -397,6 +410,7 @@ class TestApprovalResolutionNotice:
                 "choice": "session",
                 "resolved_count": 1,
                 "resolve_all": False,
+                "request_ids": [entry.request_id],
             }
         ]
 
@@ -409,10 +423,12 @@ class TestApprovalResolutionNotice:
         runner.adapters = {Platform.TELEGRAM: adapter}
         source = _make_source()
         session_key = runner._session_key_for_source(source)
-        _gateway_queues[session_key] = [
+        entries = [
             _ApprovalEntry({"command": "cmd1"}),
             _ApprovalEntry({"command": "cmd2"}),
         ]
+        request_ids = [entry.request_id for entry in entries]
+        _gateway_queues[session_key] = entries
 
         await runner._handle_deny_command(_make_event("/deny all"))
 
@@ -423,6 +439,7 @@ class TestApprovalResolutionNotice:
                 "choice": "deny",
                 "resolved_count": 2,
                 "resolve_all": True,
+                "request_ids": request_ids,
             }
         ]
 

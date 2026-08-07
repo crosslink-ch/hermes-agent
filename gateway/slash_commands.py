@@ -5419,7 +5419,13 @@ class GatewaySlashCommandsMixin:
         else:
             choice = "once"
 
-        count = resolve_gateway_approval(session_key, choice, resolve_all=resolve_all)
+        resolved_request_ids: list[str] = []
+        count = resolve_gateway_approval(
+            session_key,
+            choice,
+            resolve_all=resolve_all,
+            resolved_request_ids=resolved_request_ids,
+        )
         if not count:
             return t("gateway.approve.no_pending")
 
@@ -5428,7 +5434,13 @@ class GatewaySlashCommandsMixin:
         if _adapter:
             _adapter.resume_typing_for_chat(source.chat_id)
             await self._notify_approval_resolution(
-                _adapter, source, session_key, choice, count, resolve_all
+                _adapter,
+                source,
+                session_key,
+                choice,
+                count,
+                resolve_all,
+                resolved_request_ids,
             )
 
         logger.info("User approved %d dangerous command(s) via /approve (%s)", count, choice)
@@ -5473,9 +5485,11 @@ class GatewaySlashCommandsMixin:
         if reason:
             reason = reason[:280].strip()
 
+        resolved_request_ids: list[str] = []
         count = resolve_gateway_approval(
             session_key, "deny", resolve_all=resolve_all,
             reason=reason or None,
+            resolved_request_ids=resolved_request_ids,
         )
         if not count:
             return t("gateway.deny.no_pending")
@@ -5485,7 +5499,13 @@ class GatewaySlashCommandsMixin:
         if _adapter:
             _adapter.resume_typing_for_chat(source.chat_id)
             await self._notify_approval_resolution(
-                _adapter, source, session_key, "deny", count, resolve_all
+                _adapter,
+                source,
+                session_key,
+                "deny",
+                count,
+                resolve_all,
+                resolved_request_ids,
             )
 
         logger.info(
@@ -5508,6 +5528,7 @@ class GatewaySlashCommandsMixin:
         choice: str,
         count: int,
         resolve_all: bool,
+        request_ids: Optional[list[str]] = None,
     ) -> None:
         """Tell adapters with interactive approval cards that the user resolved
         pending approval(s), so their UI can dismiss the prompt (TheChat renders
@@ -5527,6 +5548,7 @@ class GatewaySlashCommandsMixin:
                 choice=choice,
                 resolved_count=count,
                 resolve_all=resolve_all,
+                request_ids=request_ids,
             )
         except Exception:
             logger.debug(

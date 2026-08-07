@@ -68,11 +68,19 @@ _WEBHOOK_INBOX_MAX_ATTEMPTS = 5
 _INTERACTION_REQUEST_MAX_COUNT = 512
 _INTERACTION_ID_MAX_CHARS = 255
 _INTERACTION_REQUEST_ID_MAX_CHARS = 255
-_INTERACTION_SESSION_KEY_MAX_CHARS = 1024
+_INTERACTION_SESSION_KEY_MAX_CHARS = 1000
 _INTERACTION_THREAD_ID_MAX_CHARS = 512
-_INTERACTION_RESPONSE_MAX_CHARS = 8000
-_INTERACTION_RESPONSE_MAX_COUNT = 50
-_INTERACTION_RESPONSE_ITEM_MAX_CHARS = 1000
+_INTERACTION_RESPONSE_MAX_CHARS = 4000
+_INTERACTION_RESPONSE_MAX_COUNT = 20
+_INTERACTION_RESPONSE_ITEM_MAX_CHARS = 500
+_INTERACTION_QUESTION_MAX_CHARS = 10_000
+_INTERACTION_COMMAND_MAX_CHARS = 100_000
+_INTERACTION_DESCRIPTION_MAX_CHARS = 10_000
+_INTERACTION_CHOICE_MAX_CHARS = 500
+_INTERACTION_CHOICE_MAX_COUNT = 20
+_INTERACTION_RECORD_MAX_LIFETIME_SECONDS = 24 * 60 * 60
+_INTERACTION_PROGRESS_MAX_ATTEMPTS = 3
+_INTERACTION_PROGRESS_RETRY_BASE_SECONDS = 0.1
 _ATTACHMENT_TRANSFER_TIMEOUT_SECONDS = 20.0
 _ATTACHMENT_CONNECT_TIMEOUT_SECONDS = 5.0
 _ATTACHMENT_POLL_TIMEOUT_SECONDS = 120.0
@@ -1481,7 +1489,15 @@ class TheChatAdapter(BasePlatformAdapter):
                 return SendResult(success=True, raw_response=response.json())
             except Exception as exc:
                 logger.debug("TheChat: failed to send invocation progress", exc_info=True)
-                return SendResult(success=False, error=str(exc), retryable=True)
+                retryable = not isinstance(exc, httpx.HTTPStatusError) or (
+                    exc.response.status_code == 429
+                    or exc.response.status_code >= 500
+                )
+                return SendResult(
+                    success=False,
+                    error=str(exc),
+                    retryable=retryable,
+                )
 
     async def send_session_title_update(
         self,
@@ -1542,6 +1558,16 @@ class TheChatAdapter(BasePlatformAdapter):
                 self._approval_request_ids.pop(session_key, None)
                 self._approval_contexts.pop(session_key, None)
 
+    def _prune_expired_interaction_requests(self) -> None:
+        now = time.monotonic()
+        expired = [
+            request_id
+            for request_id, record in self._interaction_requests.items()
+            if float(record.get("expires_at") or 0.0) <= now
+        ]
+        for request_id in expired:
+            self._forget_interaction_request(request_id)
+
     def _remember_interaction_request(
         self,
         *,
@@ -1552,7 +1578,11 @@ class TheChatAdapter(BasePlatformAdapter):
         choices: Optional[list[str]],
         multi_select: bool = False,
     ) -> Dict[str, Any]:
-        self._forget_interaction_request(request_id)
+        self._prune_expired_interaction_requests()
+        if request_id in self._interaction_requests:
+            raise ValueError(f"Duplicate pending interaction request id: {request_id}")
+        if len(self._interaction_requests) >= _INTERACTION_REQUEST_MAX_COUNT:
+            raise RuntimeError("Too many pending TheChat interaction requests")
         record: Dict[str, Any] = {
             "request_type": request_type,
             "request_id": request_id,
@@ -1563,15 +1593,40 @@ class TheChatAdapter(BasePlatformAdapter):
             "context": dict(context),
             "choices": list(choices) if choices else None,
             "multi_select": bool(multi_select),
+            "expires_at": (
+                time.monotonic() + _INTERACTION_RECORD_MAX_LIFETIME_SECONDS
+            ),
         }
         self._interaction_requests[request_id] = record
         if request_type == "approval.request":
             self._approval_request_ids.setdefault(session_key, []).append(request_id)
             self._approval_contexts[session_key] = record["context"]
-        while len(self._interaction_requests) > _INTERACTION_REQUEST_MAX_COUNT:
-            oldest_id = next(iter(self._interaction_requests))
-            self._forget_interaction_request(oldest_id)
         return record
+
+    async def _send_interaction_request_progress(
+        self,
+        chat_id: str,
+        event: Dict[str, Any],
+        *,
+        metadata: Optional[Dict[str, Any]],
+        context: Optional[Dict[str, Any]],
+    ) -> SendResult:
+        """Retry ambiguous request publication without changing its stable id."""
+        result = SendResult(success=False, error="Interaction progress was not sent")
+        for attempt in range(_INTERACTION_PROGRESS_MAX_ATTEMPTS):
+            result = await self.send_invocation_progress(
+                chat_id,
+                event,
+                metadata=metadata,
+                context=context,
+            )
+            if result.success or not result.retryable:
+                return result
+            if attempt + 1 < _INTERACTION_PROGRESS_MAX_ATTEMPTS:
+                await asyncio.sleep(
+                    _INTERACTION_PROGRESS_RETRY_BASE_SECONDS * (2**attempt)
+                )
+        return result
 
     async def send_clarify(
         self,
@@ -1593,6 +1648,24 @@ class TheChatAdapter(BasePlatformAdapter):
             if choices
             else None
         )
+        if (
+            not clarify_id
+            or len(clarify_id) > _INTERACTION_REQUEST_ID_MAX_CHARS
+            or len(session_key) > _INTERACTION_SESSION_KEY_MAX_CHARS
+            or len(safe_question) > _INTERACTION_QUESTION_MAX_CHARS
+            or (
+                safe_choices is not None
+                and (
+                    len(safe_choices) > _INTERACTION_CHOICE_MAX_COUNT
+                    or any(
+                        not choice.strip()
+                        or len(choice) > _INTERACTION_CHOICE_MAX_CHARS
+                        for choice in safe_choices
+                    )
+                )
+            )
+        ):
+            return SendResult(success=False, error="TheChat clarify request is too large")
         context = self._context_for_send(chat_id, metadata=metadata)
         if not context:
             return SendResult(
@@ -1607,22 +1680,23 @@ class TheChatAdapter(BasePlatformAdapter):
             choices=safe_choices,
             multi_select=multi_select,
         )
-        result = await self.send_invocation_progress(
-            chat_id,
-            {
-                "type": "clarify.request",
-                "status": "waiting",
-                "label": "Input required",
-                "preview": safe_question[:4000],
-                "payload": {
-                    "requestId": clarify_id,
-                    "sessionKey": session_key,
-                    "question": safe_question,
-                    "choices": safe_choices,
-                    "multiSelect": multi_select,
-                    "allowOther": True,
-                },
+        progress_event = {
+            "type": "clarify.request",
+            "status": "waiting",
+            "label": "Input required",
+            "preview": safe_question[:4000],
+            "payload": {
+                "requestId": clarify_id,
+                "sessionKey": session_key,
+                "question": safe_question,
+                "choices": safe_choices,
+                "multiSelect": multi_select,
+                "allowOther": True,
             },
+        }
+        result = await self._send_interaction_request_progress(
+            chat_id,
+            progress_event,
             metadata=metadata,
             context=context,
         )
@@ -1630,7 +1704,7 @@ class TheChatAdapter(BasePlatformAdapter):
             # Preserve the normal gateway typed-answer fallback alongside the
             # direct card interaction. Slash commands still bypass capture.
             clarify_gateway.mark_awaiting_text(clarify_id)
-        else:
+        elif not result.retryable:
             self._forget_interaction_request(clarify_id)
         return result
 
@@ -1650,6 +1724,14 @@ class TheChatAdapter(BasePlatformAdapter):
         request_id = request_id or uuid.uuid4().hex
         safe_command = str(self._redact_interaction_value(str(command)))
         safe_description = str(self._redact_interaction_value(str(description)))
+        if (
+            not request_id
+            or len(request_id) > _INTERACTION_REQUEST_ID_MAX_CHARS
+            or len(session_key) > _INTERACTION_SESSION_KEY_MAX_CHARS
+            or len(safe_command) > _INTERACTION_COMMAND_MAX_CHARS
+            or len(safe_description) > _INTERACTION_DESCRIPTION_MAX_CHARS
+        ):
+            return SendResult(success=False, error="TheChat approval request is too large")
         command_preview = (
             safe_command[:4000] + "..."
             if len(safe_command) > 4000
@@ -1671,25 +1753,26 @@ class TheChatAdapter(BasePlatformAdapter):
                 context=context,
                 choices=choices,
             )
-        result = await self.send_invocation_progress(
-            chat_id,
-            {
-                "type": "approval.request",
-                "status": "waiting",
-                "label": "Command approval required",
-                "preview": command_preview,
-                "payload": {
-                    "requestId": request_id,
-                    "command": safe_command,
-                    "description": safe_description,
-                    "sessionKey": session_key,
-                    "choices": choices,
-                },
+        progress_event = {
+            "type": "approval.request",
+            "status": "waiting",
+            "label": "Command approval required",
+            "preview": command_preview,
+            "payload": {
+                "requestId": request_id,
+                "command": safe_command,
+                "description": safe_description,
+                "sessionKey": session_key,
+                "choices": choices,
             },
+        }
+        result = await self._send_interaction_request_progress(
+            chat_id,
+            progress_event,
             metadata=metadata,
             context=context,
         )
-        if not result.success:
+        if not result.success and not result.retryable:
             self._forget_interaction_request(request_id)
         return result
 
@@ -1702,6 +1785,8 @@ class TheChatAdapter(BasePlatformAdapter):
         resolve_all: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
         request_id: Optional[str] = None,
+        request_ids: Optional[list[str]] = None,
+        _forget_request: bool = True,
     ) -> SendResult:
         """Publish approval.resolved progress so clients dismiss the card.
 
@@ -1711,24 +1796,41 @@ class TheChatAdapter(BasePlatformAdapter):
         """
         records: list[Dict[str, Any]] = []
         if request_id is not None:
-            record = self._interaction_requests.get(request_id)
-            if (
-                record is None
-                or record.get("request_type") != "approval.request"
-                or record.get("session_key") != session_key
-            ):
-                return SendResult(
-                    success=False,
-                    error=f"No TheChat approval request context for {request_id}",
-                )
-            records = [record]
+            target_request_ids = [request_id]
+        elif request_ids is not None:
+            target_request_ids = list(request_ids)
         else:
-            request_ids = list(self._approval_request_ids.get(session_key) or [])
+            target_request_ids = []
+
+        if target_request_ids:
+            if len(set(target_request_ids)) != len(target_request_ids):
+                return SendResult(success=False, error="Duplicate approval request ids")
+            for target_request_id in target_request_ids:
+                record = self._interaction_requests.get(target_request_id)
+                if (
+                    record is None
+                    or record.get("request_type") != "approval.request"
+                    or record.get("session_key") != session_key
+                ):
+                    return SendResult(
+                        success=False,
+                        error=(
+                            "No TheChat approval request context for "
+                            f"{target_request_id}"
+                        ),
+                    )
+                records.append(record)
+        elif request_id is not None or request_ids is not None:
+            return SendResult(success=False, error="No approval requests were resolved")
+        else:
+            legacy_request_ids = list(
+                self._approval_request_ids.get(session_key) or []
+            )
             if not resolve_all:
-                request_ids = request_ids[:1]
+                legacy_request_ids = legacy_request_ids[:1]
             records = [
                 self._interaction_requests[candidate]
-                for candidate in request_ids
+                for candidate in legacy_request_ids
                 if candidate in self._interaction_requests
             ]
 
@@ -1754,7 +1856,8 @@ class TheChatAdapter(BasePlatformAdapter):
                         context=record["context"],
                     )
                 finally:
-                    self._forget_interaction_request(current_id)
+                    if _forget_request:
+                        self._forget_interaction_request(current_id)
                 if not last_result.success:
                     return last_result
             assert last_result is not None
@@ -1791,6 +1894,7 @@ class TheChatAdapter(BasePlatformAdapter):
         session_key: str,
         request_id: str,
         response: Any,
+        _forget_request: bool = True,
     ) -> SendResult:
         """Publish clarify.resolved to the invocation that asked the question."""
         record = self._interaction_requests.get(request_id)
@@ -1803,7 +1907,17 @@ class TheChatAdapter(BasePlatformAdapter):
                 success=False,
                 error=f"No TheChat clarify request context for {request_id}",
             )
-        safe_response = self._redact_interaction_value(response)
+        normalized_response = response
+        if record.get("multi_select") and isinstance(response, str):
+            try:
+                decoded = json.loads(response)
+                if isinstance(decoded, list) and all(
+                    isinstance(item, str) for item in decoded
+                ):
+                    normalized_response = decoded
+            except (TypeError, ValueError):
+                pass
+        safe_response = self._redact_interaction_value(normalized_response)
         try:
             return await self.send_invocation_progress(
                 str(record["conversation_id"]),
@@ -1820,7 +1934,8 @@ class TheChatAdapter(BasePlatformAdapter):
                 context=record["context"],
             )
         finally:
-            self._forget_interaction_request(request_id)
+            if _forget_request:
+                self._forget_interaction_request(request_id)
 
     def _context_from_platform_event(
         self,
@@ -2179,7 +2294,10 @@ class TheChatAdapter(BasePlatformAdapter):
                 )
         return record
 
-    async def _resolve_direct_interaction(self, interaction: Dict[str, Any]) -> None:
+    async def _resolve_direct_interaction(
+        self,
+        interaction: Dict[str, Any],
+    ) -> Dict[str, Any]:
         record = self._match_interaction_request(interaction)
         request_id = str(record["request_id"])
         session_key = str(record["session_key"])
@@ -2204,35 +2322,127 @@ class TheChatAdapter(BasePlatformAdapter):
             resolved = int(resolve_gateway_clarify(request_id, clarify_response))
 
         if resolved != 1:
-            self._forget_interaction_request(request_id)
+            if interaction["requestType"] == "approval.request":
+                from tools.approval import has_gateway_approval_request
+
+                if not has_gateway_approval_request(session_key, request_id):
+                    self._forget_interaction_request(request_id)
+            else:
+                from tools.clarify_gateway import get_request_state
+
+                if get_request_state(request_id) == "missing":
+                    self._forget_interaction_request(request_id)
             raise _DirectInteractionError(
                 "TheChat interaction is stale or has no waiting request",
                 status=409,
             )
 
         self.resume_typing_for_chat(str(record["conversation_id"]))
-        if interaction["requestType"] == "approval.request":
-            published = await self.send_approval_resolution(
-                chat_id=str(record["conversation_id"]),
-                session_key=session_key,
-                choice=str(response),
-                request_id=request_id,
-            )
-        else:
-            published = await self.send_clarify_resolution(
-                chat_id=str(record["conversation_id"]),
-                session_key=session_key,
-                request_id=request_id,
-                response=response,
-            )
-        if not published.success:
-            # The blocking waiter was resolved successfully; do not turn a
-            # progress-card refresh failure into a retry that can never resolve
-            # again. Avoid logging the transport error because it may contain a
-            # signed URL or credential-bearing response detail.
+        return record
+
+    async def _publish_direct_interaction_resolution(
+        self,
+        interaction: Dict[str, Any],
+        record: Dict[str, Any],
+    ) -> None:
+        """Publish the card transition off the webhook response critical path."""
+        request_id = str(record["request_id"])
+        session_key = str(record["session_key"])
+        try:
+            for attempt in range(_INTERACTION_PROGRESS_MAX_ATTEMPTS):
+                if interaction["requestType"] == "approval.request":
+                    published = await self.send_approval_resolution(
+                        chat_id=str(record["conversation_id"]),
+                        session_key=session_key,
+                        choice=str(interaction["response"]),
+                        request_id=request_id,
+                        _forget_request=False,
+                    )
+                else:
+                    published = await self.send_clarify_resolution(
+                        chat_id=str(record["conversation_id"]),
+                        session_key=session_key,
+                        request_id=request_id,
+                        response=interaction["response"],
+                        _forget_request=False,
+                    )
+                if published.success:
+                    return
+                if not published.retryable:
+                    break
+                if attempt + 1 < _INTERACTION_PROGRESS_MAX_ATTEMPTS:
+                    await asyncio.sleep(
+                        _INTERACTION_PROGRESS_RETRY_BASE_SECONDS * (2**attempt)
+                    )
+            # Avoid transport detail here because errors may contain a signed
+            # URL or credential-bearing response body.
             logger.warning(
                 "TheChat: interaction resolved but resolution progress failed"
             )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "TheChat: interaction resolution publication failed",
+                exc_info=True,
+            )
+        finally:
+            self._forget_interaction_request(request_id)
+
+    def _schedule_direct_interaction_resolution(
+        self,
+        interaction: Dict[str, Any],
+        record: Dict[str, Any],
+    ) -> None:
+        task = asyncio.create_task(
+            self._publish_direct_interaction_resolution(interaction, record),
+            name=f"thechat-interaction-resolution-{record['request_id']}",
+        )
+        self._webhook_tasks.add(task)
+        task.add_done_callback(self._webhook_tasks.discard)
+
+    async def _complete_direct_interaction_ledger_with_retry(
+        self,
+        *,
+        source: str,
+        event_id: str,
+    ) -> None:
+        """Finish durable replay bookkeeping after a resolved callback."""
+        for attempt in range(_INTERACTION_PROGRESS_MAX_ATTEMPTS):
+            try:
+                completed = await asyncio.to_thread(
+                    complete_inbound_event,
+                    source=source,
+                    event_id=event_id,
+                    lease_owner=self._webhook_lease_owner,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                completed = False
+            if completed:
+                return
+            if attempt + 1 < _INTERACTION_PROGRESS_MAX_ATTEMPTS:
+                await asyncio.sleep(
+                    _INTERACTION_PROGRESS_RETRY_BASE_SECONDS * (2**attempt)
+                )
+        logger.error("TheChat: failed to complete direct interaction replay ledger")
+
+    def _schedule_direct_interaction_ledger_completion(
+        self,
+        *,
+        source: str,
+        event_id: str,
+    ) -> None:
+        task = asyncio.create_task(
+            self._complete_direct_interaction_ledger_with_retry(
+                source=source,
+                event_id=event_id,
+            ),
+            name=f"thechat-interaction-ledger-{event_id}",
+        )
+        self._webhook_tasks.add(task)
+        task.add_done_callback(self._webhook_tasks.discard)
 
     async def _handle_direct_interaction_webhook(
         self,
@@ -2288,7 +2498,9 @@ class TheChatAdapter(BasePlatformAdapter):
         try:
             claimed_payload = json.loads(claim.payload)
             claimed_interaction = self._extract_webhook_interaction(claimed_payload)
-            await self._resolve_direct_interaction(claimed_interaction)
+            resolved_record = await self._resolve_direct_interaction(
+                claimed_interaction
+            )
         except _DirectInteractionError as exc:
             await asyncio.to_thread(
                 fail_inbound_event,
@@ -2323,17 +2535,27 @@ class TheChatAdapter(BasePlatformAdapter):
                 {"error": "Webhook receiver temporarily unavailable"}, status=503
             )
 
-        completed = await asyncio.to_thread(
-            complete_inbound_event,
-            source=source,
-            event_id=event_id,
-            lease_owner=self._webhook_lease_owner,
-        )
-        if not completed:
-            logger.error("TheChat: lost direct interaction ledger lease")
-            return web.json_response(
-                {"error": "Webhook receiver temporarily unavailable"}, status=503
+        try:
+            completed = await asyncio.to_thread(
+                complete_inbound_event,
+                source=source,
+                event_id=event_id,
+                lease_owner=self._webhook_lease_owner,
             )
+        except Exception:
+            completed = False
+        if not completed:
+            # Resolution is already final. A transient ledger failure must not
+            # turn a winning click into an error at TheChat, so finish the
+            # replay bookkeeping off the response path.
+            self._schedule_direct_interaction_ledger_completion(
+                source=source,
+                event_id=event_id,
+            )
+        self._schedule_direct_interaction_resolution(
+            claimed_interaction,
+            resolved_record,
+        )
         return web.json_response({"ok": True, "duplicate": False})
 
     def _schedule_durable_webhook_event(self, event_id: str) -> None:

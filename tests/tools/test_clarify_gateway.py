@@ -42,6 +42,40 @@ class TestClarifyPrimitive:
         result = cm.wait_for_response("id1", timeout=10.0)
         assert result == "B"
 
+    def test_first_resolution_wins_atomically(self):
+        from tools import clarify_gateway as cm
+
+        entry = cm.register("race-id", "race-session", "Pick", ["A", "B"])
+        barrier = threading.Barrier(3)
+        results = []
+
+        def resolve(value):
+            barrier.wait()
+            results.append((value, cm.resolve_gateway_clarify("race-id", value)))
+
+        threads = [
+            threading.Thread(target=resolve, args=("A",)),
+            threading.Thread(target=resolve, args=("B",)),
+        ]
+        for thread in threads:
+            thread.start()
+        barrier.wait()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert sorted(accepted for _, accepted in results) == [False, True]
+        winner = next(value for value, accepted in results if accepted)
+        assert entry.response == winner
+
+    def test_duplicate_registration_is_rejected(self):
+        import pytest
+        from tools import clarify_gateway as cm
+
+        original = cm.register("duplicate-id", "sk", "First", None)
+        with pytest.raises(ValueError, match="Duplicate pending clarify id"):
+            cm.register("duplicate-id", "sk", "Second", ["A"])
+        assert cm.get_pending_for_session("sk") is original
+
     def test_open_ended_auto_awaits_text(self):
         """Clarify with no choices is in text-capture mode immediately."""
         from tools import clarify_gateway as cm
@@ -327,7 +361,15 @@ class TestMultiSelectTextFallback:
         t = threading.Thread(target=waiter)
         t.start()
         time.sleep(0.05)
-        assert cm.resolve_text_response_for_session("sk", "1,2") is True
+        resolved = {}
+        assert cm.resolve_text_response_for_session(
+            "sk", "1,2", resolved=resolved
+        ) is True
+        assert resolved == {
+            "request_id": "m3",
+            "session_key": "sk",
+            "response": '["A", "B"]',
+        }
         t.join(timeout=5)
         assert json.loads(result_box["r"]) == ["A", "B"]
 
