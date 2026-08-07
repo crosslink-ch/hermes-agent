@@ -74,7 +74,10 @@ def _todo_notes(messages):
         message
         for message in messages
         if message.get("role") == "assistant"
-        and str(message.get("content") or "").startswith(_TODO_INTERNAL_NOTE_PREFIX)
+        and (
+            message.get("_todo_snapshot_internal")
+            or _TODO_INTERNAL_NOTE_PREFIX in str(message.get("content") or "")
+        )
     ]
 
 
@@ -543,11 +546,17 @@ class TestTodoSnapshotInternalNote:
             _msgs(), "sys", approx_tokens=120_000
         )
 
-        assert len(compressed) == 4
+        assert len(compressed) == 3
+        assert [message["role"] for message in compressed] == [
+            "user",
+            "assistant",
+            "user",
+        ]
         tail = compressed[-1]
         assert tail == {"role": "user", "content": "tail"}
         notes = _todo_notes(compressed)
         assert len(notes) == 1
+        assert "acknowledged" in notes[0]["content"]
         assert "task A" in notes[0]["content"]
         assert compressed[-2] is notes[0]
         assert not any(
@@ -587,12 +596,18 @@ class TestTodoSnapshotInternalNote:
             _msgs(), "sys", approx_tokens=120_000
         )
 
-        assert len(compressed) == 4
+        assert len(compressed) == 3
+        assert [message["role"] for message in compressed] == [
+            "user",
+            "assistant",
+            "user",
+        ]
         tail = compressed[-1]
         assert tail["role"] == "user"
         assert tail["content"] == original_parts
         notes = _todo_notes(compressed)
         assert len(notes) == 1
+        assert "acknowledged" in notes[0]["content"]
         assert "inspect image" in notes[0]["content"]
         assert compressed[-2] is notes[0]
         assert not any(
@@ -662,12 +677,18 @@ class TestTodoSnapshotInternalNote:
             _msgs(), "sys", approx_tokens=120_000
         )
 
-        assert len(compressed) == 4
+        assert len(compressed) == 3
+        assert [message["role"] for message in compressed] == [
+            "user",
+            "assistant",
+            "user",
+        ]
         tail = compressed[-1]
         assert tail["role"] == "user"
         assert tail["content"] == original_parts
         notes = _todo_notes(compressed)
         assert len(notes) == 1
+        assert "ok" in notes[0]["content"]
         assert "inspect image" in notes[0]["content"]
         assert compressed[-2] is notes[0]
 

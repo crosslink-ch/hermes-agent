@@ -1973,6 +1973,31 @@ _TODO_INTERNAL_NOTE_PREFIX = (
 )
 
 
+def _strip_todo_internal_note(content: Any) -> Any:
+    """Remove an internal todo note while preserving assistant content."""
+    if isinstance(content, str):
+        idx = content.find(_TODO_INTERNAL_NOTE_PREFIX)
+        if idx == -1:
+            return content
+        return content[:idx].rstrip()
+    if isinstance(content, list):
+        cleaned = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = str(part.get("text") or "")
+                idx = text.find(_TODO_INTERNAL_NOTE_PREFIX)
+                if idx != -1:
+                    retained = text[:idx].rstrip()
+                    if retained:
+                        updated = dict(part)
+                        updated["text"] = retained
+                        cleaned.append(updated)
+                    continue
+            cleaned.append(part)
+        return cleaned
+    return content
+
+
 def _inject_todo_snapshot_internal_note(messages: list, todo_snapshot: str) -> None:
     """Refresh todo continuity state without turning it into human intent."""
     snapshot = str(todo_snapshot or "").strip()
@@ -1983,12 +2008,19 @@ def _inject_todo_snapshot_internal_note(messages: list, todo_snapshot: str) -> N
             cleaned.append(message)
             continue
 
-        text = _message_text(message).strip()
-        if message.get("role") == "assistant" and (
-            message.get("_todo_snapshot_internal")
-            or text.startswith(_TODO_INTERNAL_NOTE_PREFIX)
-        ):
-            continue
+        if message.get("role") == "assistant":
+            original = message.get("content")
+            stripped = _strip_todo_internal_note(original)
+            if stripped != original:
+                has_content = bool(
+                    _message_text({"content": stripped}).strip()
+                ) or (isinstance(stripped, list) and bool(stripped))
+                if not has_content:
+                    continue
+                message["content"] = stripped
+                message.pop("_todo_snapshot_internal", None)
+            elif message.get("_todo_snapshot_internal"):
+                continue
 
         if message.get("role") == "user":
             original = message.get("content")
@@ -2029,6 +2061,29 @@ def _inject_todo_snapshot_internal_note(messages: list, todo_snapshot: str) -> N
             ):
                 insert_at = idx
                 break
+
+    if insert_at > 0:
+        previous = messages[insert_at - 1]
+        if isinstance(previous, dict) and previous.get("role") == "assistant":
+            note_content = note["content"]
+            previous_content = previous.get("content")
+            if isinstance(previous_content, str):
+                base = previous_content.rstrip()
+                previous["content"] = (
+                    f"{base}\n\n{note_content}" if base else note_content
+                )
+            elif isinstance(previous_content, list):
+                previous["content"] = [
+                    *previous_content,
+                    {"type": "text", "text": note_content},
+                ]
+            elif previous_content is None:
+                previous["content"] = note_content
+            else:
+                messages.insert(insert_at, note)
+                return
+            previous["_todo_snapshot_internal"] = True
+            return
 
     messages.insert(insert_at, note)
 
