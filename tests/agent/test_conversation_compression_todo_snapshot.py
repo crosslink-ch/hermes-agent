@@ -1,3 +1,4 @@
+from agent.agent_runtime_helpers import repair_message_sequence
 from agent.context_compressor import COMPRESSION_CONTINUATION_USER_CONTENT
 from agent.conversation_compression import (
     _TODO_INTERNAL_NOTE_PREFIX,
@@ -20,10 +21,36 @@ def test_todo_snapshot_inserted_before_latest_real_user_message():
 
     _inject_todo_snapshot_internal_note(messages, SNAPSHOT)
 
+    assert [message["role"] for message in messages] == ["user", "assistant", "user"]
     assert messages[-1] == {"role": "user", "content": "actual latest request"}
-    assert messages[-2]["role"] == "assistant"
     assert messages[-2]["_todo_snapshot_internal"] is True
-    assert messages[-2]["content"] == f"{_TODO_INTERNAL_NOTE_PREFIX}\n{SNAPSHOT}"
+    assert messages[-2]["content"] == (
+        f"old answer\n\n{_TODO_INTERNAL_NOTE_PREFIX}\n{SNAPSHOT}"
+    )
+
+
+def test_embedded_snapshot_survives_sequence_repair_refresh_and_completion():
+    original = [
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "actual latest request"},
+    ]
+    messages = [dict(message) for message in original]
+
+    _inject_todo_snapshot_internal_note(messages, SNAPSHOT)
+    assert repair_message_sequence(None, messages) == 0
+
+    refreshed = f"{TODO_INJECTION_HEADER}\n- [>] ship. Verify (in_progress)"
+    _inject_todo_snapshot_internal_note(messages, refreshed)
+    assert repair_message_sequence(None, messages) == 0
+    combined = "\n".join(str(message.get("content") or "") for message in messages)
+    assert combined.count(_TODO_INTERNAL_NOTE_PREFIX) == 1
+    assert refreshed in combined
+    assert SNAPSHOT not in combined
+    assert [message["role"] for message in messages] == ["user", "assistant", "user"]
+
+    _inject_todo_snapshot_internal_note(messages, "")
+    assert messages == original
 
 
 def test_empty_todo_snapshot_noops_for_clean_messages():

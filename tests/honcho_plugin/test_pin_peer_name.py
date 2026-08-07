@@ -16,6 +16,7 @@ chosen ``user_peer_id`` can be asserted without touching the network.
 
 import hashlib
 import json
+import os
 from unittest.mock import MagicMock
 
 
@@ -522,9 +523,12 @@ class TestPinTransition:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         cfg_path.write_text(json.dumps({"apiKey": "k", "peerName": "Igor", "pinPeerName": True}))
+        fixed_mtime_ns = cfg_path.stat().st_mtime_ns
         sig_pinned = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
 
         cfg_path.write_text(json.dumps({"apiKey": "k", "peerName": "Igor", "pinPeerName": False}))
+        os.utime(cfg_path, ns=(fixed_mtime_ns, fixed_mtime_ns))
+        assert cfg_path.stat().st_mtime_ns == fixed_mtime_ns
         sig_unpinned = GatewayRunner._extract_cache_busting_config({"memory": {"provider": "honcho"}})
 
         assert sig_pinned["honcho.pin_peer_name"] != sig_unpinned["honcho.pin_peer_name"]

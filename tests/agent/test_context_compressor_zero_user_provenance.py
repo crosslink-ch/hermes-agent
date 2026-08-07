@@ -236,8 +236,9 @@ def test_compress_context_todo_snapshot_stays_synthetic_across_two_boundaries(
         message
         for message in first
         if message.get("role") == "assistant"
-        and str(message.get("content") or "").startswith(
+        and (
             _TODO_INTERNAL_NOTE_PREFIX
+            in str(message.get("content") or "")
         )
     ]
     assert len(todo_notes) == 1
@@ -251,8 +252,9 @@ def test_compress_context_todo_snapshot_stays_synthetic_across_two_boundaries(
     assert projected
     assert any(
         message.get("role") == "assistant"
-        and str(message.get("content") or "").startswith(
+        and (
             _TODO_INTERNAL_NOTE_PREFIX
+            in str(message.get("content") or "")
         )
         for message in projected
     )
@@ -287,8 +289,9 @@ def test_compress_context_todo_snapshot_stays_synthetic_across_two_boundaries(
         message
         for message in second
         if message.get("role") == "assistant"
-        and str(message.get("content") or "").startswith(
+        and (
             _TODO_INTERNAL_NOTE_PREFIX
+            in str(message.get("content") or "")
         )
     ]
     assert len(second_notes) == 1
