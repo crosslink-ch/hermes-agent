@@ -176,6 +176,19 @@ def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
     return True
 
 
+def get_pending_request(clarify_id: str) -> Optional[Dict[str, object]]:
+    """Return a copy of one pending clarify request's public signature.
+
+    Platform adapters use this to render fields such as ``multi_select``
+    without reaching into the registry's private lock or entry mapping.
+    ``None`` means the request has already resolved, expired, or never
+    existed.
+    """
+    with _lock:
+        entry = _entries.get(clarify_id)
+        return entry.signature() if entry is not None else None
+
+
 def get_pending_for_session(
     session_key: str,
     *,

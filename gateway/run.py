@@ -133,6 +133,23 @@ _HYGIENE_COOLDOWN_LADDER_MULTIPLIERS = (1, 3, 9)
 _HYGIENE_COOLDOWN_MAX_SECONDS = 3600.0
 
 
+def _callable_accepts_keyword(callback: Callable[..., Any], keyword: str) -> bool:
+    """Return whether *callback* safely accepts a named keyword.
+
+    Gateway platform plugins predate newer optional interaction fields.  We
+    inspect their signatures before adding a keyword so an adapter with the
+    historical ``send_exec_approval`` signature keeps working unchanged.
+    """
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):
+        return False
+    return keyword in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
 def _hygiene_cooldown_for_failure(
     gateway,
     session_key: str,
@@ -5366,17 +5383,24 @@ class TurnRunner:
             # false positives from MagicMock auto-attribute creation in tests.
             if getattr(type(ctx._status_adapter), "send_exec_approval", None) is not None:
                 try:
+                    _approval_send = ctx._status_adapter.send_exec_approval
+                    _approval_kwargs = {
+                        "chat_id": ctx._status_chat_id,
+                        "command": cmd,
+                        "session_key": _approval_session_key,
+                        "description": desc,
+                        "metadata": ctx._status_thread_metadata,
+                        "allow_permanent": approval_data.get("allow_permanent", True),
+                        "allow_session": approval_data.get("allow_session", True),
+                        "smart_denied": approval_data.get("smart_denied", False),
+                    }
+                    _request_id = approval_data.get("request_id")
+                    if _request_id and _callable_accepts_keyword(
+                        _approval_send, "request_id"
+                    ):
+                        _approval_kwargs["request_id"] = _request_id
                     _approval_fut = safe_schedule_threadsafe(
-                        ctx._status_adapter.send_exec_approval(
-                            chat_id=ctx._status_chat_id,
-                            command=cmd,
-                            session_key=_approval_session_key,
-                            description=desc,
-                            metadata=ctx._status_thread_metadata,
-                            allow_permanent=approval_data.get("allow_permanent", True),
-                            allow_session=approval_data.get("allow_session", True),
-                            smart_denied=approval_data.get("smart_denied", False),
-                        ),
+                        _approval_send(**_approval_kwargs),
                         ctx._loop_for_step,
                         logger=logger,
                         log_message="send_exec_approval scheduling error",

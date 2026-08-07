@@ -65,6 +65,14 @@ _WEBHOOK_MAX_AGE_SECONDS = 300
 _WEBHOOK_INBOX_LEASE_SECONDS = 60.0
 _WEBHOOK_INBOX_RECOVERY_INTERVAL_SECONDS = 1.0
 _WEBHOOK_INBOX_MAX_ATTEMPTS = 5
+_INTERACTION_REQUEST_MAX_COUNT = 512
+_INTERACTION_ID_MAX_CHARS = 255
+_INTERACTION_REQUEST_ID_MAX_CHARS = 255
+_INTERACTION_SESSION_KEY_MAX_CHARS = 1024
+_INTERACTION_THREAD_ID_MAX_CHARS = 512
+_INTERACTION_RESPONSE_MAX_CHARS = 8000
+_INTERACTION_RESPONSE_MAX_COUNT = 50
+_INTERACTION_RESPONSE_ITEM_MAX_CHARS = 1000
 _ATTACHMENT_TRANSFER_TIMEOUT_SECONDS = 20.0
 _ATTACHMENT_CONNECT_TIMEOUT_SECONDS = 5.0
 _ATTACHMENT_POLL_TIMEOUT_SECONDS = 120.0
@@ -124,6 +132,14 @@ class _AttachmentError(RuntimeError):
         self.preserve_attachment = preserve_attachment
 
 
+class _DirectInteractionError(ValueError):
+    """Safe HTTP error raised while resolving a direct interaction."""
+
+    def __init__(self, message: str, *, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 def check_thechat_requirements() -> bool:
     if os.getenv("THECHAT_WEBHOOK_URL", "").strip() and web is None:
         logger.warning("TheChat: aiohttp not installed")
@@ -169,6 +185,11 @@ class TheChatAdapter(BasePlatformAdapter):
         # session_key -> context of the invocation that requested an exec
         # approval; lets approval.resolved reach the original invocation.
         self._approval_contexts: Dict[str, Dict[str, Any]] = {}
+        # Opaque request id -> immutable snapshot of the invocation/request
+        # context that produced a blocking approval or clarify prompt.
+        self._interaction_requests: Dict[str, Dict[str, Any]] = {}
+        # Typed /approve remains FIFO and may resolve all pending requests.
+        self._approval_request_ids: Dict[str, list[str]] = {}
 
     def public_http_routes(self) -> list[dict]:
         if not self.webhook_url:
@@ -1498,6 +1519,121 @@ class TheChatAdapter(BasePlatformAdapter):
             context=context,
         )
 
+    @staticmethod
+    def _redact_interaction_value(value: Any) -> Any:
+        """Redact strings before reflecting request/response data to TheChat."""
+        from agent.redact import redact_sensitive_text
+
+        if isinstance(value, str):
+            return redact_sensitive_text(value, force=True)
+        if isinstance(value, list):
+            return [TheChatAdapter._redact_interaction_value(item) for item in value]
+        return value
+
+    def _forget_interaction_request(self, request_id: str) -> None:
+        record = self._interaction_requests.pop(request_id, None)
+        if not record or record.get("request_type") != "approval.request":
+            return
+        session_key = str(record["session_key"])
+        request_ids = self._approval_request_ids.get(session_key)
+        if request_ids and request_id in request_ids:
+            request_ids.remove(request_id)
+            if not request_ids:
+                self._approval_request_ids.pop(session_key, None)
+                self._approval_contexts.pop(session_key, None)
+
+    def _remember_interaction_request(
+        self,
+        *,
+        request_type: str,
+        request_id: str,
+        session_key: str,
+        context: Dict[str, Any],
+        choices: Optional[list[str]],
+        multi_select: bool = False,
+    ) -> Dict[str, Any]:
+        self._forget_interaction_request(request_id)
+        record: Dict[str, Any] = {
+            "request_type": request_type,
+            "request_id": request_id,
+            "session_key": session_key,
+            "invocation_id": str(context["invocation_id"]),
+            "conversation_id": str(context["conversation_id"]),
+            "thread_id": str(context.get("thread_id") or "") or None,
+            "context": dict(context),
+            "choices": list(choices) if choices else None,
+            "multi_select": bool(multi_select),
+        }
+        self._interaction_requests[request_id] = record
+        if request_type == "approval.request":
+            self._approval_request_ids.setdefault(session_key, []).append(request_id)
+            self._approval_contexts[session_key] = record["context"]
+        while len(self._interaction_requests) > _INTERACTION_REQUEST_MAX_COUNT:
+            oldest_id = next(iter(self._interaction_requests))
+            self._forget_interaction_request(oldest_id)
+        return record
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[list],
+        clarify_id: str,
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Publish a structured clarify request on the original invocation."""
+        from tools import clarify_gateway
+
+        pending = clarify_gateway.get_pending_request(clarify_id)
+        multi_select = bool(pending and pending.get("multi_select"))
+        safe_question = str(self._redact_interaction_value(str(question)))
+        safe_choices = (
+            [str(self._redact_interaction_value(str(choice))) for choice in choices]
+            if choices
+            else None
+        )
+        context = self._context_for_send(chat_id, metadata=metadata)
+        if not context:
+            return SendResult(
+                success=False,
+                error=f"No TheChat clarify context for session {session_key}",
+            )
+        self._remember_interaction_request(
+            request_type="clarify.request",
+            request_id=clarify_id,
+            session_key=session_key,
+            context=context,
+            choices=safe_choices,
+            multi_select=multi_select,
+        )
+        result = await self.send_invocation_progress(
+            chat_id,
+            {
+                "type": "clarify.request",
+                "status": "waiting",
+                "label": "Input required",
+                "preview": safe_question[:4000],
+                "payload": {
+                    "requestId": clarify_id,
+                    "sessionKey": session_key,
+                    "question": safe_question,
+                    "choices": safe_choices,
+                    "multiSelect": multi_select,
+                    "allowOther": True,
+                },
+            },
+            metadata=metadata,
+            context=context,
+        )
+        if result.success:
+            # Preserve the normal gateway typed-answer fallback alongside the
+            # direct card interaction. Slash commands still bypass capture.
+            clarify_gateway.mark_awaiting_text(clarify_id)
+        else:
+            self._forget_interaction_request(clarify_id)
+        return result
+
     async def send_exec_approval(
         self,
         chat_id: str,
@@ -1508,9 +1644,17 @@ class TheChatAdapter(BasePlatformAdapter):
         allow_permanent: bool = True,
         allow_session: bool = True,
         smart_denied: bool = False,
+        request_id: Optional[str] = None,
     ) -> SendResult:
         """Send command approval as structured TheChat invocation progress."""
-        command_preview = command[:4000] + "..." if len(command) > 4000 else command
+        request_id = request_id or uuid.uuid4().hex
+        safe_command = str(self._redact_interaction_value(str(command)))
+        safe_description = str(self._redact_interaction_value(str(description)))
+        command_preview = (
+            safe_command[:4000] + "..."
+            if len(safe_command) > 4000
+            else safe_command
+        )
         if smart_denied or not allow_session:
             choices = ["once", "deny"]
         else:
@@ -1518,16 +1662,16 @@ class TheChatAdapter(BasePlatformAdapter):
             if allow_permanent:
                 choices.append("always")
             choices.append("deny")
-        # Remember which invocation asked, keyed by session. The /approve or
-        # /deny reply arrives as its own TheChat invocation and replaces the
-        # per-chat context, so the later approval.resolved event must be
-        # routed through this snapshot to land on the same invocation as the
-        # approval.request. Overwritten by the next request for the session;
-        # never used unless the gateway actually resolved a blocked approval.
         context = self._context_for_send(chat_id, metadata=metadata)
         if context:
-            self._approval_contexts[session_key] = context
-        return await self.send_invocation_progress(
+            self._remember_interaction_request(
+                request_type="approval.request",
+                request_id=request_id,
+                session_key=session_key,
+                context=context,
+                choices=choices,
+            )
+        result = await self.send_invocation_progress(
             chat_id,
             {
                 "type": "approval.request",
@@ -1535,8 +1679,9 @@ class TheChatAdapter(BasePlatformAdapter):
                 "label": "Command approval required",
                 "preview": command_preview,
                 "payload": {
-                    "command": command,
-                    "description": description,
+                    "requestId": request_id,
+                    "command": safe_command,
+                    "description": safe_description,
                     "sessionKey": session_key,
                     "choices": choices,
                 },
@@ -1544,6 +1689,9 @@ class TheChatAdapter(BasePlatformAdapter):
             metadata=metadata,
             context=context,
         )
+        if not result.success:
+            self._forget_interaction_request(request_id)
+        return result
 
     async def send_approval_resolution(
         self,
@@ -1553,6 +1701,7 @@ class TheChatAdapter(BasePlatformAdapter):
         resolved_count: int = 1,
         resolve_all: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
+        request_id: Optional[str] = None,
     ) -> SendResult:
         """Publish approval.resolved progress so clients dismiss the card.
 
@@ -1560,6 +1709,57 @@ class TheChatAdapter(BasePlatformAdapter):
         mirroring ``resolve_gateway_approval``; ``resolveAll`` collapses every
         pending card for the session at once.
         """
+        records: list[Dict[str, Any]] = []
+        if request_id is not None:
+            record = self._interaction_requests.get(request_id)
+            if (
+                record is None
+                or record.get("request_type") != "approval.request"
+                or record.get("session_key") != session_key
+            ):
+                return SendResult(
+                    success=False,
+                    error=f"No TheChat approval request context for {request_id}",
+                )
+            records = [record]
+        else:
+            request_ids = list(self._approval_request_ids.get(session_key) or [])
+            if not resolve_all:
+                request_ids = request_ids[:1]
+            records = [
+                self._interaction_requests[candidate]
+                for candidate in request_ids
+                if candidate in self._interaction_requests
+            ]
+
+        if records:
+            last_result: Optional[SendResult] = None
+            for record in records:
+                current_id = str(record["request_id"])
+                try:
+                    last_result = await self.send_invocation_progress(
+                        str(record["conversation_id"]),
+                        {
+                            "type": "approval.resolved",
+                            "status": "completed",
+                            "label": "Approval resolved",
+                            "payload": {
+                                "requestId": current_id,
+                                "choice": choice,
+                                "sessionKey": session_key,
+                                "resolveAll": resolve_all,
+                                "resolvedCount": resolved_count,
+                            },
+                        },
+                        context=record["context"],
+                    )
+                finally:
+                    self._forget_interaction_request(current_id)
+                if not last_result.success:
+                    return last_result
+            assert last_result is not None
+            return last_result
+
         context = self._approval_contexts.get(session_key) or self._context_for_send(
             chat_id, metadata=metadata
         )
@@ -1584,6 +1784,43 @@ class TheChatAdapter(BasePlatformAdapter):
             metadata=metadata,
             context=context,
         )
+
+    async def send_clarify_resolution(
+        self,
+        chat_id: str,
+        session_key: str,
+        request_id: str,
+        response: Any,
+    ) -> SendResult:
+        """Publish clarify.resolved to the invocation that asked the question."""
+        record = self._interaction_requests.get(request_id)
+        if (
+            record is None
+            or record.get("request_type") != "clarify.request"
+            or record.get("session_key") != session_key
+        ):
+            return SendResult(
+                success=False,
+                error=f"No TheChat clarify request context for {request_id}",
+            )
+        safe_response = self._redact_interaction_value(response)
+        try:
+            return await self.send_invocation_progress(
+                str(record["conversation_id"]),
+                {
+                    "type": "clarify.resolved",
+                    "status": "completed",
+                    "label": "Input received",
+                    "payload": {
+                        "requestId": request_id,
+                        "sessionKey": session_key,
+                        "response": safe_response,
+                    },
+                },
+                context=record["context"],
+            )
+        finally:
+            self._forget_interaction_request(request_id)
 
     def _context_from_platform_event(
         self,
@@ -1790,6 +2027,315 @@ class TheChatAdapter(BasePlatformAdapter):
     def _inbound_event_source(self) -> str:
         return f"thechat:{self.base_url}"
 
+    def _inbound_interaction_source(self) -> str:
+        # Keep synchronous direct interactions out of the durable asynchronous
+        # message-event recovery scan. They still use the same ledger schema
+        # and replay/conflict semantics under a distinct source namespace.
+        return f"{self._inbound_event_source()}:interaction"
+
+    @staticmethod
+    def _validate_bounded_token(value: Any, *, field: str, limit: int) -> str:
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > limit
+            or value != value.strip()
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        ):
+            raise ValueError(f"TheChat interaction has an invalid {field}")
+        return value
+
+    def _extract_webhook_interaction(self, payload: Any) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("Webhook payload must be a JSON object")
+        if payload.get("type") != "thechat.hermes_platform.interaction":
+            raise ValueError("Webhook payload has an invalid TheChat interaction type")
+        if set(payload) != {"type", "interaction"}:
+            raise ValueError("TheChat interaction envelope has invalid fields")
+        interaction = payload.get("interaction")
+        return self._validate_direct_interaction(interaction)
+
+    def _validate_direct_interaction(self, item: Any) -> Dict[str, Any]:
+        """Validate the signed direct-interaction wire contract and bounds."""
+        if not isinstance(item, dict):
+            raise ValueError("TheChat interaction must be a JSON object")
+        required = {
+            "id",
+            "requestType",
+            "requestId",
+            "invocationId",
+            "conversationId",
+            "threadId",
+            "sessionKey",
+            "response",
+        }
+        if set(item) != required:
+            raise ValueError("TheChat interaction has invalid fields")
+
+        self._validate_bounded_token(
+            item["id"], field="id", limit=_INTERACTION_ID_MAX_CHARS
+        )
+        self._validate_bounded_token(
+            item["requestId"],
+            field="requestId",
+            limit=_INTERACTION_REQUEST_ID_MAX_CHARS,
+        )
+        self._validate_bounded_token(
+            item["sessionKey"],
+            field="sessionKey",
+            limit=_INTERACTION_SESSION_KEY_MAX_CHARS,
+        )
+        for field in ("invocationId", "conversationId"):
+            value = self._validate_bounded_token(
+                item[field], field=field, limit=36
+            )
+            if not self._is_current_chat_id(value):
+                raise ValueError(f"TheChat interaction has an invalid {field}")
+
+        thread_id = item["threadId"]
+        if thread_id is not None:
+            self._validate_bounded_token(
+                thread_id,
+                field="threadId",
+                limit=_INTERACTION_THREAD_ID_MAX_CHARS,
+            )
+
+        request_type = item["requestType"]
+        if not isinstance(request_type, str) or request_type not in {
+            "approval.request",
+            "clarify.request",
+        }:
+            raise ValueError("TheChat interaction has an invalid requestType")
+
+        response = item["response"]
+        if request_type == "approval.request":
+            if not isinstance(response, str) or response not in {
+                "once",
+                "session",
+                "always",
+                "deny",
+            }:
+                raise ValueError("TheChat approval interaction has an invalid response")
+        elif isinstance(response, str):
+            if not response.strip() or len(response) > _INTERACTION_RESPONSE_MAX_CHARS:
+                raise ValueError("TheChat clarify interaction has an invalid response")
+        elif isinstance(response, list):
+            if not response or len(response) > _INTERACTION_RESPONSE_MAX_COUNT:
+                raise ValueError("TheChat clarify interaction has an invalid response")
+            total_chars = 0
+            for choice in response:
+                if (
+                    not isinstance(choice, str)
+                    or not choice.strip()
+                    or len(choice) > _INTERACTION_RESPONSE_ITEM_MAX_CHARS
+                ):
+                    raise ValueError(
+                        "TheChat clarify interaction has an invalid response"
+                    )
+                total_chars += len(choice)
+            if total_chars > _INTERACTION_RESPONSE_MAX_CHARS:
+                raise ValueError("TheChat clarify interaction has an invalid response")
+        else:
+            raise ValueError("TheChat clarify interaction has an invalid response")
+        return item
+
+    def _match_interaction_request(self, interaction: Dict[str, Any]) -> Dict[str, Any]:
+        request_id = interaction["requestId"]
+        record = self._interaction_requests.get(request_id)
+        if record is None:
+            raise _DirectInteractionError(
+                "TheChat interaction is stale or has no waiting request",
+                status=409,
+            )
+        expected = {
+            "request_type": interaction["requestType"],
+            "request_id": request_id,
+            "session_key": interaction["sessionKey"],
+            "invocation_id": interaction["invocationId"],
+            "conversation_id": interaction["conversationId"],
+            "thread_id": interaction["threadId"],
+        }
+        if any(record.get(key) != value for key, value in expected.items()):
+            raise _DirectInteractionError(
+                "TheChat interaction does not match the original request context",
+                status=409,
+            )
+
+        response = interaction["response"]
+        choices = record.get("choices") or []
+        if interaction["requestType"] == "approval.request":
+            if response not in choices:
+                raise _DirectInteractionError(
+                    "TheChat approval response was not offered for this request",
+                    status=400,
+                )
+        elif isinstance(response, list):
+            if not record.get("multi_select") or any(
+                choice not in choices for choice in response
+            ):
+                raise _DirectInteractionError(
+                    "TheChat clarify selections were not offered for this request",
+                    status=400,
+                )
+        return record
+
+    async def _resolve_direct_interaction(self, interaction: Dict[str, Any]) -> None:
+        record = self._match_interaction_request(interaction)
+        request_id = str(record["request_id"])
+        session_key = str(record["session_key"])
+        response = interaction["response"]
+
+        if interaction["requestType"] == "approval.request":
+            from tools.approval import resolve_gateway_approval
+
+            resolved = resolve_gateway_approval(
+                session_key,
+                str(response),
+                request_id=request_id,
+            )
+        else:
+            from tools.clarify_gateway import resolve_gateway_clarify
+
+            clarify_response = (
+                json.dumps(response, ensure_ascii=False)
+                if isinstance(response, list)
+                else response
+            )
+            resolved = int(resolve_gateway_clarify(request_id, clarify_response))
+
+        if resolved != 1:
+            self._forget_interaction_request(request_id)
+            raise _DirectInteractionError(
+                "TheChat interaction is stale or has no waiting request",
+                status=409,
+            )
+
+        self.resume_typing_for_chat(str(record["conversation_id"]))
+        if interaction["requestType"] == "approval.request":
+            published = await self.send_approval_resolution(
+                chat_id=str(record["conversation_id"]),
+                session_key=session_key,
+                choice=str(response),
+                request_id=request_id,
+            )
+        else:
+            published = await self.send_clarify_resolution(
+                chat_id=str(record["conversation_id"]),
+                session_key=session_key,
+                request_id=request_id,
+                response=response,
+            )
+        if not published.success:
+            # The blocking waiter was resolved successfully; do not turn a
+            # progress-card refresh failure into a retry that can never resolve
+            # again. Avoid logging the transport error because it may contain a
+            # signed URL or credential-bearing response detail.
+            logger.warning(
+                "TheChat: interaction resolved but resolution progress failed"
+            )
+
+    async def _handle_direct_interaction_webhook(
+        self,
+        interaction: Dict[str, Any],
+        body_bytes: bytes,
+    ):
+        source = self._inbound_interaction_source()
+        event_id = interaction["id"]
+        try:
+            acceptance = await asyncio.to_thread(
+                accept_inbound_event,
+                source=source,
+                event_id=event_id,
+                payload=body_bytes,
+            )
+        except InboundEventConflictError:
+            return web.json_response(
+                {"error": "Conflicting webhook interaction"}, status=409
+            )
+        except InboundEventCapacityError:
+            return web.json_response(
+                {"error": "Webhook receiver temporarily unavailable"}, status=503
+            )
+        except Exception:
+            logger.exception("TheChat: failed to accept signed direct interaction")
+            return web.json_response(
+                {"error": "Webhook receiver temporarily unavailable"}, status=503
+            )
+
+        if acceptance.status == "completed":
+            return web.json_response({"ok": True, "duplicate": True})
+
+        try:
+            claim = await asyncio.to_thread(
+                claim_inbound_event,
+                source=source,
+                event_id=event_id,
+                lease_owner=self._webhook_lease_owner,
+                lease_seconds=_WEBHOOK_INBOX_LEASE_SECONDS,
+                max_attempts=_WEBHOOK_INBOX_MAX_ATTEMPTS,
+            )
+        except Exception:
+            logger.exception("TheChat: failed to claim signed direct interaction")
+            return web.json_response(
+                {"error": "Webhook receiver temporarily unavailable"}, status=503
+            )
+        if claim is None:
+            return web.json_response(
+                {"error": "Webhook interaction is already being processed"},
+                status=409,
+            )
+
+        try:
+            claimed_payload = json.loads(claim.payload)
+            claimed_interaction = self._extract_webhook_interaction(claimed_payload)
+            await self._resolve_direct_interaction(claimed_interaction)
+        except _DirectInteractionError as exc:
+            await asyncio.to_thread(
+                fail_inbound_event,
+                source=source,
+                event_id=event_id,
+                lease_owner=self._webhook_lease_owner,
+                error="direct interaction rejected",
+                retry_delay_seconds=0.0,
+            )
+            return web.json_response({"error": str(exc)}, status=exc.status)
+        except ValueError:
+            await asyncio.to_thread(
+                fail_inbound_event,
+                source=source,
+                event_id=event_id,
+                lease_owner=self._webhook_lease_owner,
+                error="malformed direct interaction",
+                retry_delay_seconds=0.0,
+            )
+            return web.json_response({"error": "Invalid interaction"}, status=400)
+        except Exception:
+            logger.exception("TheChat: direct interaction processing failed")
+            await asyncio.to_thread(
+                fail_inbound_event,
+                source=source,
+                event_id=event_id,
+                lease_owner=self._webhook_lease_owner,
+                error="direct interaction processing failed",
+                retry_delay_seconds=0.0,
+            )
+            return web.json_response(
+                {"error": "Webhook receiver temporarily unavailable"}, status=503
+            )
+
+        completed = await asyncio.to_thread(
+            complete_inbound_event,
+            source=source,
+            event_id=event_id,
+            lease_owner=self._webhook_lease_owner,
+        )
+        if not completed:
+            logger.error("TheChat: lost direct interaction ledger lease")
+            return web.json_response(
+                {"error": "Webhook receiver temporarily unavailable"}, status=503
+            )
+        return web.json_response({"ok": True, "duplicate": False})
+
     def _schedule_durable_webhook_event(self, event_id: str) -> None:
         task = asyncio.create_task(
             self._process_durable_webhook_event(event_id),
@@ -1902,6 +2448,15 @@ class TheChatAdapter(BasePlatformAdapter):
             return web.json_response({"error": "Unauthorized"}, status=401)
         try:
             payload = json.loads(body)
+            if (
+                isinstance(payload, dict)
+                and payload.get("type")
+                == "thechat.hermes_platform.interaction"
+            ):
+                interaction = self._extract_webhook_interaction(payload)
+                return await self._handle_direct_interaction_webhook(
+                    interaction, body_bytes
+                )
             event = self._extract_webhook_event(payload)
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
