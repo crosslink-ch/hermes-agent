@@ -11,7 +11,7 @@
 import { useStore } from '@nanostores/react'
 import { useQueryClient } from '@tanstack/react-query'
 import { type CSSProperties, lazy, type ReactNode, Suspense, useCallback, useEffect, useMemo, useRef } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router'
 
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { BootFailureOverlay } from '@/components/boot-failure-overlay'
@@ -29,8 +29,10 @@ import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChat
 import { sessionMessagesSignature } from '@/lib/session-signatures'
 import { isMessagingSource } from '@/lib/session-source'
 import { latestSessionTodos } from '@/lib/todos'
+import { activateWakeIndicator } from '@/lib/wake-indicator'
 import { playWakeSound } from '@/lib/wake-sound'
 import { $billingSettingsRequest } from '@/store/billing-block'
+import { $desktopBoot } from '@/store/boot'
 import { requestVoiceConversationStart } from '@/store/composer'
 import { setCronFocusJobId } from '@/store/cron'
 import { $pinnedSessionIds, pinSession, restoreWorktree, unpinSession } from '@/store/layout'
@@ -64,7 +66,7 @@ import {
   setMessages
 } from '@/store/session'
 import { clearSessionTodos, setSessionTodos, todosForHydration } from '@/store/todos'
-import { armWakeWord } from '@/store/wake-word'
+import { armWakeWord, stopClientCapture } from '@/store/wake-word'
 import { isSecondaryWindow } from '@/store/windows'
 import { useSkinCommand } from '@/themes/use-skin-command'
 
@@ -177,8 +179,10 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const resumeExhaustedSessionId = useStore($resumeExhaustedSessionId)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
   const messagingSessions = useStore($messagingSessions)
+  const sessions = useStore($sessions)
   const activeGatewayProfile = useStore($activeGatewayProfile)
   const profileScope = useStore($profileScope)
+  const boot = useStore($desktopBoot)
 
   const routedSessionId = routeSessionId(location.pathname)
   const routedSessionIdRef = useRef(routedSessionId)
@@ -685,9 +689,14 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       if (event.type === 'wake.detected') {
         const payload = event.payload as { profile?: null | string; start_new_session?: boolean } | undefined
 
+        // Free the Mac mic so voice conversation can open getUserMedia.
+        // Server already pauses the detector lease; this stops client PCM feed.
+        stopClientCapture()
+
         // Audible confirmation that the wake registered, before voice capture
         // starts. Gated by the shared sound-mute toggle.
         playWakeSound()
+        activateWakeIndicator()
 
         // Multi-profile routing: a wake phrase enrolled by another profile
         // re-homes the gateway to that profile first (live swap — same path
@@ -771,14 +780,17 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   const previewTarget = useStore($previewTarget)
 
   useDesktopIntegrations({
+    activeProfile: normalizeProfileKey(activeGatewayProfile),
     chatOpen,
     hasPreview: Boolean(previewTarget),
     locationPathname: location.pathname,
     navigate,
+    profileReady: boot.phase === 'renderer.ready',
     refreshSessions,
     resumeExhaustedSessionId,
     routedSessionId,
-    runtimeIdByStoredSessionId: runtimeIdByStoredSessionIdRef
+    runtimeIdByStoredSessionId: runtimeIdByStoredSessionIdRef,
+    sessions
   })
 
   // Pin/unpin the selected session (statusbar keybind + chat header) — pinned
