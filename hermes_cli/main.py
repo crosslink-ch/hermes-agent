@@ -10613,7 +10613,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "project", "proxy",
         "prompt-size",
         "send", "sessions", "setup",
-        "skin", "skills", "slack", "status", "sync", "tools", "uninstall", "update",
+        "skin", "skills", "slack", "status", "sync", "targets", "tools", "uninstall", "update",
         "version", "webhook", "whatsapp", "whatsapp-cloud", "chat", "secrets", "security",
         # Help-ish invocations — plugin commands not being listed in
         # top-level --help is an acceptable trade-off for skipping an
@@ -11584,6 +11584,15 @@ def main():
     # config command  (parser built in hermes_cli/subcommands/config.py)
     # =========================================================================
     build_config_parser(subparsers, cmd_config=cmd_config)
+
+    # Runtime execution-target registry management
+    targets_parser = subparsers.add_parser(
+        "targets",
+        help="Register and manage runtime execution targets without restart",
+    )
+    from hermes_cli.targets import register_cli as _register_targets_cli
+
+    _register_targets_cli(targets_parser)
 
     # =========================================================================
     # skin command  (parser built in hermes_cli/subcommands/skin.py)
