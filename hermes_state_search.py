@@ -33,6 +33,11 @@ from hermes_state_common import (
 # keep that logger identity so log filtering/capture behavior is unchanged.
 logger = logging.getLogger("hermes_state")
 
+# Three bind parameters and one expression branch are generated per fallback
+# term. Keep comfortably below SQLite's common 999-variable / 1000-expression
+# defaults even when filters add a handful of parameters.
+_LIKE_FALLBACK_MAX_TERMS = 256
+
 
 class SessionSearchMixin:
     """See module docstring — mixin for SessionDB (Search cluster)."""
@@ -1393,6 +1398,7 @@ class SessionSearchMixin:
         """
         groups: List[List[Tuple[str, bool]]] = [[]]
         negate_next = False
+        term_count = 0
         for raw_token in re.findall(r'"[^"]+"|\S+', query):
             operator = raw_token.upper()
             if operator == "OR":
@@ -1408,7 +1414,10 @@ class SessionSearchMixin:
 
             term = raw_token.strip('"').strip("*").strip()
             if term:
+                if term_count >= _LIKE_FALLBACK_MAX_TERMS:
+                    break
                 groups[-1].append((term, negate_next))
+                term_count += 1
                 negate_next = False
 
         compiled_groups: List[str] = []

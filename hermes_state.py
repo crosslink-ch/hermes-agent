@@ -2862,6 +2862,10 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # Set on the first compression-busy collision so the short wait is
         # measured from then, not from the start of the write.
         compression_deadline: Optional[float] = None
+        # Fail-open or peer-adoption may retry the original closure once. Keep
+        # this guard local to the write so an unrelated canonical constraint
+        # cannot loop forever after FTS has been detached.
+        fts_fail_open_retry_attempted = False
 
         # Transient engine-level error observed on contended WAL appends
         # (dual gateway/agent writers; FTS5 trigram sync holds the write
@@ -2943,13 +2947,24 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 # trigger-on/trigger-off probe before treating FTS as derived
                 # damage. Never classify a generic constraint from text alone.
                 explicit_fts_failure = self._is_fts_write_corruption_error(exc)
+                generic_constraint = (
+                    str(exc).strip().lower() == "constraint failed"
+                )
                 fts_failure = explicit_fts_failure
-                if (
-                    not fts_failure
-                    and str(exc).strip().lower() == "constraint failed"
-                ):
+                if not fts_failure and generic_constraint:
                     fts_failure = self._probe_fts_trigger_failure()
-                if not fts_failure:
+                    if (
+                        not fts_failure
+                        and not fts_fail_open_retry_attempted
+                        and self._adopt_peer_fts_fail_open()
+                    ):
+                        # A peer may have detached FTS after this write rolled
+                        # back but before our probe acquired the write lock. In
+                        # that state the probe succeeds because triggers are
+                        # already gone; the durable marker authorizes one retry.
+                        fts_fail_open_retry_attempted = True
+                        continue
+                if not fts_failure or fts_fail_open_retry_attempted:
                     raise
 
                 # Keep the existing one-shot in-place repair for explicit
@@ -2962,6 +2977,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 if explicit_fts_failure and self._try_runtime_fts_rebuild(exc):
                     continue
                 if self._enter_fts_fail_open(exc, confirmed=True):
+                    fts_fail_open_retry_attempted = True
                     continue
                 raise
             except sqlite3.Error as exc:
@@ -3110,22 +3126,35 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                     try:
                         self._conn.execute(probe_sql, probe_values)
                     except sqlite3.DatabaseError as probe_exc:
-                        if str(probe_exc).strip().lower() != "constraint failed":
+                        if (
+                            str(probe_exc).strip().lower() != "constraint failed"
+                            or not self._conn.in_transaction
+                        ):
+                            # RAISE(ROLLBACK) and fatal engine failures can end
+                            # the transaction. Never perform trigger DDL or a
+                            # second insert once rollback-only isolation is gone.
                             return False
                     else:
                         # The canonical insert and all FTS triggers succeeded.
                         return False
 
+                    if not self._conn.in_transaction:
+                        return False
                     self._drop_all_fts_triggers(self._conn.cursor())
+                    if not self._conn.in_transaction:
+                        return False
                     try:
                         self._conn.execute(probe_sql, probe_values)
                     except sqlite3.DatabaseError:
                         # A canonical or non-FTS trigger still rejects the same
                         # row, so FTS has not been isolated as the cause.
                         return False
+                    if not self._conn.in_transaction:
+                        return False
                     confirmed = True
                 finally:
-                    self._conn.rollback()
+                    if self._conn.in_transaction:
+                        self._conn.rollback()
         except sqlite3.Error as probe_exc:
             logger.warning(
                 "Could not safely classify generic SQLite constraint as an "
@@ -3191,6 +3220,48 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         )
         return True
 
+    def _adopt_peer_fts_fail_open(self) -> bool:
+        """Observe and enforce a fail-open transition committed by a peer.
+
+        ``BEGIN IMMEDIATE`` serializes this read with peer detach/recovery
+        transactions. If the marker exists, re-dropping the derived triggers is
+        idempotent and restores the invariant for databases created by older
+        builds: stale must be durable before canonical writes run without sync.
+        """
+        try:
+            with self._lock:
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    stale = self._conn.execute(
+                        "SELECT 1 FROM state_meta WHERE key = ? LIMIT 1",
+                        (FTS_STALE_KEY,),
+                    ).fetchone()
+                    if stale is None:
+                        self._conn.rollback()
+                        return False
+                    self._mark_fts_stale_and_drop_triggers(self._conn.cursor())
+                    self._conn.commit()
+                except BaseException:
+                    if self._conn.in_transaction:
+                        self._conn.rollback()
+                    raise
+        except sqlite3.Error as peer_exc:
+            logger.warning(
+                "Could not synchronize with a peer FTS fail-open transition: %s",
+                peer_exc,
+            )
+            return False
+
+        self._fts_stale = True
+        self._fts_enabled = False
+        self._trigram_available = False
+        self._fts_cjk_available = False
+        logger.warning(
+            "Observed a peer FTS fail-open transition; retrying the canonical "
+            "write once with derived search sync detached."
+        )
+        return True
+
     def _enter_fts_fail_open(
         self,
         exc: sqlite3.DatabaseError,
@@ -3213,24 +3284,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             with self._lock:
                 self._conn.execute("BEGIN IMMEDIATE")
                 try:
-                    self._conn.execute(
-                        "INSERT INTO state_meta (key, value) VALUES (?, '1') "
-                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        (FTS_STALE_KEY,),
-                    )
-                    cjk_triggers_present = self._conn.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
-                        f"AND name IN ({','.join('?' for _ in _FTS_CJK_TRIGGERS)}) "
-                        "LIMIT 1",
-                        _FTS_CJK_TRIGGERS,
-                    ).fetchone()
-                    if cjk_triggers_present:
-                        self._conn.execute(
-                            "INSERT INTO state_meta (key, value) VALUES (?, '1') "
-                            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                            (FTS_CJK_STALE_KEY,),
-                        )
-                    self._drop_all_fts_triggers(self._conn.cursor())
+                    self._mark_fts_stale_and_drop_triggers(self._conn.cursor())
                     self._conn.commit()
                 except BaseException:
                     self._conn.rollback()
