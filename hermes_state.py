@@ -60,6 +60,7 @@ from hermes_state_common import (  # noqa: F401  (re-exported for back-compat)
     DEFERRED_INDEX_SQL,
     FTS_CJK_STALE_KEY,
     FTS_SQL,
+    FTS_STALE_KEY,
     FTS_STORAGE_VERSION,
     FTS_TRIGRAM_SQL,
     LEGACY_FTS_SQL,
@@ -2299,6 +2300,7 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # incremental FTS merge cadence (see _merge_fts_incrementally).
         self._fts_usermerge_floor_applied = False
         self._fts_enabled = False
+        self._fts_stale = False
         self._trigram_available = False
         # CJK-bigram index (cjk_unicode61 loadable tokenizer). _fts_cjk_loaded:
         # extension present on the writer connection; _fts_cjk_available: the
@@ -2860,6 +2862,10 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # Set on the first compression-busy collision so the short wait is
         # measured from then, not from the start of the write.
         compression_deadline: Optional[float] = None
+        # Fail-open or peer-adoption may retry the original closure once. Keep
+        # this guard local to the write so an unrelated canonical constraint
+        # cannot loop forever after FTS has been detached.
+        fts_fail_open_retry_attempted = False
 
         # Transient engine-level error observed on contended WAL appends
         # (dual gateway/agent writers; FTS5 trigram sync holds the write
@@ -2933,18 +2939,47 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             except sqlite3.DatabaseError as exc:
                 if _is_no_more_rows(exc) and self._sleep_before_write_retry(deadline, patience_s):
                     continue
-                # Corrupt FTS shadow tables make every write raise the
-                # malformed/corrupt error class through the FTS sync triggers
-                # while the canonical messages table is intact. The gateway
-                # session store has its own retry queue for transcript
-                # appends (#65637 salvage), but cron and CLI writers call
-                # SessionDB directly — without this, their writes hard-fail
-                # until the next process restart triggers the offline repair.
-                # Rebuild the FTS index in place (once per instance) via
-                # rebuild_fts() and retry the failed write immediately.
-                if not self._try_runtime_fts_rebuild(exc):
+                # Corrupt FTS shadow tables make every write raise through the
+                # synchronous messages triggers while canonical rows remain
+                # valid. Most SQLite builds name the malformed/FTS corruption,
+                # but legacy inline FTS can surface only ``constraint failed``.
+                # That text is ambiguous, so confirm it with a rollback-only
+                # trigger-on/trigger-off probe before treating FTS as derived
+                # damage. Never classify a generic constraint from text alone.
+                explicit_fts_failure = self._is_fts_write_corruption_error(exc)
+                generic_constraint = (
+                    str(exc).strip().lower() == "constraint failed"
+                )
+                fts_failure = explicit_fts_failure
+                if not fts_failure and generic_constraint:
+                    fts_failure = self._probe_fts_trigger_failure()
+                    if (
+                        not fts_failure
+                        and not fts_fail_open_retry_attempted
+                        and self._adopt_peer_fts_fail_open()
+                    ):
+                        # A peer may have detached FTS after this write rolled
+                        # back but before our probe acquired the write lock. In
+                        # that state the probe succeeds because triggers are
+                        # already gone; the durable marker authorizes one retry.
+                        fts_fail_open_retry_attempted = True
+                        continue
+                if not fts_failure or fts_fail_open_retry_attempted:
                     raise
-                continue
+
+                # Keep the existing one-shot in-place repair for explicit
+                # malformed/FTS5 errors. A probed generic constraint takes the
+                # availability-first path directly: legacy ``rebuild`` can
+                # report progress without removing an inline rowid collision,
+                # and a synchronous full-index pass extends the user's failed
+                # turn. Durable fail-open below detaches only derived sync and
+                # retries canonical persistence immediately.
+                if explicit_fts_failure and self._try_runtime_fts_rebuild(exc):
+                    continue
+                if self._enter_fts_fail_open(exc, confirmed=True):
+                    fts_fail_open_retry_attempted = True
+                    continue
+                raise
             except sqlite3.Error as exc:
                 # Catch-all for builds that surface 'no more rows available'
                 # as InterfaceError (a sibling of DatabaseError, not a
@@ -2999,6 +3034,143 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         msg = str(exc).lower()
         return "fts5" in msg and "corrupt" in msg
 
+    def _find_legacy_fts_orphan_rowid(self, next_id: int) -> Optional[int]:
+        """Return a canonical-free rowid retained by legacy inline FTS.
+
+        The internal-content layouts used before schema v23 expose ``*_content``
+        shadow tables. Prefer an orphan at or above the next AUTOINCREMENT id so
+        a failed multi-row append can be reproduced even when the collision was
+        not on its first row. External-content layouts have no such shadow table
+        and simply fall back to probing *next_id*.
+        """
+        for shadow_table in (
+            "messages_fts_content",
+            "messages_fts_trigram_content",
+        ):
+            exists = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (shadow_table,),
+            ).fetchone()
+            if exists is None:
+                continue
+            for at_or_above_next in (True, False):
+                range_sql = "AND f.id >= ?" if at_or_above_next else ""
+                params = (next_id,) if at_or_above_next else ()
+                try:
+                    row = self._conn.execute(
+                        f"SELECT f.id FROM {shadow_table} AS f "
+                        "WHERE f.id > 0 "
+                        f"AND f.id <= 9223372036854775807 {range_sql} "
+                        "AND NOT EXISTS ("
+                        "SELECT 1 FROM messages AS m WHERE m.id = f.id"
+                        ") ORDER BY f.id LIMIT 1",
+                        params,
+                    ).fetchone()
+                except sqlite3.DatabaseError:
+                    break
+                if row is not None:
+                    return int(row[0])
+        return None
+
+    def _probe_fts_trigger_failure(self) -> bool:
+        """Confirm a generic constraint originates in ``messages`` FTS triggers.
+
+        This deliberately does not inspect exception text beyond requiring the
+        caller's exact ``constraint failed`` shape. It inserts one disposable,
+        known-valid canonical message at an unused id with the FTS triggers
+        present. For legacy inline indexes it prefers a detected orphan rowid;
+        otherwise it uses the next AUTOINCREMENT id. If that statement fails
+        constraint, the probe drops only FTS triggers inside the *same manual
+        transaction* and retries the identical insert. Success only after the
+        trigger drop proves the canonical row is valid and derived FTS state is
+        the failing phase.
+
+        The transaction is always rolled back. The probe message, sqlite_sequence
+        movement, and transactional trigger drops therefore leave no durable
+        trace. Any uncertainty fails closed and the original exception remains
+        visible to the caller.
+        """
+        if not self._fts_enabled:
+            return False
+
+        confirmed = False
+        try:
+            with self._lock:
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    session_row = self._conn.execute(
+                        "SELECT id FROM sessions ORDER BY started_at, id LIMIT 1"
+                    ).fetchone()
+                    if session_row is None:
+                        return False
+                    session_id = session_row[0]
+                    next_id_row = self._conn.execute(
+                        "SELECT COALESCE((SELECT seq FROM sqlite_sequence "
+                        "WHERE name = 'messages'), 0) + 1"
+                    ).fetchone()
+                    next_id = int(next_id_row[0])
+                    probe_id = self._find_legacy_fts_orphan_rowid(next_id) or next_id
+                    probe_values = (
+                        probe_id,
+                        session_id,
+                        "system",
+                        "__hermes_fts_trigger_probe__",
+                        0.0,
+                    )
+                    probe_sql = (
+                        "INSERT INTO messages "
+                        "(id, session_id, role, content, timestamp) "
+                        "VALUES (?, ?, ?, ?, ?)"
+                    )
+
+                    try:
+                        self._conn.execute(probe_sql, probe_values)
+                    except sqlite3.DatabaseError as probe_exc:
+                        if (
+                            str(probe_exc).strip().lower() != "constraint failed"
+                            or not self._conn.in_transaction
+                        ):
+                            # RAISE(ROLLBACK) and fatal engine failures can end
+                            # the transaction. Never perform trigger DDL or a
+                            # second insert once rollback-only isolation is gone.
+                            return False
+                    else:
+                        # The canonical insert and all FTS triggers succeeded.
+                        return False
+
+                    if not self._conn.in_transaction:
+                        return False
+                    self._drop_all_fts_triggers(self._conn.cursor())
+                    if not self._conn.in_transaction:
+                        return False
+                    try:
+                        self._conn.execute(probe_sql, probe_values)
+                    except sqlite3.DatabaseError:
+                        # A canonical or non-FTS trigger still rejects the same
+                        # row, so FTS has not been isolated as the cause.
+                        return False
+                    if not self._conn.in_transaction:
+                        return False
+                    confirmed = True
+                finally:
+                    if self._conn.in_transaction:
+                        self._conn.rollback()
+        except sqlite3.Error as probe_exc:
+            logger.warning(
+                "Could not safely classify generic SQLite constraint as an "
+                "FTS-trigger failure; preserving the original error: %s",
+                probe_exc,
+            )
+            return False
+
+        if confirmed:
+            logger.error(
+                "Confirmed generic SQLite constraint originates in derived "
+                "messages FTS triggers; canonical probe succeeded with only "
+                "those triggers transactionally disabled."
+            )
+        return confirmed
+
     def _try_runtime_fts_rebuild(self, exc: sqlite3.DatabaseError) -> bool:
         """One-shot in-place FTS rebuild after a corrupt-index write failure.
 
@@ -3045,6 +3217,95 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         logger.warning(
             "state.db FTS indexes rebuilt in place (%d); retrying the failed write.",
             rebuilt,
+        )
+        return True
+
+    def _adopt_peer_fts_fail_open(self) -> bool:
+        """Observe and enforce a fail-open transition committed by a peer.
+
+        ``BEGIN IMMEDIATE`` serializes this read with peer detach/recovery
+        transactions. If the marker exists, re-dropping the derived triggers is
+        idempotent and restores the invariant for databases created by older
+        builds: stale must be durable before canonical writes run without sync.
+        """
+        try:
+            with self._lock:
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    stale = self._conn.execute(
+                        "SELECT 1 FROM state_meta WHERE key = ? LIMIT 1",
+                        (FTS_STALE_KEY,),
+                    ).fetchone()
+                    if stale is None:
+                        self._conn.rollback()
+                        return False
+                    self._mark_fts_stale_and_drop_triggers(self._conn.cursor())
+                    self._conn.commit()
+                except BaseException:
+                    if self._conn.in_transaction:
+                        self._conn.rollback()
+                    raise
+        except sqlite3.Error as peer_exc:
+            logger.warning(
+                "Could not synchronize with a peer FTS fail-open transition: %s",
+                peer_exc,
+            )
+            return False
+
+        self._fts_stale = True
+        self._fts_enabled = False
+        self._trigram_available = False
+        self._fts_cjk_available = False
+        logger.warning(
+            "Observed a peer FTS fail-open transition; retrying the canonical "
+            "write once with derived search sync detached."
+        )
+        return True
+
+    def _enter_fts_fail_open(
+        self,
+        exc: sqlite3.DatabaseError,
+        *,
+        confirmed: bool = False,
+    ) -> bool:
+        """Detach corrupt FTS indexes so canonical writes can continue.
+
+        The stale breadcrumb and trigger removal commit atomically. Its
+        ordering is load-bearing: after triggers are absent, new canonical
+        rows create an index gap of unknown extent, so another process must
+        never reinstall the triggers without first rebuilding every row.
+        """
+        if not self._fts_enabled or (
+            not confirmed and not self._is_fts_write_corruption_error(exc)
+        ):
+            return False
+
+        try:
+            with self._lock:
+                self._conn.execute("BEGIN IMMEDIATE")
+                try:
+                    self._mark_fts_stale_and_drop_triggers(self._conn.cursor())
+                    self._conn.commit()
+                except BaseException:
+                    self._conn.rollback()
+                    raise
+        except sqlite3.Error as detach_exc:
+            logger.error(
+                "Could not detach corrupt FTS indexes; canonical write still "
+                "cannot proceed: %s",
+                detach_exc,
+            )
+            return False
+
+        self._fts_stale = True
+        self._fts_enabled = False
+        self._trigram_available = False
+        self._fts_cjk_available = False
+        logger.error(
+            "state.db FTS indexes remain corrupt (%s); disabled FTS sync and "
+            "retrying the canonical write. Search temporarily uses LIKE until "
+            "a later SessionDB open rebuilds the indexes.",
+            exc,
         )
         return True
 
