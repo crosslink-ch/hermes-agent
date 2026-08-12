@@ -33,23 +33,42 @@ _EXECUTION_TARGET_ARGUMENT_TOOLS = frozenset({
 })
 
 
+def uses_execution_target_argument(tool_name: str) -> bool:
+    """Return whether *tool_name* exposes model-facing execution routing."""
+    return tool_name in _EXECUTION_TARGET_ARGUMENT_TOOLS
+
+
 def validate_execution_target_args(
     tool_name: str, arguments: Mapping[str, Any],
 ) -> None:
-    """Enforce the canonical execution-routing argument before authorization.
+    """Enforce canonical, non-polymorphic execution-routing arguments.
 
     ``search_files.target`` is a separate content/files selector. Every other
-    target-aware model tool routes only through ``execution_target``.
+    target-aware model tool routes only through ``execution_target``. Exact
+    built-in container and string types are required at this trust boundary so
+    middleware-controlled subclasses cannot redefine key access or equality.
     """
-    if (
-        tool_name in _EXECUTION_TARGET_ARGUMENT_TOOLS
-        and tool_name != "search_files"
-        and "target" in arguments
-    ):
+    if tool_name not in _EXECUTION_TARGET_ARGUMENT_TOOLS:
+        return
+    if type(arguments) is not dict:
+        raise ExecutionTargetError(
+            f"{tool_name} arguments must be a plain JSON object for execution routing."
+        )
+    if any(type(key) is not str for key in arguments):
+        raise ExecutionTargetError(
+            f"{tool_name} argument names must be plain strings for execution routing."
+        )
+    if tool_name != "search_files" and "target" in arguments:
         raise ExecutionTargetError(
             f"{tool_name} does not accept 'target'; use 'execution_target' "
             "for execution routing."
         )
+    if "execution_target" in arguments:
+        value = arguments["execution_target"]
+        if value is not None and type(value) is not str:
+            raise ExecutionTargetError(
+                f"{tool_name} 'execution_target' must be a plain string when provided."
+            )
 
 
 def validate_execution_target_dispatch_args(
@@ -63,6 +82,7 @@ def validate_execution_target_dispatch_args(
     execution target. Tool execution middleware may still rewrite ordinary
     arguments, but it must not add, remove, or replace that routing selector.
     """
+    validate_execution_target_args(tool_name, authorized_arguments)
     validate_execution_target_args(tool_name, dispatch_arguments)
     if tool_name not in _EXECUTION_TARGET_ARGUMENT_TOOLS:
         return
