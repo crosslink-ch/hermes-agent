@@ -220,9 +220,7 @@ class TestHandleFunctionCall:
         assert post_call[1]["status"] == "blocked"
         assert post_call[1]["error_type"] == "edit_approval_denied"
 
-    def test_conflicting_target_aliases_fail_before_hooks_or_edit_approval(
-        self,
-    ):
+    def test_removed_target_selector_fails_before_hooks_or_edit_approval(self):
         with (
             patch("hermes_cli.plugins.resolve_pre_tool_block") as pre_hook,
             patch(
@@ -235,12 +233,11 @@ class TestHandleFunctionCall:
                 {
                     "path": "private.txt",
                     "content": "private",
-                    "execution_target": "alpha",
-                    "target": "beta",
+                    "target": "alpha",
                 },
             ))
 
-        assert "Conflicting execution target selectors" in result["error"]
+        assert "does not accept 'target'" in result["error"]
         pre_hook.assert_not_called()
         edit_approval.assert_not_called()
         dispatch.assert_not_called()

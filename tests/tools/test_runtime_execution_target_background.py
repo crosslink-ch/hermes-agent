@@ -39,7 +39,7 @@ def test_background_handle_survives_target_drain_and_remove(monkeypatch, tmp_pat
         started = json.loads(
             terminal_tool(
                 "sleep 30",
-                target="box",
+                execution_target="box",
                 task_id="runtime-background",
                 background=True,
             )

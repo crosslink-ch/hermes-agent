@@ -1661,17 +1661,11 @@ def read_file_tool(
     path: str, offset: int = 1, limit: int = 2000,
     task_id: str = "default", execution_target: str | None = None,
     runtime_scope: str | None = None,
-    *, target: str | None = None,
 ) -> str:
     """Read a file with pagination and line numbers."""
     try:
-        from tools.execution_targets import (
-            coalesce_execution_target,
-            resolve_execution_target,
-        )
-        selected_execution_target = coalesce_execution_target(
-            execution_target, target,
-        )
+        from tools.execution_targets import resolve_execution_target
+        selected_execution_target = execution_target
 
         pinned_file_ops = None
         if runtime_scope:
@@ -2332,8 +2326,7 @@ def _mark_verification_stale(
 def write_file_tool(path: str, content: str, task_id: str = "default",
                     cross_profile: bool = False,
                     session_id: str | None = None,
-                    execution_target: str = None, *,
-                    target: str = None) -> str:
+                    execution_target: str = None) -> str:
     """Write content to a file.
 
     ``cross_profile`` opts out of the soft cross-Hermes-profile guard. The
@@ -2343,13 +2336,8 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     on the terminal tool.
     """
     try:
-        from tools.execution_targets import (
-            coalesce_execution_target,
-            resolve_execution_target,
-        )
-        resolution = resolve_execution_target(
-            coalesce_execution_target(execution_target, target)
-        )
+        from tools.execution_targets import resolve_execution_target
+        resolution = resolve_execution_target(execution_target)
     except Exception as exc:
         return tool_error(str(exc))
     selected_target = resolution.target if resolution.named else None
@@ -2473,8 +2461,8 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
 def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                new_string: str = None, replace_all: bool = False, patch: str = None,
                task_id: str = "default", cross_profile: bool = False,
-               session_id: str | None = None, execution_target: str = None, *,
-               target: str = None) -> str:
+               session_id: str | None = None,
+               execution_target: str = None) -> str:
     """Patch a file using replace mode or V4A patch format.
 
     ``cross_profile`` opts out of the soft cross-Hermes-profile guard for
@@ -2482,13 +2470,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     directory. Same shape as ``write_file``'s flag.
     """
     try:
-        from tools.execution_targets import (
-            coalesce_execution_target,
-            resolve_execution_target,
-        )
-        resolution = resolve_execution_target(
-            coalesce_execution_target(execution_target, target)
-        )
+        from tools.execution_targets import resolve_execution_target
+        resolution = resolve_execution_target(execution_target)
     except Exception as exc:
         return tool_error(str(exc))
     selected_target = resolution.target if resolution.named else None
@@ -2956,7 +2939,7 @@ PATCH_SCHEMA = {
 
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\nCompatibility exception: target still selects search mode ('content' or 'files'); execution_target selects the named terminal execution target.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.",
+    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\nThe target field selects search mode ('content' or 'files'); execution_target separately selects the named terminal execution target.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -2976,16 +2959,28 @@ SEARCH_FILES_SCHEMA = {
 
 
 def _handle_read_file(args, **kw):
+    try:
+        from tools.execution_targets import validate_execution_target_args
+
+        validate_execution_target_args("read_file", args)
+    except Exception as exc:
+        return tool_error(str(exc))
     tid = kw.get("task_id") or "default"
     return read_file_tool(
         path=args.get("path", ""), offset=args.get("offset", 1),
         limit=args.get("limit", 500), task_id=tid,
-        execution_target=args.get("execution_target"), target=args.get("target"),
+        execution_target=args.get("execution_target"),
         runtime_scope=args.get("runtime_scope"),
     )
 
 
 def _handle_write_file(args, **kw):
+    try:
+        from tools.execution_targets import validate_execution_target_args
+
+        validate_execution_target_args("write_file", args)
+    except Exception as exc:
+        return tool_error(str(exc))
     tid = kw.get("task_id") or "default"
     if not args.get("path") or not isinstance(args.get("path"), str):
         return tool_error(
@@ -3009,11 +3004,17 @@ def _handle_write_file(args, **kw):
         path=args["path"], content=args["content"], task_id=tid,
         cross_profile=bool(args.get("cross_profile", False)),
         session_id=kw.get("session_id"),
-        execution_target=args.get("execution_target"), target=args.get("target"),
+        execution_target=args.get("execution_target"),
     )
 
 
 def _handle_patch(args, **kw):
+    try:
+        from tools.execution_targets import validate_execution_target_args
+
+        validate_execution_target_args("patch", args)
+    except Exception as exc:
+        return tool_error(str(exc))
     tid = kw.get("task_id") or "default"
     return patch_tool(
         mode=args.get("mode", "replace"), path=args.get("path"),
@@ -3021,7 +3022,7 @@ def _handle_patch(args, **kw):
         replace_all=args.get("replace_all", False), patch=args.get("patch"), task_id=tid,
         cross_profile=bool(args.get("cross_profile", False)),
         session_id=kw.get("session_id"),
-        execution_target=args.get("execution_target"), target=args.get("target"),
+        execution_target=args.get("execution_target"),
     )
 
 

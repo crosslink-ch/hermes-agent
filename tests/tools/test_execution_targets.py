@@ -9,10 +9,10 @@ import pytest
 
 from tools.execution_targets import (
     ExecutionTargetError,
-    coalesce_execution_target,
     list_execution_targets,
     resolve_execution_target,
     set_execution_target_config_source,
+    validate_execution_target_args,
 )
 
 
@@ -40,12 +40,17 @@ def test_legacy_omitted_and_default_select_the_flat_environment():
     assert omitted.config["ssh_host"] == "host"
 
 
-def test_execution_target_compatibility_alias_coalesces_and_rejects_conflicts():
-    assert coalesce_execution_target("alpha", None) == "alpha"
-    assert coalesce_execution_target(None, "legacy") == "legacy"
-    assert coalesce_execution_target("same", "same") == "same"
-    with pytest.raises(ExecutionTargetError, match="Conflicting execution target"):
-        coalesce_execution_target("alpha", "beta")
+def test_execution_routing_accepts_only_execution_target():
+    with pytest.raises(ExecutionTargetError, match="does not accept 'target'"):
+        validate_execution_target_args("terminal", {"target": "alpha"})
+    with pytest.raises(ExecutionTargetError, match="does not accept 'target'"):
+        validate_execution_target_args(
+            "write_file", {"execution_target": "alpha", "target": "alpha"},
+        )
+
+    validate_execution_target_args(
+        "search_files", {"target": "files", "execution_target": "alpha"},
+    )
 
 
 def test_legacy_backend_metadata_respects_terminal_env_override(monkeypatch):
@@ -254,7 +259,9 @@ def test_tool_schemas_use_static_optional_execution_target_fields():
     assert search_properties["target"]["enum"] == ["content", "files"]
     assert search_properties["execution_target"]["type"] == "string"
     assert "enum" not in search_properties["execution_target"]
-    assert "compatibility" in SEARCH_FILES_SCHEMA["description"].lower()
+    description = SEARCH_FILES_SCHEMA["description"].lower()
+    assert "target field selects search mode" in description
+    assert "execution_target separately selects" in description
 
 
 def test_successful_terminal_result_reports_target_backend_and_cwd(monkeypatch, tmp_path):

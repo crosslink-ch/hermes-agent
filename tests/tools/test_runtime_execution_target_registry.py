@@ -92,7 +92,7 @@ def test_new_target_resolves_and_executes_without_process_restart(
     assert resolution.owner_id == "box-17"
     assert resolution.generation == "g1"
 
-    result = json.loads(terminal_tool("pwd", target="box", task_id="registry-e2e"))
+    result = json.loads(terminal_tool("pwd", execution_target="box", task_id="registry-e2e"))
     assert result["exit_code"] == 0
     assert Path(result["output"].strip()).resolve() == work.resolve()
     assert result["target"] == "box"
@@ -146,7 +146,7 @@ def test_separate_cli_process_hot_registers_for_long_lived_reader(
     assert resolution.provider == "cross-process"
     assert resolution.generation == "child-1"
     result = json.loads(
-        terminal_tool("pwd", target="hot-local", task_id="cross-process-e2e")
+        terminal_tool("pwd", execution_target="hot-local", task_id="cross-process-e2e")
     )
     assert result["exit_code"] == 0
     assert Path(result["output"].strip()).resolve() == work.resolve()
@@ -230,7 +230,7 @@ def test_nested_dispatch_preserves_complete_runtime_generation_identity(
     frozen = code_mod._frozen_target_config(outer)
 
     def resolve_nested(_name, args, task_id=None):
-        nested = resolve_execution_target(args["target"])
+        nested = resolve_execution_target(args["execution_target"])
         approval_key = approval_mod._execution_scoped_pattern_key(
             "command:deploy",
             nested.target,
@@ -242,7 +242,7 @@ def test_nested_dispatch_preserves_complete_runtime_generation_identity(
     nested, approval_key, nested_task_id = code_mod._dispatch_rpc_tool(
         resolve_nested,
         "terminal",
-        {"target": "box"},
+        {"execution_target": "box"},
         "nested-session",
         frozen,
     )
@@ -279,7 +279,7 @@ def test_nested_approval_identity_distinguishes_same_config_generations(
     def nested_approval_key(frozen):
         def handler(_name, args, task_id=None):
             del task_id
-            nested = resolve_execution_target(args["target"])
+            nested = resolve_execution_target(args["execution_target"])
             return (
                 nested.generation,
                 approval_mod._execution_scoped_pattern_key(
@@ -293,7 +293,7 @@ def test_nested_approval_identity_distinguishes_same_config_generations(
         return code_mod._dispatch_rpc_tool(
             handler,
             "terminal",
-            {"target": "box"},
+            {"execution_target": "box"},
             "nested-session",
             frozen,
         )
@@ -360,13 +360,13 @@ def test_nested_runtime_docker_dispatch_reuses_outer_hosting_environment(
     )
 
     def nested_file_ops(_name, args, task_id=None):
-        ops = file_mod._get_file_ops(task_id, target=args["target"])
-        return ops.env, resolve_execution_target(args["target"])
+        ops = file_mod._get_file_ops(task_id, target=args["execution_target"])
+        return ops.env, resolve_execution_target(args["execution_target"])
 
     nested_env, nested = code_mod._dispatch_rpc_tool(
         nested_file_ops,
         "read_file",
-        {"target": "box"},
+        {"execution_target": "box"},
         "outer-script",
         code_mod._frozen_target_config(outer),
     )

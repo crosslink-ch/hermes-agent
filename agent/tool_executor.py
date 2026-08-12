@@ -79,11 +79,7 @@ def _ensure_file_checkpoint(
     # discover the project root.
     from tools.file_tools import _resolve_path_for_task
 
-    from tools.execution_targets import coalesce_execution_target
-
-    target = coalesce_execution_target(
-        function_args.get("execution_target"), function_args.get("target"),
-    )
+    target = function_args.get("execution_target")
     resolved_path = _resolve_path_for_task(
         file_path, effective_task_id or "default", target,
     )
@@ -146,8 +142,6 @@ def _resolved_tool_target(tool_name: str, args: dict, result: Any = None) -> str
             return payload["target"]
     if tool_name in _TARGET_RESULT_TOOLS:
         value = args.get("execution_target")
-        if value is None and tool_name != "search_files":
-            value = args.get("target")
     else:
         value = None
     return value if isinstance(value, str) and value else None
@@ -247,18 +241,10 @@ def _selected_local_target_cwd(
 ) -> str | None:
     """Return the selected target's host cwd, or None for remote targets."""
     try:
-        from tools.execution_targets import (
-            coalesce_execution_target,
-            resolve_execution_target,
-        )
+        from tools.execution_targets import resolve_execution_target
         from tools.terminal_tool import _get_env_config, get_session_cwd
 
-        legacy_target = (
-            function_args.get("target") if function_name != "search_files" else None
-        )
-        target = coalesce_execution_target(
-            function_args.get("execution_target"), legacy_target,
-        )
+        target = function_args.get("execution_target")
         resolution = resolve_execution_target(target)
         if resolution.backend != "local":
             return None
@@ -802,17 +788,15 @@ def _run_agent_tool_execution_middleware(
             state["dispatched"] = True
             state["args"] = final_args
 
-        # Execution middleware has now produced the final arguments. Reject
-        # conflicting aliases before hooks, guardrails, progress, or approval.
+        # Execution middleware has now produced the final arguments. Enforce
+        # the canonical routing API before hooks, guardrails, progress, or approval.
         try:
             from tools.execution_targets import (
                 ExecutionTargetError,
-                normalize_execution_target_args,
+                validate_execution_target_args,
             )
 
-            final_args = normalize_execution_target_args(
-                function_name, final_args,
-            )
+            validate_execution_target_args(function_name, final_args)
         except ExecutionTargetError as exc:
             state["blocked"] = True
             return json.dumps({"error": str(exc)}, ensure_ascii=False)

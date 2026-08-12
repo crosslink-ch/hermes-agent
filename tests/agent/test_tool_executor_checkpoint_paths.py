@@ -69,7 +69,7 @@ def test_named_local_target_checkpoint_uses_target_cwd(tmp_path, monkeypatch):
     _ensure_file_checkpoint(
         agent,
         "write_file",
-        {"path": "existing.txt", "target": "alpha"},
+        {"path": "existing.txt", "execution_target": "alpha"},
         "gateway-session",
     )
 
@@ -104,7 +104,7 @@ def test_remote_target_skips_host_checkpoint(monkeypatch):
     _ensure_file_checkpoint(
         agent,
         "write_file",
-        {"path": "remote.txt", "target": "devbox"},
+        {"path": "remote.txt", "execution_target": "devbox"},
         "gateway-session",
     )
 
@@ -155,7 +155,7 @@ def test_destructive_terminal_checkpoint_prefers_explicit_workdir(
         function_args={
             "command": "rm -f marker",
             "workdir": str(actual),
-            "target": "local",
+            "execution_target": "local",
         },
         effective_task_id="gateway-session",
         tool_call_id="call-1",

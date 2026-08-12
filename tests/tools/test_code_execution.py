@@ -813,7 +813,9 @@ class TestRpcTokenAuthorization(unittest.TestCase):
             "secret-token",
             [{
                 "tool": "terminal",
-                "args": {"command": "echo hi", "target": "host"},
+                "args": {
+                    "command": "echo hi", "execution_target": "host",
+                },
                 "token": "secret-token",
             }],
             execution_target="sandbox",

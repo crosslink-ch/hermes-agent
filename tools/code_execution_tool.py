@@ -343,15 +343,15 @@ _TOOL_STUBS = {
     ),
     "read_file": (
         "read_file",
-        "path: str, offset: int = 1, limit: int = 2000, execution_target: str = None, runtime_scope: str = None, *, target: str = None",
+        "path: str, offset: int = 1, limit: int = 2000, execution_target: str = None, runtime_scope: str = None",
         '"""Read a file (1-indexed lines). Returns dict with "content" and "total_lines"."""',
-        '{"path": path, "offset": offset, "limit": limit, "execution_target": execution_target, "target": target, "runtime_scope": runtime_scope}',
+        '{"path": path, "offset": offset, "limit": limit, "execution_target": execution_target, "runtime_scope": runtime_scope}',
     ),
     "write_file": (
         "write_file",
-        "path: str, content: str, cross_profile: bool = False, execution_target: str = None, *, target: str = None",
+        "path: str, content: str, cross_profile: bool = False, execution_target: str = None",
         '"""Write content to a file (always overwrites). Returns dict with status. cross_profile=True opts out of the cross-Hermes-profile soft guard."""',
-        '{"path": path, "content": content, "cross_profile": cross_profile, "execution_target": execution_target, "target": target}',
+        '{"path": path, "content": content, "cross_profile": cross_profile, "execution_target": execution_target}',
     ),
     "search_files": (
         "search_files",
@@ -361,15 +361,15 @@ _TOOL_STUBS = {
     ),
     "patch": (
         "patch",
-        'path: str = None, old_string: str = None, new_string: str = None, replace_all: bool = False, mode: str = "replace", patch: str = None, cross_profile: bool = False, execution_target: str = None, *, target: str = None',
+        'path: str = None, old_string: str = None, new_string: str = None, replace_all: bool = False, mode: str = "replace", patch: str = None, cross_profile: bool = False, execution_target: str = None',
         '"""Targeted find-and-replace (mode="replace") or V4A multi-file patches (mode="patch"). Returns dict with status. cross_profile=True opts out of the cross-Hermes-profile soft guard."""',
-        '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile, "execution_target": execution_target, "target": target}',
+        '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile, "execution_target": execution_target}',
     ),
     "terminal": (
         "terminal",
-        "command: str, timeout: int = None, workdir: str = None, execution_target: str = None, *, target: str = None",
+        "command: str, timeout: int = None, workdir: str = None, execution_target: str = None",
         '"""Run a shell command (foreground only). Returns dict with "output" and "exit_code"."""',
-        '{"command": command, "timeout": timeout, "workdir": workdir, "execution_target": execution_target, "target": target}',
+        '{"command": command, "timeout": timeout, "workdir": workdir, "execution_target": execution_target}',
     ),
 }
 
@@ -682,13 +682,11 @@ def _inherit_execution_target(
             )
 
     inherited = dict(tool_args)
-    requested = inherited.get(selector)
     if tool_name != "search_files":
-        # Persisted pre-rename RPC calls may still carry the hidden alias.
-        from tools.execution_targets import coalesce_execution_target
+        from tools.execution_targets import validate_execution_target_args
 
-        requested = coalesce_execution_target(requested, inherited.get("target"))
-        inherited.pop("target", None)
+        validate_execution_target_args(tool_name, inherited)
+    requested = inherited.get(selector)
     if requested is None:
         inherited[selector] = execution_target
     elif str(requested) != execution_target:
@@ -1574,8 +1572,6 @@ def execute_code(
     task_id: Optional[str] = None,
     enabled_tools: Optional[List[str]] = None,
     execution_target: Optional[str] = None,
-    *,
-    target: Optional[str] = None,
 ) -> str:
     """
     Run a Python script in a sandboxed child process with RPC access
@@ -1591,7 +1587,6 @@ def execute_code(
                        gets the intersection with SANDBOX_ALLOWED_TOOLS.
         execution_target: Optional named execution target. The configured
                           default is selected when omitted.
-        target: Deprecated compatibility alias for ``execution_target``.
 
     Returns:
         JSON string with execution results.
@@ -1606,14 +1601,9 @@ def execute_code(
         return tool_error("No code provided.")
 
     try:
-        from tools.execution_targets import (
-            coalesce_execution_target,
-            resolve_execution_target,
-        )
+        from tools.execution_targets import resolve_execution_target
 
-        resolution = resolve_execution_target(
-            coalesce_execution_target(execution_target, target)
-        )
+        resolution = resolve_execution_target(execution_target)
     except Exception as exc:
         return tool_error(str(exc))
     # Legacy omitted/default selection already routes every nested call to the
@@ -2485,16 +2475,27 @@ EXECUTE_CODE_SCHEMA = build_execute_code_schema()
 # --- Registry ---
 from tools.registry import registry, tool_error
 
-registry.register(
-    name="execute_code",
-    toolset="code_execution",
-    schema=EXECUTE_CODE_SCHEMA,
-    handler=lambda args, **kw: execute_code(
+
+def _handle_execute_code(args, **kw):
+    try:
+        from tools.execution_targets import validate_execution_target_args
+
+        validate_execution_target_args("execute_code", args)
+    except Exception as exc:
+        return tool_error(str(exc))
+    return execute_code(
         code=args.get("code", ""),
         task_id=kw.get("task_id"),
         enabled_tools=kw.get("enabled_tools"),
         execution_target=args.get("execution_target"),
-        target=args.get("target")),
+    )
+
+
+registry.register(
+    name="execute_code",
+    toolset="code_execution",
+    schema=EXECUTE_CODE_SCHEMA,
+    handler=lambda args, **kw: _handle_execute_code(args, **kw),
     check_fn=check_sandbox_requirements,
     emoji="🐍",
     max_result_size_chars=100_000,

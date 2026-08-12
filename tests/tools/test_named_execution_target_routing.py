@@ -73,8 +73,8 @@ def test_same_task_reuses_within_target_and_isolates_across_targets(
     )
 
     first = json.loads(terminal_mod.terminal_tool("pwd", task_id="child-a"))
-    second = json.loads(terminal_mod.terminal_tool("pwd", task_id="child-b", target="alpha"))
-    third = json.loads(terminal_mod.terminal_tool("pwd", task_id="child-a", target="beta"))
+    second = json.loads(terminal_mod.terminal_tool("pwd", task_id="child-b", execution_target="alpha"))
+    third = json.loads(terminal_mod.terminal_tool("pwd", task_id="child-a", execution_target="beta"))
 
     assert first["output"] == second["output"] == str(alpha)
     assert third["output"] == str(beta)
@@ -205,7 +205,7 @@ def test_environment_creation_fails_closed_if_target_changes_before_publish(
 
     if builder == "terminal":
         result = json.loads(terminal_mod.terminal_tool(
-            "pwd", task_id="publish-race", target="alpha",
+            "pwd", task_id="publish-race", execution_target="alpha",
         ))
         assert "changed while its environment was being created" in result["error"]
     elif builder == "file":
@@ -261,7 +261,7 @@ def test_ssh_target_routes_terminal_and_file_adapter_to_same_environment(
     monkeypatch.setattr(terminal_mod, "_create_environment", fake_create)
 
     result = json.loads(terminal_mod.terminal_tool(
-        "pwd", task_id="session", target="devbox",
+        "pwd", task_id="session", execution_target="devbox",
     ))
     file_ops = file_mod._get_file_ops("session", "devbox")
 
@@ -440,10 +440,10 @@ def test_ssh_reads_never_use_host_mtime_dedup(
     )
 
     first = json.loads(file_mod.read_file_tool(
-        "same.txt", task_id="session", target="devbox",
+        "same.txt", task_id="session", execution_target="devbox",
     ))
     second = json.loads(file_mod.read_file_tool(
-        "same.txt", task_id="session", target="devbox",
+        "same.txt", task_id="session", execution_target="devbox",
     ))
 
     assert first["content"] != second["content"]
@@ -565,25 +565,25 @@ def test_real_config_loader_routes_terminal_and_files_between_two_local_targets(
     monkeypatch.delenv("HERMES_PROFILE", raising=False)
 
     alpha_pwd = json.loads(terminal_mod.terminal_tool(
-        "pwd", task_id="configured-session", target="alpha",
+        "pwd", task_id="configured-session", execution_target="alpha",
     ))
     beta_pwd = json.loads(terminal_mod.terminal_tool(
-        "pwd", task_id="configured-session", target="beta",
+        "pwd", task_id="configured-session", execution_target="beta",
     ))
     assert alpha_pwd["output"] == str(alpha)
     assert beta_pwd["output"] == str(beta)
 
     assert json.loads(file_mod.write_file_tool(
-        "same.txt", "from alpha\n", task_id="configured-session", target="alpha",
+        "same.txt", "from alpha\n", task_id="configured-session", execution_target="alpha",
     ))["target"] == "alpha"
     assert json.loads(file_mod.write_file_tool(
-        "same.txt", "from beta\n", task_id="configured-session", target="beta",
+        "same.txt", "from beta\n", task_id="configured-session", execution_target="beta",
     ))["target"] == "beta"
     assert "from alpha" in json.loads(file_mod.read_file_tool(
-        "same.txt", task_id="configured-session", target="alpha",
+        "same.txt", task_id="configured-session", execution_target="alpha",
     ))["content"]
     assert "from beta" in json.loads(file_mod.read_file_tool(
-        "same.txt", task_id="configured-session", target="beta",
+        "same.txt", task_id="configured-session", execution_target="beta",
     ))["content"]
 
 
@@ -612,13 +612,13 @@ def test_workspace_override_applies_only_to_default_named_target(
     )
 
     alpha_pwd = json.loads(terminal_mod.terminal_tool(
-        "pwd", task_id="session", target="alpha",
+        "pwd", task_id="session", execution_target="alpha",
     ))
     beta_pwd = json.loads(terminal_mod.terminal_tool(
-        "pwd", task_id="session", target="beta",
+        "pwd", task_id="session", execution_target="beta",
     ))
     beta_write = json.loads(file_mod.write_file_tool(
-        "target-only.txt", "beta\n", task_id="session", target="beta",
+        "target-only.txt", "beta\n", task_id="session", execution_target="beta",
     ))
 
     assert alpha_pwd["output"] == str(host_workspace)
@@ -662,30 +662,53 @@ def test_unknown_target_errors_are_returned_by_execution_and_file_tools(
     assert not (alpha / "x.txt").exists()
 
 
-def test_model_facing_handlers_accept_hidden_legacy_target_alias(
+def test_model_facing_handlers_reject_removed_target_selector(
     monkeypatch, tmp_path, isolated_target_state,
 ):
     import tools.execution_targets as targets_mod
 
     terminal_mod, file_mod = isolated_target_state
-    legacy = tmp_path / "legacy"
-    legacy.mkdir()
+    alpha = tmp_path / "alpha"
+    alpha.mkdir()
     monkeypatch.setattr(
         targets_mod,
         "_load_merged_config",
-        lambda: _named_config({"legacy": str(legacy)}),
+        lambda: _named_config({"alpha": str(alpha)}),
     )
 
     terminal_result = json.loads(terminal_mod._handle_terminal({
-        "command": "pwd", "target": "legacy",
-    }, task_id="legacy-handler"))
+        "command": "pwd", "target": "alpha",
+    }, task_id="removed-selector"))
     write_result = json.loads(file_mod._handle_write_file({
-        "path": "alias.txt", "content": "legacy\n", "target": "legacy",
-    }, task_id="legacy-handler"))
+        "path": "alias.txt", "content": "data\n", "target": "alpha",
+    }, task_id="removed-selector"))
 
-    assert terminal_result["target"] == "legacy"
-    assert write_result["target"] == "legacy"
-    assert (legacy / "alias.txt").read_text(encoding="utf-8") == "legacy\n"
+    assert "does not accept 'target'" in terminal_result["error"]
+    assert "does not accept 'target'" in write_result["error"]
+    assert not (alpha / "alias.txt").exists()
+
+
+def test_public_execution_routing_signatures_have_no_target_parameter(
+    isolated_target_state,
+):
+    import inspect
+    import tools.code_execution_tool as code_mod
+
+    terminal_mod, file_mod = isolated_target_state
+    for function in (
+        terminal_mod.terminal_tool,
+        file_mod.read_file_tool,
+        file_mod.write_file_tool,
+        file_mod.patch_tool,
+        code_mod.execute_code,
+    ):
+        parameters = inspect.signature(function).parameters
+        assert "execution_target" in parameters
+        assert "target" not in parameters
+
+    search_parameters = inspect.signature(file_mod.search_tool).parameters
+    assert "target" in search_parameters
+    assert "execution_target" in search_parameters
 
 
 def test_cleanup_without_target_removes_all_task_scopes_and_explicit_removes_one(
@@ -946,21 +969,24 @@ def test_execute_code_inherits_target_and_rejects_nested_override(
     namespace["write_file"](
         "nested.txt", "beta-explicit\n", execution_target="beta",
     )
-    namespace["write_file"]("nested.txt", "beta-legacy\n", target="beta")
+    with pytest.raises(TypeError, match="unexpected keyword argument 'target'"):
+        namespace["write_file"]("nested.txt", "invalid\n", target="beta")
     namespace["search_files"]("needle")
 
     inherited_write = code_mod._inherit_execution_target(
         calls[0][0], calls[0][1], "alpha",
     )
     inherited_search = code_mod._inherit_execution_target(
-        calls[3][0], calls[3][1], "alpha",
+        calls[2][0], calls[2][1], "alpha",
     )
     assert inherited_write["execution_target"] == "alpha"
     assert inherited_search["execution_target"] == "alpha"
     with pytest.raises(ValueError, match="cannot select 'beta'"):
         code_mod._inherit_execution_target(calls[1][0], calls[1][1], "alpha")
-    with pytest.raises(ValueError, match="cannot select 'beta'"):
-        code_mod._inherit_execution_target(calls[2][0], calls[2][1], "alpha")
+    with pytest.raises(ValueError, match="does not accept 'target'"):
+        code_mod._inherit_execution_target(
+            "write_file", {"path": "x", "target": "beta"}, "alpha",
+        )
 
     remote_config = _named_config({"alpha": str(alpha), "beta": str(beta)})
     remote_config["terminal"]["targets"]["alpha"]["backend"] = "ssh"
@@ -1093,12 +1119,12 @@ def test_execute_code_rpc_dispatch_uses_frozen_approved_target_config(
     targets_mod.set_execution_target_config_source(live)
 
     def handler(_name, args, task_id=None):
-        resolved = targets_mod.resolve_execution_target(args["target"])
-        current = targets_mod.resolve_live_execution_target(args["target"])
+        resolved = targets_mod.resolve_execution_target(args["execution_target"])
+        current = targets_mod.resolve_live_execution_target(args["execution_target"])
         return resolved.backend, resolved.config.get("cwd"), current.backend
 
     assert code_mod._dispatch_rpc_tool(
-        handler, "write_file", {"target": "alpha"}, "task", approved,
+        handler, "write_file", {"execution_target": "alpha"}, "task", approved,
     ) == ("local", "/approved", "ssh")
     assert targets_mod.resolve_execution_target("alpha").backend == "ssh"
 
@@ -1126,7 +1152,7 @@ def test_execute_code_routes_real_nested_file_call_to_selected_local_target(
         "print(write_file('from-code.txt', 'beta-via-rpc\\n'))\n",
         task_id="execute-target-session",
         enabled_tools=["write_file"],
-        target="beta",
+        execution_target="beta",
     ))
 
     assert result["status"] == "success"
@@ -1293,7 +1319,7 @@ def test_tool_output_persistence_uses_the_result_target(monkeypatch):
         lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("bad target config")),
     )
     assert executor._active_env_for_tool_result(
-        "session", "terminal", {"target": "broken"},
+        "session", "terminal", {"execution_target": "broken"},
     ) is None
     captured.clear()
     target_map = {"call-broken": "broken"}
@@ -1643,7 +1669,7 @@ def test_idle_persistent_docker_hot_edit_cleans_runtime_before_replacement(
     def build():
         if builder == "terminal":
             result = json.loads(terminal_mod.terminal_tool(
-                "pwd", task_id="session", target="sandbox",
+                "pwd", task_id="session", execution_target="sandbox",
             ))
             if result.get("status") == "error":
                 raise RuntimeError(result["error"])
@@ -1721,7 +1747,7 @@ def test_persistent_docker_hot_edit_cleanup_failure_restores_runtime_ownership(
     def build():
         if builder == "terminal":
             result = json.loads(terminal_mod.terminal_tool(
-                "pwd", task_id="session", target="sandbox",
+                "pwd", task_id="session", execution_target="sandbox",
             ))
             if result.get("status") == "error":
                 raise RuntimeError(result["error"])
@@ -1774,7 +1800,7 @@ def test_local_background_process_keeps_producing_target_generation(
 
     monkeypatch.setattr(process_registry, "spawn_local", fake_spawn_local)
     result = json.loads(terminal_mod.terminal_tool(
-        "sleep 1", task_id="session", target="alpha", background=True,
+        "sleep 1", task_id="session", execution_target="alpha", background=True,
     ))
     producing_env = captured["env_ref"]
     producing_scope = targets_mod.resolve_execution_target("alpha").security_scope
@@ -1950,7 +1976,7 @@ def test_gateway_script_guard_reads_selected_named_target_cwd(
     monkeypatch.setenv("_HERMES_GATEWAY", "1")
 
     result = json.loads(terminal_mod.terminal_tool(
-        "bash restart.sh", task_id="gateway-guard", target="beta",
+        "bash restart.sh", task_id="gateway-guard", execution_target="beta",
     ))
 
     assert result["status"] == "error"
@@ -2009,7 +2035,7 @@ def test_checkpoint_alias_flip_pins_dispatch_generation(monkeypatch, tmp_path):
         function_args={
             "path": "sample.txt",
             "content": "data",
-            "target": "dev",
+            "execution_target": "dev",
         },
         effective_task_id="target-race",
         tool_call_id="call-1",
@@ -2030,15 +2056,13 @@ def test_checkpoint_alias_flip_pins_dispatch_generation(monkeypatch, tmp_path):
     targets_mod.set_execution_target_config_source(None)
 
 
-def test_conflicting_target_aliases_block_before_agent_authorization(
-    monkeypatch,
-):
+def test_removed_target_selector_blocks_before_agent_authorization(monkeypatch):
     from agent import tool_executor
 
     class Guardrails:
         @staticmethod
         def before_call(_name, _args):
-            raise AssertionError("guardrails must not see conflicting aliases")
+            raise AssertionError("guardrails must not see an invalid selector")
 
     agent = SimpleNamespace(
         session_id="session",
@@ -2056,7 +2080,7 @@ def test_conflicting_target_aliases_block_before_agent_authorization(
     monkeypatch.setattr(
         "hermes_cli.plugins.resolve_pre_tool_block",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("pre-tool hooks must not see conflicting aliases")
+            AssertionError("pre-tool hooks must not see an invalid selector")
         ),
     )
     monkeypatch.setattr(
@@ -2074,17 +2098,14 @@ def test_conflicting_target_aliases_block_before_agent_authorization(
         function_args={
             "path": "private.txt",
             "content": "private",
-            "execution_target": "alpha",
-            "target": "beta",
+            "target": "alpha",
         },
-        effective_task_id="conflict",
-        tool_call_id="call-conflict",
+        effective_task_id="invalid-selector",
+        tool_call_id="call-invalid-selector",
         execute=lambda args: execute_calls.append(args),
     )
 
-    assert "Conflicting execution target selectors" in json.loads(
-        managed.result
-    )["error"]
+    assert "does not accept 'target'" in json.loads(managed.result)["error"]
     assert managed.blocked is True
     assert execute_calls == []
 
@@ -2218,7 +2239,7 @@ def test_all_environment_builders_forward_docker_shm_size(
     monkeypatch.setattr(terminal_mod, "_create_environment", fake_create)
     if builder == "terminal":
         result = json.loads(terminal_mod.terminal_tool(
-            "pwd", task_id="shm-terminal", target="sandbox",
+            "pwd", task_id="shm-terminal", execution_target="sandbox",
         ))
         assert result["exit_code"] == 0
     elif builder == "file":

@@ -198,13 +198,7 @@ def _plan_tool_batch_segments(tool_calls, *, execution_cwd: Optional[Path] = Non
             continue
 
         if tool_name in _PATH_SCOPED_TOOLS:
-            target_selected = (
-                function_args.get("execution_target") is not None
-                or (
-                    tool_name != "search_files"
-                    and function_args.get("target") is not None
-                )
-            )
+            target_selected = function_args.get("execution_target") is not None
             if named_default or target_selected:
                 _add_sequential(tool_call)
                 continue

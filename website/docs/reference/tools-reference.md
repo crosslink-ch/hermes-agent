@@ -201,7 +201,7 @@ execute_code(code="print('hello')", execution_target="devbox")
 
 Omitting the selector uses `terminal.default_target` when named targets exist. Without named targets, omission and `execution_target="default"` preserve the legacy environment; other names fail. Successful results and approval prompts identify the resolved `target` and `backend`. Background process follow-ups need only their `session_id`; process results retain the spawn target/backend across poll, list, log, wait, and kill. Local checkpointed processes can recover after restart; remote/container handles are reported as unavailable rather than rebound to a different environment.
 
-Saved-output hints can include an opaque `runtime_scope`. Pass it back to `read_file` together with the shown `execution_target`; this pins retrieval to the exact producing environment even if that target alias changes later.
+Saved-output hints can include an opaque `runtime_scope`. Pass it back to `read_file` together with the shown `execution_target`; this pins retrieval to the exact producing environment even if that target registration changes later.
 
 Inside `execute_code`, nested target-aware `hermes_tools` calls inherit and are bound to the script's selected target. A nested call that explicitly selects another target is rejected server-side; start a separate top-level `execute_code` call for cross-target orchestration. Python itself runs on the selected environment, and project mode resolves its cwd from that target's session/config state.
 

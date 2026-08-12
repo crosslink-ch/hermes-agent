@@ -1812,12 +1812,12 @@ class TestConcurrentToolExecution:
     def test_explicit_targeted_writes_are_sequential_barriers(self, agent):
         tc1 = _mock_tool_call(
             name="write_file",
-            arguments='{"path":"src/a.py","content":"one","target":"beta"}',
+            arguments='{"path":"src/a.py","content":"one","execution_target":"beta"}',
             call_id="c1",
         )
         tc2 = _mock_tool_call(
             name="write_file",
-            arguments='{"path":"src/b.py","content":"two","target":"beta"}',
+            arguments='{"path":"src/b.py","content":"two","execution_target":"beta"}',
             call_id="c2",
         )
         mock_msg = _mock_assistant_msg(content="", tool_calls=[tc1, tc2])

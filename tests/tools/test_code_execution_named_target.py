@@ -25,15 +25,15 @@ def test_execute_code_rpc_uses_frozen_approved_target_config():
     targets_mod.set_execution_target_config_source(live)
 
     def handler(_name, args, task_id=None):
-        selected = targets_mod.resolve_execution_target(args["target"])
-        current = targets_mod.resolve_live_execution_target(args["target"])
+        selected = targets_mod.resolve_execution_target(args["execution_target"])
+        current = targets_mod.resolve_live_execution_target(args["execution_target"])
         return selected.backend, selected.config.get("cwd"), current.backend
 
     try:
         assert code_mod._dispatch_rpc_tool(
             handler,
             "write_file",
-            {"target": "alpha"},
+            {"execution_target": "alpha"},
             "task",
             approved,
         ) == ("local", "/approved", "ssh")

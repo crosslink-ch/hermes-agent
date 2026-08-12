@@ -1298,17 +1298,15 @@ def handle_function_call(
         except Exception as _mw_err:
             logger.debug("tool_request middleware error: %s", _mw_err)
 
-    # Reject conflicting canonical/legacy selectors before pre-tool hooks,
+    # Enforce the canonical execution-routing API before pre-tool hooks,
     # ACP edit approval, guardrails, progress, checkpoints, or dispatch.
     try:
         from tools.execution_targets import (
             ExecutionTargetError,
-            normalize_execution_target_args,
+            validate_execution_target_args,
         )
 
-        function_args = normalize_execution_target_args(
-            function_name, function_args,
-        )
+        validate_execution_target_args(function_name, function_args)
     except ExecutionTargetError as exc:
         return tool_error(str(exc))
 
@@ -1412,7 +1410,6 @@ def handle_function_call(
                     task_id or "default",
                     (
                         function_args.get("execution_target")
-                        or function_args.get("target")
                         if function_name in _TARGET_SELECTOR_TOOLS
                         else None
                     ),
