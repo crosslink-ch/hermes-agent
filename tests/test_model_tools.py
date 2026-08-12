@@ -3,6 +3,7 @@
 import json
 from unittest.mock import ANY, call, patch
 
+import pytest
 
 from model_tools import (
     handle_function_call,
@@ -150,6 +151,182 @@ class TestHandleFunctionCall:
         post_call = next(call for call in hook_calls if call[0] == "post_tool_call")
         assert pre_call[1]["middleware_trace"] == expected_trace
         assert post_call[1]["middleware_trace"] == expected_trace
+
+    def test_tool_request_middleware_can_select_target_before_authorization(
+        self, monkeypatch,
+    ):
+        policy_checked = []
+        approved = []
+        dispatched = []
+
+        def request_middleware(kind, **kwargs):
+            if kind != "tool_request":
+                return []
+            return [{
+                "args": {
+                    **kwargs["args"],
+                    "execution_target": "beta",
+                },
+                "source": "target-selector",
+            }]
+
+        manager = type("Manager", (), {"_middleware": {}})()
+        monkeypatch.setattr(
+            "hermes_cli.plugins.has_middleware",
+            lambda kind: kind == "tool_request",
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.invoke_middleware", request_middleware,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_manager", lambda: manager,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.resolve_pre_tool_block",
+            lambda _name, args, **_kwargs: policy_checked.append(dict(args)) or None,
+        )
+        monkeypatch.setattr(
+            "acp_adapter.edit_approval.maybe_require_edit_approval",
+            lambda _name, args: approved.append(dict(args)) or None,
+        )
+        monkeypatch.setattr(
+            "model_tools.registry.dispatch",
+            lambda name, args, **kwargs: (
+                dispatched.append((name, dict(args), kwargs))
+                or json.dumps({"ok": True})
+            ),
+        )
+
+        result = json.loads(handle_function_call(
+            "terminal",
+            {"command": "true", "execution_target": "alpha"},
+        ))
+        selected = {"command": "true", "execution_target": "beta"}
+
+        assert result == {"ok": True}
+        assert policy_checked == [selected]
+        assert approved == [selected]
+        assert dispatched[0][0:2] == ("terminal", selected)
+
+    def test_tool_execution_middleware_cannot_retarget_after_authorization(
+        self, monkeypatch,
+    ):
+        policy_checked = []
+        approved = []
+        dispatched = []
+
+        def execution_middleware(**kwargs):
+            return kwargs["next_call"]({
+                **kwargs["args"],
+                "execution_target": "beta",
+            })
+
+        manager = type(
+            "Manager",
+            (),
+            {"_middleware": {"tool_execution": [execution_middleware]}},
+        )()
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_manager", lambda: manager,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.resolve_pre_tool_block",
+            lambda _name, args, **_kwargs: policy_checked.append(dict(args)) or None,
+        )
+        monkeypatch.setattr(
+            "acp_adapter.edit_approval.maybe_require_edit_approval",
+            lambda _name, args: approved.append(dict(args)) or None,
+        )
+        monkeypatch.setattr(
+            "model_tools.registry.dispatch",
+            lambda *args, **kwargs: dispatched.append((args, kwargs)) or "{}",
+        )
+
+        original = {
+            "path": "never-written.txt",
+            "content": "x",
+            "execution_target": "alpha",
+        }
+        result = json.loads(handle_function_call("write_file", original))
+
+        assert policy_checked == [original]
+        assert approved == [original]
+        assert "cannot change 'execution_target' after authorization" in result["error"]
+        assert dispatched == []
+
+    def test_tool_execution_middleware_can_rewrite_non_routing_args(
+        self, monkeypatch,
+    ):
+        dispatched = []
+
+        def execution_middleware(**kwargs):
+            return kwargs["next_call"]({
+                **kwargs["args"],
+                "command": "printf ok",
+            })
+
+        manager = type(
+            "Manager",
+            (),
+            {"_middleware": {"tool_execution": [execution_middleware]}},
+        )()
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_manager", lambda: manager,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.resolve_pre_tool_block",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "model_tools.registry.dispatch",
+            lambda name, args, **kwargs: (
+                dispatched.append((name, dict(args), kwargs))
+                or json.dumps({"ok": True})
+            ),
+        )
+
+        result = json.loads(handle_function_call(
+            "terminal",
+            {"command": "true", "execution_target": "alpha"},
+        ))
+
+        assert result == {"ok": True}
+        assert dispatched[0][0:2] == (
+            "terminal",
+            {"command": "printf ok", "execution_target": "alpha"},
+        )
+
+    def test_execution_target_dispatch_guard_preserves_selector_only(self):
+        from tools.execution_targets import (
+            ExecutionTargetError,
+            validate_execution_target_dispatch_args,
+        )
+
+        validate_execution_target_dispatch_args(
+            "terminal",
+            {"command": "true", "execution_target": "alpha"},
+            {"command": "printf ok", "execution_target": "alpha"},
+        )
+        validate_execution_target_dispatch_args(
+            "search_files",
+            {"pattern": "x", "target": "content", "execution_target": "alpha"},
+            {"pattern": "x", "target": "files", "execution_target": "alpha"},
+        )
+
+        changed_selectors = [
+            ({"execution_target": "alpha"}, {"execution_target": "beta"}),
+            ({"execution_target": "alpha"}, {}),
+            ({}, {"execution_target": "alpha"}),
+            (
+                {"execution_target": "alpha"},
+                {"execution_target": "alpha", "target": "beta"},
+            ),
+        ]
+        for authorized, dispatch in changed_selectors:
+            with pytest.raises(ExecutionTargetError):
+                validate_execution_target_dispatch_args(
+                    "terminal", authorized, dispatch,
+                )
 
     def test_registry_exception_emits_terminal_tool_hook(self, monkeypatch):
         from hermes_cli import lifecycle

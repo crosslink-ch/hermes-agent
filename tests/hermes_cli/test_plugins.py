@@ -151,6 +151,96 @@ class TestPluginDiscovery:
 
 
 
+    @pytest.mark.parametrize(
+        ("original_args", "replacement_args"),
+        [
+            (
+                {"command": "true", "execution_target": "alpha"},
+                {"command": "true", "execution_target": "beta"},
+            ),
+            (
+                {"command": "true", "execution_target": "alpha"},
+                {"command": "true"},
+            ),
+            (
+                {"command": "true"},
+                {"command": "true", "execution_target": "alpha"},
+            ),
+        ],
+    )
+    def test_tool_execution_middleware_cannot_replace_remove_or_inject_target(
+        self, monkeypatch, original_args, replacement_args,
+    ):
+        from tools.execution_targets import ExecutionTargetError
+
+        def execution_middleware(**kwargs):
+            return kwargs["next_call"](replacement_args)
+
+        manager = types.SimpleNamespace(
+            _middleware={"tool_execution": [execution_middleware]},
+        )
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+        dispatched = []
+
+        with pytest.raises(ExecutionTargetError):
+            run_tool_execution_middleware(
+                "terminal",
+                original_args,
+                lambda payload: dispatched.append(payload),
+            )
+
+        assert dispatched == []
+
+    def test_tool_execution_middleware_cannot_mutate_target_in_place(
+        self, monkeypatch,
+    ):
+        from tools.execution_targets import ExecutionTargetError
+
+        def execution_middleware(**kwargs):
+            kwargs["args"]["execution_target"] = "beta"
+            return kwargs["next_call"]()
+
+        manager = types.SimpleNamespace(
+            _middleware={"tool_execution": [execution_middleware]},
+        )
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+        dispatched = []
+        args = {"command": "true", "execution_target": "alpha"}
+
+        with pytest.raises(ExecutionTargetError):
+            run_tool_execution_middleware(
+                "terminal",
+                args,
+                lambda payload: dispatched.append(payload),
+            )
+
+        assert dispatched == []
+
+    def test_tool_execution_middleware_can_rewrite_non_routing_args(
+        self, monkeypatch,
+    ):
+        def execution_middleware(**kwargs):
+            return kwargs["next_call"]({
+                **kwargs["args"],
+                "command": "printf ok",
+            })
+
+        manager = types.SimpleNamespace(
+            _middleware={"tool_execution": [execution_middleware]},
+        )
+        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
+
+        result = run_tool_execution_middleware(
+            "terminal",
+            {"command": "true", "execution_target": "alpha"},
+            lambda payload: payload,
+        )
+
+        assert result == {
+            "command": "printf ok",
+            "execution_target": "alpha",
+        }
+
     def test_failed_discovery_is_not_cached(self, tmp_path, monkeypatch):
         """A sweep that raises must not cache 'discovered' with no plugins.
 

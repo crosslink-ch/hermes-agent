@@ -213,10 +213,24 @@ def run_tool_execution_middleware(
     callbacks = _get_middleware_callbacks(TOOL_EXECUTION_MIDDLEWARE)
     if not callbacks:
         return next_call(args)
+
+    from tools.execution_targets import validate_execution_target_dispatch_args
+
+    authorized_args = _safe_copy(args)
+
+    def guarded_next_call(dispatch_args: Dict[str, Any]) -> Any:
+        # Detach the dispatched payload from middleware-owned objects so the
+        # selector cannot change between validation and the tool call.
+        final_args = _safe_copy(dispatch_args)
+        validate_execution_target_dispatch_args(
+            tool_name, authorized_args, final_args,
+        )
+        return next_call(final_args)
+
     return _run_execution_chain(
         TOOL_EXECUTION_MIDDLEWARE,
         callbacks,
-        next_call,
+        guarded_next_call,
         tool_name=tool_name,
         args=args,
         original_args=context.pop("original_args", args),

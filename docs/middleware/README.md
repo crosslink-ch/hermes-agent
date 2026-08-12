@@ -230,7 +230,11 @@ def annotate_tool_execution(**kwargs):
 ```
 
 Execution middleware may call `next_call(modified_args)` to pass a changed
-payload to later middleware and the base tool dispatcher.
+payload to later middleware and the base tool dispatcher. For target-aware tools,
+those modified arguments must preserve the exact `execution_target` that hooks
+and approvals evaluated. Use `tool_request` middleware when routing must change
+before authorization. The unrelated `search_files.target` field remains its
+`content`/`files` operation selector.
 
 Plugin-specific examples should live with the plugin that owns the behavior.
 For NeMo Relay adaptive execution middleware, see

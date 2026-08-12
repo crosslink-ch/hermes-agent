@@ -52,6 +52,35 @@ def validate_execution_target_args(
         )
 
 
+def validate_execution_target_dispatch_args(
+    tool_name: str,
+    authorized_arguments: Mapping[str, Any],
+    dispatch_arguments: Mapping[str, Any],
+) -> None:
+    """Prevent execution middleware from changing routing after authorization.
+
+    Tool request middleware runs before hooks and approvals, so it may select an
+    execution target. Tool execution middleware may still rewrite ordinary
+    arguments, but it must not add, remove, or replace that routing selector.
+    """
+    validate_execution_target_args(tool_name, dispatch_arguments)
+    if tool_name not in _EXECUTION_TARGET_ARGUMENT_TOOLS:
+        return
+
+    authorized_has_target = "execution_target" in authorized_arguments
+    dispatch_has_target = "execution_target" in dispatch_arguments
+    if authorized_has_target != dispatch_has_target or (
+        authorized_has_target
+        and authorized_arguments["execution_target"]
+        != dispatch_arguments["execution_target"]
+    ):
+        raise ExecutionTargetError(
+            f"{tool_name} execution middleware cannot change "
+            "'execution_target' after authorization; use tool request "
+            "middleware to select the execution target before authorization."
+        )
+
+
 _NAMED_TARGET_BACKENDS = frozenset({
     "local", "docker", "ssh", "modal", "daytona", "singularity",
     "vercel_sandbox",

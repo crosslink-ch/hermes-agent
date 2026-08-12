@@ -1304,6 +1304,7 @@ def handle_function_call(
         from tools.execution_targets import (
             ExecutionTargetError,
             validate_execution_target_args,
+            validate_execution_target_dispatch_args,
         )
 
         validate_execution_target_args(function_name, function_args)
@@ -1417,6 +1418,11 @@ def handle_function_call(
             except Exception:
                 pass  # file_tools may not be loaded yet
 
+        # Pin the arguments that hooks and approvals evaluated. Execution
+        # middleware may rewrite ordinary arguments, but changing the routing
+        # selector here would retarget the call after authorization.
+        _authorized_function_args = dict(function_args)
+
         # Measure tool dispatch latency so post_tool_call and
         # transform_tool_result hooks can observe per-tool duration.
         # Inspired by Claude Code 2.1.119, which added ``duration_ms`` to
@@ -1442,7 +1448,7 @@ def handle_function_call(
                 # Prefer the caller-provided list so subagents can't overwrite
                 # the parent's tool set via the process-global.
                 sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
-                def _dispatch(next_args: Dict[str, Any]) -> Any:
+                def _registry_dispatch(next_args: Dict[str, Any]) -> Any:
                     return registry.dispatch(
                         function_name, next_args,
                         task_id=task_id,
@@ -1450,13 +1456,20 @@ def handle_function_call(
                         enabled_tools=sandbox_enabled,
                     )
             else:
-                def _dispatch(next_args: Dict[str, Any]) -> Any:
+                def _registry_dispatch(next_args: Dict[str, Any]) -> Any:
                     return registry.dispatch(
                         function_name, next_args,
                         task_id=task_id,
                         session_id=session_id,
                         user_task=user_task,
                     )
+
+            def _dispatch(next_args: Dict[str, Any]) -> Any:
+                validate_execution_target_dispatch_args(
+                    function_name, _authorized_function_args, next_args,
+                )
+                return _registry_dispatch(next_args)
+
             if skip_tool_execution_middleware:
                 result = _dispatch(function_args)
             else:
