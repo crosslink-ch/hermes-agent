@@ -1767,13 +1767,14 @@ class ProcessRegistry:
                     return self._with_execution_metadata(result, session)
                 self._terminate_host_pid(session.pid, session.host_start_time)
             else:
-                return {
+                result = {
                     "status": "error",
                     "error": (
                         "Recovered process cannot be killed after restart because "
                         "its original runtime handle is no longer available"
                     ),
                 }
+                return self._with_execution_metadata(result, session)
             # Capture output before marking consumed, then mark consumed before
             # exposing ``exited`` to watcher tasks. This closes the delayed
             # notification race without discarding the terminal transcript.
@@ -1796,7 +1797,9 @@ class ProcessRegistry:
             }
             return self._with_execution_metadata(result, session)
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            return self._with_execution_metadata(
+                {"status": "error", "error": str(e)}, session,
+            )
 
     def write_stdin(self, session_id: str, data: str) -> dict:
         """Send raw data to a running process's stdin (no newline appended)."""

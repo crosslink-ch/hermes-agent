@@ -1012,6 +1012,30 @@ class TestKillProcess:
         finally:
             registry._running.pop(s.id, None)
 
+    def test_kill_error_preserves_execution_target_metadata(self, registry):
+        s = _make_session(sid="proc_kill_error", command="sleep 999")
+        s.process = MagicMock()
+        s.process.pid = 424242
+        s.target = "box"
+        s.backend = "local"
+        s.runtime_scope = "scope-server-1"
+        registry._running[s.id] = s
+
+        with patch.object(
+            registry,
+            "_terminate_host_pid",
+            side_effect=RuntimeError("termination raced with process exit"),
+        ):
+            result = registry.kill_process(s.id)
+
+        assert result == {
+            "status": "error",
+            "error": "termination raced with process exit",
+            "target": "box",
+            "backend": "local",
+            "runtime_scope": "scope-server-1",
+        }
+
 
 # =========================================================================
 # Tool handler
