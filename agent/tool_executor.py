@@ -79,7 +79,11 @@ def _ensure_file_checkpoint(
     # discover the project root.
     from tools.file_tools import _resolve_path_for_task
 
-    target = function_args.get("target")
+    from tools.execution_targets import coalesce_execution_target
+
+    target = coalesce_execution_target(
+        function_args.get("execution_target"), function_args.get("target"),
+    )
     resolved_path = _resolve_path_for_task(
         file_path, effective_task_id or "default", target,
     )
@@ -140,10 +144,10 @@ def _resolved_tool_target(tool_name: str, args: dict, result: Any = None) -> str
             payload = None
         if isinstance(payload, dict) and isinstance(payload.get("target"), str):
             return payload["target"]
-    if tool_name == "search_files":
+    if tool_name in _TARGET_RESULT_TOOLS:
         value = args.get("execution_target")
-    elif tool_name in _TARGET_RESULT_TOOLS:
-        value = args.get("target")
+        if value is None and tool_name != "search_files":
+            value = args.get("target")
     else:
         value = None
     return value if isinstance(value, str) and value else None
@@ -213,7 +217,7 @@ def _append_persisted_target_hint(
         and PERSISTED_OUTPUT_TAG in content
         and "Execution target for this saved output:" not in content
     ):
-        selector = f"target={json.dumps(target, ensure_ascii=True)}"
+        selector = f"execution_target={json.dumps(target, ensure_ascii=True)}"
         if runtime_scope:
             selector += (
                 ", runtime_scope="
@@ -242,14 +246,19 @@ def _selected_local_target_cwd(
     function_args: dict,
 ) -> str | None:
     """Return the selected target's host cwd, or None for remote targets."""
-    selector_name = (
-        "execution_target" if function_name == "search_files" else "target"
-    )
-    target = function_args.get(selector_name)
     try:
-        from tools.execution_targets import resolve_execution_target
+        from tools.execution_targets import (
+            coalesce_execution_target,
+            resolve_execution_target,
+        )
         from tools.terminal_tool import _get_env_config, get_session_cwd
 
+        legacy_target = (
+            function_args.get("target") if function_name != "search_files" else None
+        )
+        target = coalesce_execution_target(
+            function_args.get("execution_target"), legacy_target,
+        )
         resolution = resolve_execution_target(target)
         if resolution.backend != "local":
             return None
@@ -791,8 +800,24 @@ def _run_agent_tool_execution_middleware(
                     "Hermes tool execution callback invoked more than once"
                 )
             state["dispatched"] = True
-            state["blocked"] = False
             state["args"] = final_args
+
+        # Execution middleware has now produced the final arguments. Reject
+        # conflicting aliases before hooks, guardrails, progress, or approval.
+        try:
+            from tools.execution_targets import (
+                ExecutionTargetError,
+                normalize_execution_target_args,
+            )
+
+            final_args = normalize_execution_target_args(
+                function_name, final_args,
+            )
+        except ExecutionTargetError as exc:
+            state["blocked"] = True
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        state["blocked"] = False
+        state["args"] = final_args
 
         def _begin() -> None:
             _begin_tool_execution(

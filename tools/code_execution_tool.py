@@ -343,15 +343,15 @@ _TOOL_STUBS = {
     ),
     "read_file": (
         "read_file",
-        "path: str, offset: int = 1, limit: int = 2000, target: str = None, runtime_scope: str = None",
+        "path: str, offset: int = 1, limit: int = 2000, execution_target: str = None, runtime_scope: str = None, *, target: str = None",
         '"""Read a file (1-indexed lines). Returns dict with "content" and "total_lines"."""',
-        '{"path": path, "offset": offset, "limit": limit, "target": target, "runtime_scope": runtime_scope}',
+        '{"path": path, "offset": offset, "limit": limit, "execution_target": execution_target, "target": target, "runtime_scope": runtime_scope}',
     ),
     "write_file": (
         "write_file",
-        "path: str, content: str, cross_profile: bool = False, target: str = None",
+        "path: str, content: str, cross_profile: bool = False, execution_target: str = None, *, target: str = None",
         '"""Write content to a file (always overwrites). Returns dict with status. cross_profile=True opts out of the cross-Hermes-profile soft guard."""',
-        '{"path": path, "content": content, "cross_profile": cross_profile, "target": target}',
+        '{"path": path, "content": content, "cross_profile": cross_profile, "execution_target": execution_target, "target": target}',
     ),
     "search_files": (
         "search_files",
@@ -361,15 +361,15 @@ _TOOL_STUBS = {
     ),
     "patch": (
         "patch",
-        'path: str = None, old_string: str = None, new_string: str = None, replace_all: bool = False, mode: str = "replace", patch: str = None, cross_profile: bool = False, target: str = None',
+        'path: str = None, old_string: str = None, new_string: str = None, replace_all: bool = False, mode: str = "replace", patch: str = None, cross_profile: bool = False, execution_target: str = None, *, target: str = None',
         '"""Targeted find-and-replace (mode="replace") or V4A multi-file patches (mode="patch"). Returns dict with status. cross_profile=True opts out of the cross-Hermes-profile soft guard."""',
-        '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile, "target": target}',
+        '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile, "execution_target": execution_target, "target": target}',
     ),
     "terminal": (
         "terminal",
-        "command: str, timeout: int = None, workdir: str = None, target: str = None",
+        "command: str, timeout: int = None, workdir: str = None, execution_target: str = None, *, target: str = None",
         '"""Run a shell command (foreground only). Returns dict with "output" and "exit_code"."""',
-        '{"command": command, "timeout": timeout, "workdir": workdir, "target": target}',
+        '{"command": command, "timeout": timeout, "workdir": workdir, "execution_target": execution_target, "target": target}',
     ),
 }
 
@@ -657,12 +657,12 @@ def _inherit_execution_target(
 
     The RPC token grants access to host-side Hermes tools. A script approved to
     run in one sandbox must not use it to pivot a nested file/terminal call onto
-    another target. ``search_files`` uses ``execution_target`` because its
-    historical ``target`` argument selects the search mode.
+    another target. All target-aware tool APIs use ``execution_target``;
+    ``search_files.target`` remains its independent search-mode argument.
     """
     if not execution_target or not isinstance(tool_args, dict):
         return tool_args
-    selector = "execution_target" if tool_name == "search_files" else "target"
+    selector = "execution_target"
     if tool_name not in {"terminal", "read_file", "write_file", "patch", "search_files"}:
         return tool_args
 
@@ -683,13 +683,21 @@ def _inherit_execution_target(
 
     inherited = dict(tool_args)
     requested = inherited.get(selector)
+    if tool_name != "search_files":
+        # Persisted pre-rename RPC calls may still carry the hidden alias.
+        from tools.execution_targets import coalesce_execution_target
+
+        requested = coalesce_execution_target(requested, inherited.get("target"))
+        inherited.pop("target", None)
     if requested is None:
         inherited[selector] = execution_target
     elif str(requested) != execution_target:
         raise ValueError(
-            f"execute_code RPC is bound to target {execution_target!r}; "
-            f"nested {tool_name} cannot select {requested!r}"
+            f"execute_code RPC is bound to target {execution_target!r}; nested "
+            f"{tool_name} cannot select {requested!r}."
         )
+    else:
+        inherited[selector] = requested
     if tool_name == "read_file" and execution_target_scope:
         runtime_scope = inherited.get("runtime_scope")
         if runtime_scope is not None and runtime_scope != execution_target_scope:
@@ -1565,6 +1573,8 @@ def execute_code(
     code: str,
     task_id: Optional[str] = None,
     enabled_tools: Optional[List[str]] = None,
+    execution_target: Optional[str] = None,
+    *,
     target: Optional[str] = None,
 ) -> str:
     """
@@ -1579,8 +1589,9 @@ def execute_code(
         task_id:       Session task ID for tool isolation (terminal env, etc.).
         enabled_tools: Tool names enabled in the current session. The sandbox
                        gets the intersection with SANDBOX_ALLOWED_TOOLS.
-        target:        Optional named execution target. The configured default
-                       is selected when omitted.
+        execution_target: Optional named execution target. The configured
+                          default is selected when omitted.
+        target: Deprecated compatibility alias for ``execution_target``.
 
     Returns:
         JSON string with execution results.
@@ -1595,9 +1606,14 @@ def execute_code(
         return tool_error("No code provided.")
 
     try:
-        from tools.execution_targets import resolve_execution_target
+        from tools.execution_targets import (
+            coalesce_execution_target,
+            resolve_execution_target,
+        )
 
-        resolution = resolve_execution_target(target)
+        resolution = resolve_execution_target(
+            coalesce_execution_target(execution_target, target)
+        )
     except Exception as exc:
         return tool_error(str(exc))
     # Legacy omitted/default selection already routes every nested call to the
@@ -2351,19 +2367,19 @@ _TOOL_DOC_LINES = [
      "    Returns {\"results\": [{\"url\", \"title\", \"content\", \"error\"}, ...]} where content is markdown.\n"
      "    No LLM summarization. Pages over char_limit (default 15000) are head+tail truncated; full text stored on disk (path in the content footer)."),
     ("read_file",
-     "  read_file(path: str, offset: int = 1, limit: int = 2000, target: str = None, runtime_scope: str = None) -> dict\n"
+     "  read_file(path: str, offset: int = 1, limit: int = 2000, execution_target: str = None, runtime_scope: str = None) -> dict\n"
      "    Lines are 1-indexed. Returns {\"content\": \"...\", \"total_lines\": N}"),
     ("write_file",
-     "  write_file(path: str, content: str, target: str = None) -> dict\n"
+     "  write_file(path: str, content: str, execution_target: str = None) -> dict\n"
      "    Always overwrites the entire file."),
     ("search_files",
      "  search_files(pattern: str, target=\"content\", path=\".\", file_glob=None, limit=50, execution_target: str = None) -> dict\n"
      "    target selects search mode (\"content\" or \"files\"); execution_target selects the configured environment. Returns {\"matches\": [...]}"),
     ("patch",
-     "  patch(path: str, old_string: str, new_string: str, replace_all: bool = False, target: str = None) -> dict\n"
+     "  patch(path: str, old_string: str, new_string: str, replace_all: bool = False, execution_target: str = None) -> dict\n"
      "    Replaces old_string with new_string in the file."),
     ("terminal",
-     "  terminal(command: str, timeout=None, workdir=None, target: str = None) -> dict\n"
+     "  terminal(command: str, timeout=None, workdir=None, execution_target: str = None) -> dict\n"
      "    Foreground only (no background/pty). Returns {\"output\": \"...\", \"exit_code\": N}"),
 ]
 
@@ -2448,7 +2464,7 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
                         "and print your final result to stdout."
                     ),
                 },
-                "target": {
+                "execution_target": {
                     "type": "string",
                     "description": (
                         "Optional named execution target, for example 'local' "
@@ -2477,6 +2493,7 @@ registry.register(
         code=args.get("code", ""),
         task_id=kw.get("task_id"),
         enabled_tools=kw.get("enabled_tools"),
+        execution_target=args.get("execution_target"),
         target=args.get("target")),
     check_fn=check_sandbox_requirements,
     emoji="🐍",

@@ -1339,9 +1339,9 @@ def build_environment_hints() -> str:
         )
         hints.append(
             "Configured execution targets: " + target_summary + ". "
-            "`terminal`, `read_file`, `write_file`, `patch`, and `execute_code` "
-            "select one with `target`; `search_files` uses `execution_target` "
-            "because its existing `target` argument selects content/files mode. "
+            "`terminal`, `read_file`, `write_file`, `patch`, `search_files`, and "
+            "`execute_code` select one with `execution_target`. "
+            "`search_files.target` remains its content/files search-mode selector. "
             "Omitting the selector uses the default target. Environment facts "
             "above describe only the default target "
             f"{json.dumps(default_target.target, ensure_ascii=True)}; "

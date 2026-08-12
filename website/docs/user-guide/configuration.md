@@ -160,11 +160,11 @@ When `targets` is non-empty, a tool call with no selector uses `default_target`.
 The tools use fixed string parameters so changing config does not change the model tool schema:
 
 ```text
-terminal(command="git status", target="devbox")
-read_file(path="README.md", target="local")
-write_file(path="notes.txt", content="...", target="devbox")
-patch(mode="replace", path="app.py", old_string="old", new_string="new", target="devbox")
-execute_code(code="print('hello')", target="devbox")
+terminal(command="git status", execution_target="devbox")
+read_file(path="README.md", execution_target="local")
+write_file(path="notes.txt", content="...", execution_target="devbox")
+patch(mode="replace", path="app.py", old_string="old", new_string="new", execution_target="devbox")
+execute_code(code="print('hello')", execution_target="devbox")
 search_files(pattern="TODO", target="content", execution_target="devbox")
 ```
 
@@ -174,7 +174,7 @@ Background process follow-up actions remain keyed only by `session_id`. Process 
 
 Command and execute-code approval prompts identify the resolved target/backend. Session and UI-created permanent pattern approvals are scoped to the target's profile/name/effective configuration, so approving a command on one host does not silently authorize the same pattern after that target name is repointed. Explicit entries an operator writes in the global `approvals.command_allowlist` remain global by design. An `execute_code` RPC session is bound to its outer target and effective configuration: nested terminal/file calls inherit that target, cannot pivot to another one, and fail closed if the alias is repointed while the script is running.
 
-If `targets` is absent or empty, Hermes preserves the existing flat config and environment-variable behavior exactly. In that legacy mode, omitted `target` and `target="default"` select the existing environment; every other explicit name is an error. Environment variables remain the legacy single-backend interface and do not select named targets. In named mode Hermes mirrors the resolved default target into `TERMINAL_*` for older internal consumers, but explicit tool selection still comes only from `target` / `execution_target`. Once an entry point reloads or updates its effective configuration, new calls create a replacement environment for any changed target; already-running operations and background sessions remain bound to the environment in which they started. Static `config.yaml` edits still follow each entry point's normal reload/restart behavior. The provider-fragment registry described below is the explicit no-restart path and is checked at each independent dispatch. A persistent named Docker runtime is replaced only when no other logical turn, tool call, or process is using its shared storage; the replacing call's own nested leases do not block it. Retirement is transactional and fail-closed, so a failed container removal retains the prior runtime identity and returns an actionable retry error instead of publishing a replacement. Its separate stable profile/target storage identity keeps persistent home/workspace data across policy, timeout, or image changes.
+If `targets` is absent or empty, Hermes preserves the existing flat config and environment-variable behavior exactly. In that legacy mode, omitted `execution_target` and `execution_target="default"` select the existing environment; every other explicit name is an error. Environment variables remain the legacy single-backend interface and do not select named targets. In named mode Hermes mirrors the resolved default target into `TERMINAL_*` for older internal consumers, but explicit model-facing tool selection uses only `execution_target`. The deprecated execution-routing `target` alias remains accepted only for persisted tool calls and direct Python callers created before the rename. Once an entry point reloads or updates its effective configuration, new calls create a replacement environment for any changed target; already-running operations and background sessions remain bound to the environment in which they started. Static `config.yaml` edits still follow each entry point's normal reload/restart behavior. The provider-fragment registry described below is the explicit no-restart path and is checked at each independent dispatch. A persistent named Docker runtime is replaced only when no other logical turn, tool call, or process is using its shared storage; the replacing call's own nested leases do not block it. Retirement is transactional and fail-closed, so a failed container removal retains the prior runtime identity and returns an actionable retry error instead of publishing a replacement. Its separate stable profile/target storage identity keeps persistent home/workspace data across policy, timeout, or image changes.
 
 Target entries are validated strictly before environment creation. Unknown, misspelled, backend-inapplicable, malformed, or missing required settings return an error naming the target and field; documented top-level compatibility and policy fields remain supported.
 

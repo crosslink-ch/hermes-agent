@@ -470,10 +470,18 @@ def test_target_specific_cd_does_not_cross_talk_to_terminal_or_file_tools(
         lambda: _named_config({"alpha": str(alpha), "beta": str(beta)}),
     )
 
-    cd_result = json.loads(terminal_mod.terminal_tool("cd sub", task_id="session", target="alpha"))
-    beta_pwd = json.loads(terminal_mod.terminal_tool("pwd", task_id="session", target="beta"))
-    alpha_read = json.loads(file_mod.read_file_tool("which.txt", task_id="session", target="alpha"))
-    beta_read = json.loads(file_mod.read_file_tool("which.txt", task_id="session", target="beta"))
+    cd_result = json.loads(terminal_mod.terminal_tool(
+        "cd sub", task_id="session", execution_target="alpha",
+    ))
+    beta_pwd = json.loads(terminal_mod.terminal_tool(
+        "pwd", task_id="session", execution_target="beta",
+    ))
+    alpha_read = json.loads(file_mod.read_file_tool(
+        "which.txt", task_id="session", execution_target="alpha",
+    ))
+    beta_read = json.loads(file_mod.read_file_tool(
+        "which.txt", task_id="session", execution_target="beta",
+    ))
 
     assert cd_result["exit_code"] == 0
     assert beta_pwd["output"] == str(beta)
@@ -497,14 +505,16 @@ def test_local_targets_route_write_read_patch_search_and_cache_separately(
     )
 
     write_alpha = json.loads(file_mod.write_file_tool(
-        "shared.txt", "alpha-value\n", task_id="session", target="alpha",
+        "shared.txt", "alpha-value\n", task_id="session",
+        execution_target="alpha",
     ))
     write_beta = json.loads(file_mod.write_file_tool(
-        "shared.txt", "beta-value\n", task_id="session", target="beta",
+        "shared.txt", "beta-value\n", task_id="session",
+        execution_target="beta",
     ))
     patch_alpha = json.loads(file_mod.patch_tool(
         path="shared.txt", old_string="alpha-value\n", new_string="alpha-patched\n",
-        task_id="session", target="alpha",
+        task_id="session", execution_target="alpha",
     ))
     search_alpha = json.loads(file_mod.search_tool(
         "alpha-patched", path=".", task_id="session", execution_target="alpha",
@@ -633,19 +643,49 @@ def test_unknown_target_errors_are_returned_by_execution_and_file_tools(
     )
 
     results = [
-        json.loads(terminal_mod.terminal_tool("pwd", target="missing")),
-        json.loads(file_mod.read_file_tool("x.txt", target="missing")),
-        json.loads(file_mod.write_file_tool("x.txt", "x", target="missing")),
+        json.loads(terminal_mod.terminal_tool("pwd", execution_target="missing")),
+        json.loads(file_mod.read_file_tool("x.txt", execution_target="missing")),
+        json.loads(file_mod.write_file_tool(
+            "x.txt", "x", execution_target="missing",
+        )),
         json.loads(file_mod.search_tool(
             "x", path=".", execution_target="missing",
         )),
-        json.loads(code_mod.execute_code("print('x')", target="missing")),
+        json.loads(code_mod.execute_code(
+            "print('x')", execution_target="missing",
+        )),
     ]
 
     for result in results:
         assert "missing" in result["error"]
         assert "Available targets: 'alpha'" in result["error"]
     assert not (alpha / "x.txt").exists()
+
+
+def test_model_facing_handlers_accept_hidden_legacy_target_alias(
+    monkeypatch, tmp_path, isolated_target_state,
+):
+    import tools.execution_targets as targets_mod
+
+    terminal_mod, file_mod = isolated_target_state
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    monkeypatch.setattr(
+        targets_mod,
+        "_load_merged_config",
+        lambda: _named_config({"legacy": str(legacy)}),
+    )
+
+    terminal_result = json.loads(terminal_mod._handle_terminal({
+        "command": "pwd", "target": "legacy",
+    }, task_id="legacy-handler"))
+    write_result = json.loads(file_mod._handle_write_file({
+        "path": "alias.txt", "content": "legacy\n", "target": "legacy",
+    }, task_id="legacy-handler"))
+
+    assert terminal_result["target"] == "legacy"
+    assert write_result["target"] == "legacy"
+    assert (legacy / "alias.txt").read_text(encoding="utf-8") == "legacy\n"
 
 
 def test_cleanup_without_target_removes_all_task_scopes_and_explicit_removes_one(
@@ -903,19 +943,24 @@ def test_execute_code_inherits_target_and_rejects_nested_override(
     namespace["_call"] = lambda name, args: calls.append((name, args)) or {}
 
     namespace["write_file"]("nested.txt", "alpha-default\n")
-    namespace["write_file"]("nested.txt", "beta-explicit\n", target="beta")
+    namespace["write_file"](
+        "nested.txt", "beta-explicit\n", execution_target="beta",
+    )
+    namespace["write_file"]("nested.txt", "beta-legacy\n", target="beta")
     namespace["search_files"]("needle")
 
     inherited_write = code_mod._inherit_execution_target(
         calls[0][0], calls[0][1], "alpha",
     )
     inherited_search = code_mod._inherit_execution_target(
-        calls[2][0], calls[2][1], "alpha",
+        calls[3][0], calls[3][1], "alpha",
     )
-    assert inherited_write["target"] == "alpha"
+    assert inherited_write["execution_target"] == "alpha"
     assert inherited_search["execution_target"] == "alpha"
     with pytest.raises(ValueError, match="cannot select 'beta'"):
         code_mod._inherit_execution_target(calls[1][0], calls[1][1], "alpha")
+    with pytest.raises(ValueError, match="cannot select 'beta'"):
+        code_mod._inherit_execution_target(calls[2][0], calls[2][1], "alpha")
 
     remote_config = _named_config({"alpha": str(alpha), "beta": str(beta)})
     remote_config["terminal"]["targets"]["alpha"]["backend"] = "ssh"
@@ -936,7 +981,9 @@ def test_execute_code_inherits_target_and_rejects_nested_override(
         ),
     )
 
-    result = json.loads(code_mod.execute_code("print('ok')", target="alpha"))
+    result = json.loads(code_mod.execute_code(
+        "print('ok')", execution_target="alpha",
+    ))
     assert result["status"] == "success"
     assert forwarded["target"] == "alpha"
     assert forwarded["mode"] == "project"
@@ -1234,7 +1281,7 @@ def test_tool_output_persistence_uses_the_result_target(monkeypatch):
         "beta",
     )
     assert 'Execution target for this saved output: "beta"' in persisted
-    assert 'target="beta"' in persisted
+    assert 'execution_target="beta"' in persisted
 
     scoped = executor._append_persisted_target_hint(
         f"saved {executor.PERSISTED_OUTPUT_TAG}", "beta", "scope-v1",
@@ -1311,10 +1358,10 @@ def test_subdirectory_hints_follow_local_target_and_skip_remote_host(
     assert isinstance(local_hint, str)
     assert "LOCAL TARGET HINT" in local_hint
     assert executor._selected_local_target_cwd(
-        "session", "write_file", {"target": "local"},
+        "session", "write_file", {"execution_target": "local"},
     ) == str(local_root)
     assert executor._selected_local_target_cwd(
-        "session", "terminal", {"target": "devbox"},
+        "session", "terminal", {"execution_target": "devbox"},
     ) is None
     assert remote_hint is None
     assert omitted_remote_hint is None
@@ -1968,7 +2015,8 @@ def test_checkpoint_alias_flip_pins_dispatch_generation(monkeypatch, tmp_path):
         tool_call_id="call-1",
         execute=lambda args: write_file_tool(
             args["path"], args["content"],
-            task_id="target-race", target=args["target"],
+            task_id="target-race",
+            execution_target=args["execution_target"],
         ),
     )
 
@@ -1980,6 +2028,65 @@ def test_checkpoint_alias_flip_pins_dispatch_generation(monkeypatch, tmp_path):
     assert not (second / "sample.txt").exists()
     assert targets_mod.resolve_execution_target("dev").config["cwd"] == str(second)
     targets_mod.set_execution_target_config_source(None)
+
+
+def test_conflicting_target_aliases_block_before_agent_authorization(
+    monkeypatch,
+):
+    from agent import tool_executor
+
+    class Guardrails:
+        @staticmethod
+        def before_call(_name, _args):
+            raise AssertionError("guardrails must not see conflicting aliases")
+
+    agent = SimpleNamespace(
+        session_id="session",
+        _current_turn_id="turn",
+        _current_api_request_id="request",
+        _tool_guardrails=Guardrails(),
+        quiet_mode=True,
+        tool_progress_mode="off",
+        verbose_logging=False,
+        tool_progress_callback=None,
+        tool_start_callback=None,
+        _checkpoint_mgr=SimpleNamespace(enabled=True),
+        _touch_activity=lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugins.resolve_pre_tool_block",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pre-tool hooks must not see conflicting aliases")
+        ),
+    )
+    monkeypatch.setattr(
+        tool_executor,
+        "_begin_tool_execution",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("progress/checkpoint preflight must not start")
+        ),
+    )
+    execute_calls = []
+
+    managed = tool_executor._run_agent_tool_execution_middleware(
+        agent,
+        function_name="write_file",
+        function_args={
+            "path": "private.txt",
+            "content": "private",
+            "execution_target": "alpha",
+            "target": "beta",
+        },
+        effective_task_id="conflict",
+        tool_call_id="call-conflict",
+        execute=lambda args: execute_calls.append(args),
+    )
+
+    assert "Conflicting execution target selectors" in json.loads(
+        managed.result
+    )["error"]
+    assert managed.blocked is True
+    assert execute_calls == []
 
 
 def test_current_tool_leases_do_not_block_own_replacement_but_other_users_do(
@@ -2136,7 +2243,7 @@ def test_file_tool_lease_key_uses_explicit_nondefault_target(
     expected = targets_mod.resolve_execution_target("beta").session_key("default")
 
     assert terminal_mod.execution_environment_turn_key(
-        "write_file", {"target": "beta"}, task_id="child-task",
+        "write_file", {"execution_target": "beta"}, task_id="child-task",
     ) == expected
     assert terminal_mod.execution_environment_turn_key(
         "process", {"session_id": "proc_123"}, task_id="child-task",

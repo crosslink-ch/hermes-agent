@@ -27,6 +27,62 @@ class ExecutionTargetError(ValueError):
     """Raised when terminal target configuration or selection is invalid."""
 
 
+def coalesce_execution_target(
+    execution_target: Optional[str] = None,
+    target: Optional[str] = None,
+) -> Optional[str]:
+    """Return the canonical execution selector, accepting the legacy alias.
+
+    ``execution_target`` is the public tool argument. ``target`` remains a
+    hidden compatibility alias for persisted tool calls and direct Python
+    callers created before the selector was renamed. Supplying both with
+    different values is rejected rather than silently routing to one machine.
+    """
+    if (
+        execution_target is not None
+        and target is not None
+        and execution_target != target
+    ):
+        raise ExecutionTargetError(
+            "Conflicting execution target selectors: 'execution_target' and "
+            "the deprecated 'target' alias must match."
+        )
+    return execution_target if execution_target is not None else target
+
+
+_EXECUTION_TARGET_ARGUMENT_TOOLS = frozenset({
+    "terminal", "read_file", "write_file", "patch",
+    "search_files", "execute_code",
+})
+
+
+def normalize_execution_target_args(
+    tool_name: str, arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Canonicalize target-aware tool arguments before authorization.
+
+    The deprecated ``target`` selector is accepted only for tools where it
+    historically meant execution routing. ``search_files.target`` is a
+    domain argument (content/files mode) and is never treated as an alias.
+    """
+    normalized = dict(arguments)
+    if tool_name not in _EXECUTION_TARGET_ARGUMENT_TOOLS:
+        return normalized
+    legacy_target = (
+        None if tool_name == "search_files" else normalized.get("target")
+    )
+    selected = coalesce_execution_target(
+        normalized.get("execution_target"), legacy_target,
+    )
+    if tool_name != "search_files":
+        normalized.pop("target", None)
+    if selected is None:
+        normalized.pop("execution_target", None)
+    else:
+        normalized["execution_target"] = selected
+    return normalized
+
+
 _NAMED_TARGET_BACKENDS = frozenset({
     "local", "docker", "ssh", "modal", "daytona", "singularity",
     "vercel_sandbox",

@@ -9,6 +9,7 @@ import pytest
 
 from tools.execution_targets import (
     ExecutionTargetError,
+    coalesce_execution_target,
     list_execution_targets,
     resolve_execution_target,
     set_execution_target_config_source,
@@ -37,6 +38,14 @@ def test_legacy_omitted_and_default_select_the_flat_environment():
     assert omitted.backend == explicit.backend == "ssh"
     assert omitted.named is explicit.named is False
     assert omitted.config["ssh_host"] == "host"
+
+
+def test_execution_target_compatibility_alias_coalesces_and_rejects_conflicts():
+    assert coalesce_execution_target("alpha", None) == "alpha"
+    assert coalesce_execution_target(None, "legacy") == "legacy"
+    assert coalesce_execution_target("same", "same") == "same"
+    with pytest.raises(ExecutionTargetError, match="Conflicting execution target"):
+        coalesce_execution_target("alpha", "beta")
 
 
 def test_legacy_backend_metadata_respects_terminal_env_override(monkeypatch):
@@ -218,7 +227,7 @@ def test_target_names_are_otherwise_arbitrary_static_strings():
     assert resolution.target == "prod blue/1"
 
 
-def test_tool_schemas_use_static_optional_string_target_fields():
+def test_tool_schemas_use_static_optional_execution_target_fields():
     from tools.code_execution_tool import EXECUTE_CODE_SCHEMA
     from tools.file_tools import (
         PATCH_SCHEMA,
@@ -235,10 +244,11 @@ def test_tool_schemas_use_static_optional_string_target_fields():
         PATCH_SCHEMA,
         EXECUTE_CODE_SCHEMA,
     ):
-        target = schema["parameters"]["properties"]["target"]
+        target = schema["parameters"]["properties"]["execution_target"]
         assert target["type"] == "string"
         assert "enum" not in target
-        assert "target" not in schema["parameters"].get("required", [])
+        assert "target" not in schema["parameters"]["properties"]
+        assert "execution_target" not in schema["parameters"].get("required", [])
 
     search_properties = SEARCH_FILES_SCHEMA["parameters"]["properties"]
     assert search_properties["target"]["enum"] == ["content", "files"]

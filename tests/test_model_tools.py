@@ -220,6 +220,31 @@ class TestHandleFunctionCall:
         assert post_call[1]["status"] == "blocked"
         assert post_call[1]["error_type"] == "edit_approval_denied"
 
+    def test_conflicting_target_aliases_fail_before_hooks_or_edit_approval(
+        self,
+    ):
+        with (
+            patch("hermes_cli.plugins.resolve_pre_tool_block") as pre_hook,
+            patch(
+                "acp_adapter.edit_approval.maybe_require_edit_approval"
+            ) as edit_approval,
+            patch("model_tools.registry.dispatch") as dispatch,
+        ):
+            result = json.loads(handle_function_call(
+                "write_file",
+                {
+                    "path": "private.txt",
+                    "content": "private",
+                    "execution_target": "alpha",
+                    "target": "beta",
+                },
+            ))
+
+        assert "Conflicting execution target selectors" in result["error"]
+        pre_hook.assert_not_called()
+        edit_approval.assert_not_called()
+        dispatch.assert_not_called()
+
 
 # =========================================================================
 # Agent loop tools

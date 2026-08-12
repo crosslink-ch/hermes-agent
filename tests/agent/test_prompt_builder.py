@@ -757,7 +757,8 @@ class TestEnvironmentHints:
         assert "omit an execution-target selector" in result
         assert '"devbox" (ssh, default)' in result
         assert '"local" (local)' in result
-        assert "search_files` uses `execution_target" in result
+        assert "select one with `execution_target`" in result
+        assert "`search_files.target` remains" in result
         assert probe_calls == [(
             "ssh",
             {

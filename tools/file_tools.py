@@ -1659,21 +1659,28 @@ def clear_file_ops_cache(task_id=None):
 
 def read_file_tool(
     path: str, offset: int = 1, limit: int = 2000,
-    task_id: str = "default", target: str | None = None,
+    task_id: str = "default", execution_target: str | None = None,
     runtime_scope: str | None = None,
+    *, target: str | None = None,
 ) -> str:
     """Read a file with pagination and line numbers."""
     try:
-        from tools.execution_targets import resolve_execution_target
+        from tools.execution_targets import (
+            coalesce_execution_target,
+            resolve_execution_target,
+        )
+        selected_execution_target = coalesce_execution_target(
+            execution_target, target,
+        )
 
         pinned_file_ops = None
         if runtime_scope:
             from tools.terminal_tool import get_environment_for_target_scope
 
-            selected_name = str(target or "")
+            selected_name = str(selected_execution_target or "")
             if not selected_name:
                 return tool_error(
-                    "read_file runtime_scope requires the target from the saved-output hint."
+                    "read_file runtime_scope requires execution_target from the saved-output hint."
                 )
             pinned_env = get_environment_for_target_scope(
                 task_id, selected_name, runtime_scope,
@@ -1693,7 +1700,7 @@ def read_file_tool(
                 pinned_env, str(getattr(pinned_env, "cwd", ".")),
             )
         else:
-            resolution = resolve_execution_target(target)
+            resolution = resolve_execution_target(selected_execution_target)
         selected_target = resolution.target if resolution.named else None
         host_mtime_tracking = resolution.backend == "local"
         state_task_id = resolution.file_coordination_key(task_id)
@@ -2325,6 +2332,7 @@ def _mark_verification_stale(
 def write_file_tool(path: str, content: str, task_id: str = "default",
                     cross_profile: bool = False,
                     session_id: str | None = None,
+                    execution_target: str = None, *,
                     target: str = None) -> str:
     """Write content to a file.
 
@@ -2335,8 +2343,13 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     on the terminal tool.
     """
     try:
-        from tools.execution_targets import resolve_execution_target
-        resolution = resolve_execution_target(target)
+        from tools.execution_targets import (
+            coalesce_execution_target,
+            resolve_execution_target,
+        )
+        resolution = resolve_execution_target(
+            coalesce_execution_target(execution_target, target)
+        )
     except Exception as exc:
         return tool_error(str(exc))
     selected_target = resolution.target if resolution.named else None
@@ -2460,7 +2473,8 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
 def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                new_string: str = None, replace_all: bool = False, patch: str = None,
                task_id: str = "default", cross_profile: bool = False,
-               session_id: str | None = None, target: str = None) -> str:
+               session_id: str | None = None, execution_target: str = None, *,
+               target: str = None) -> str:
     """Patch a file using replace mode or V4A patch format.
 
     ``cross_profile`` opts out of the soft cross-Hermes-profile guard for
@@ -2468,8 +2482,13 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     directory. Same shape as ``write_file``'s flag.
     """
     try:
-        from tools.execution_targets import resolve_execution_target
-        resolution = resolve_execution_target(target)
+        from tools.execution_targets import (
+            coalesce_execution_target,
+            resolve_execution_target,
+        )
+        resolution = resolve_execution_target(
+            coalesce_execution_target(execution_target, target)
+        )
     except Exception as exc:
         return tool_error(str(exc))
     selected_target = resolution.target if resolution.named else None
@@ -2857,7 +2876,7 @@ READ_FILE_SCHEMA = {
             "path": {"type": "string", "description": "Path to the file to read (absolute, relative, or ~/path)"},
             "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)", "default": 1, "minimum": 1},
             "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 2000, max: 2000). Reads are additionally capped at a ~100K-character budget with a next_offset continuation.", "default": 2000, "maximum": 2000},
-            "target": {"type": "string", "description": "Optional named execution target, for example 'local' or 'devbox'. Uses terminal.default_target when omitted."},
+            "execution_target": {"type": "string", "description": "Optional named execution target, for example 'local' or 'devbox'. Uses terminal.default_target when omitted."},
             "runtime_scope": {"type": "string", "description": "Immutable producing-runtime scope from a saved-output hint. Pass only when the hint supplies it."},
         },
         "required": ["path"]
@@ -2872,7 +2891,7 @@ WRITE_FILE_SCHEMA = {
         "properties": {
             "path": {"type": "string", "description": "Path to the file to write (will be created if it doesn't exist, overwritten if it does)"},
             "content": {"type": "string", "description": "Complete content to write to the file"},
-            "target": {"type": "string", "description": "Optional named execution target, for example 'local' or 'devbox'. Uses terminal.default_target when omitted."},
+            "execution_target": {"type": "string", "description": "Optional named execution target, for example 'local' or 'devbox'. Uses terminal.default_target when omitted."},
             "cross_profile": {
                 "type": "boolean",
                 "description": "Opt out of the cross-profile soft guard. Defaults to false. Set true ONLY after explicit user direction to edit another Hermes profile's skills/plugins/cron/memories — by default these writes are blocked with a warning because they affect a different profile than the one this session is running under.",
@@ -2929,7 +2948,7 @@ PATCH_SCHEMA = {
                 "description": "Opt out of the cross-profile soft guard. Defaults to false. Set true ONLY after explicit user direction to edit another Hermes profile's skills/plugins/cron/memories.",
                 "default": False,
             },
-            "target": {"type": "string", "description": "Optional named execution target, for example 'local' or 'devbox'. Uses terminal.default_target when omitted."},
+            "execution_target": {"type": "string", "description": "Optional named execution target, for example 'local' or 'devbox'. Uses terminal.default_target when omitted."},
         },
         "required": ["mode"],
     },
@@ -2960,7 +2979,8 @@ def _handle_read_file(args, **kw):
     tid = kw.get("task_id") or "default"
     return read_file_tool(
         path=args.get("path", ""), offset=args.get("offset", 1),
-        limit=args.get("limit", 500), task_id=tid, target=args.get("target"),
+        limit=args.get("limit", 500), task_id=tid,
+        execution_target=args.get("execution_target"), target=args.get("target"),
         runtime_scope=args.get("runtime_scope"),
     )
 
@@ -2989,7 +3009,7 @@ def _handle_write_file(args, **kw):
         path=args["path"], content=args["content"], task_id=tid,
         cross_profile=bool(args.get("cross_profile", False)),
         session_id=kw.get("session_id"),
-        target=args.get("target"),
+        execution_target=args.get("execution_target"), target=args.get("target"),
     )
 
 
@@ -3001,7 +3021,7 @@ def _handle_patch(args, **kw):
         replace_all=args.get("replace_all", False), patch=args.get("patch"), task_id=tid,
         cross_profile=bool(args.get("cross_profile", False)),
         session_id=kw.get("session_id"),
-        target=args.get("target"),
+        execution_target=args.get("execution_target"), target=args.get("target"),
     )
 
 

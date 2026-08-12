@@ -151,7 +151,7 @@ def test_separate_cli_process_hot_registers_for_long_lived_reader(
     assert result["exit_code"] == 0
     assert Path(result["output"].strip()).resolve() == work.resolve()
     assert TERMINAL_SCHEMA == schema_before
-    target_schema = TERMINAL_SCHEMA["parameters"]["properties"]["target"]
+    target_schema = TERMINAL_SCHEMA["parameters"]["properties"]["execution_target"]
     assert target_schema["type"] == "string"
     assert "enum" not in target_schema
 

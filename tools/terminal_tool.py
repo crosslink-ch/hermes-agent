@@ -1492,13 +1492,19 @@ def execution_environment_turn_key(
         # Follow-up calls select a persisted session_id rather than a target.
         # A parent-scope lease safely covers whichever named runtime owns it.
         return _turn_scope_key(task_id)
-    target = arguments.get("target")
-    if function_name == "search_files":
-        target = arguments.get("execution_target")
     try:
-        from tools.execution_targets import resolve_execution_target
+        from tools.execution_targets import (
+            coalesce_execution_target,
+            resolve_execution_target,
+        )
 
-        resolution = resolve_execution_target(target)
+        execution_target = arguments.get("execution_target")
+        legacy_target = (
+            arguments.get("target") if function_name != "search_files" else None
+        )
+        resolution = resolve_execution_target(
+            coalesce_execution_target(execution_target, legacy_target)
+        )
         base_task_id = _resolve_container_task_id(str(task_id))
         return resolution.session_key(base_task_id)
     except Exception:
@@ -3350,6 +3356,8 @@ def terminal_tool(
     pty: bool = False,
     notify_on_complete: bool = False,
     watch_patterns: Optional[List[str]] = None,
+    execution_target: Optional[str] = None,
+    *,
     target: Optional[str] = None,
 ) -> str:
     """
@@ -3366,7 +3374,8 @@ def terminal_tool(
         pty: If True, use pseudo-terminal for interactive CLI tools (local backend only)
         notify_on_complete: If True and background=True, you'll be notified exactly once when the process exits. The right choice for almost every long task. MUTUALLY EXCLUSIVE with watch_patterns.
         watch_patterns: List of strings to watch for in background output. HARD rate limit: 1 notification per 15s per process. After 3 strike windows in a row, watch_patterns is disabled and the session is auto-promoted to notify_on_complete. Use ONLY for rare, one-shot mid-process signals on long-lived processes (server readiness, migration-done markers). NEVER use in loops/batch jobs — error patterns there will hit the strike limit and get disabled. MUTUALLY EXCLUSIVE with notify_on_complete — set one, not both.
-        target: Named execution target. Omit to use the configured default.
+        execution_target: Named execution target. Omit to use the configured default.
+        target: Deprecated compatibility alias for ``execution_target``.
 
     Returns:
         str: JSON string with output, exit_code, and error fields
@@ -3399,9 +3408,15 @@ def terminal_tool(
 
         # Resolve configuration per call. Named targets read merged config
         # directly; legacy flat config keeps the existing env-driven path.
-        from tools.execution_targets import ExecutionTargetError
+        from tools.execution_targets import (
+            ExecutionTargetError,
+            coalesce_execution_target,
+        )
         try:
-            target_resolution = _target_resolution(target)
+            selected_execution_target = coalesce_execution_target(
+                execution_target, target,
+            )
+            target_resolution = _target_resolution(selected_execution_target)
         except ExecutionTargetError as exc:
             return json.dumps({
                 "output": "", "exit_code": -1, "error": str(exc), "status": "error",
@@ -3611,7 +3626,9 @@ def terminal_tool(
                                 live_resolution = (
                                     target_resolution
                                     if execution_target_config_is_frozen()
-                                    else resolve_live_execution_target(target)
+                                    else resolve_live_execution_target(
+                                        selected_execution_target
+                                    )
                                 )
                             except Exception as exc:
                                 publish_error = str(exc)
@@ -4687,7 +4704,7 @@ TERMINAL_SCHEMA = {
                 "type": "string",
                 "description": "Working directory for this command (absolute path). Defaults to the session working directory."
             },
-            "target": {
+            "execution_target": {
                 "type": "string",
                 "description": "Named execution target from terminal.targets (for example 'local' or 'devbox'). Omit to use terminal.default_target; legacy flat config accepts only 'default'.",
             },
@@ -4723,6 +4740,7 @@ def _handle_terminal(args, **kw):
         pty=args.get("pty", False),
         notify_on_complete=args.get("notify_on_complete", False),
         watch_patterns=args.get("watch_patterns"),
+        execution_target=args.get("execution_target"),
         target=args.get("target"),
     )
 
