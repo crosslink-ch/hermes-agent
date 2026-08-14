@@ -229,3 +229,15 @@ def test_distribution_critical_sources_use_crosslink_and_hosted_urls() -> None:
     assert "https://github.com/crosslink-ch/hermes-agent/releases" in desktop_about
     assert "raw.githubusercontent.com/crosslink-ch/hermes-agent" in native_bootstrap
     assert "MigrateLegacyOrigin" in desktop_bootstrap
+
+
+def test_public_installers_prefer_https_clone_before_ssh_fallback() -> None:
+    shell = INSTALL_SH.read_text(encoding="utf-8")
+    powershell = (REPO_ROOT / "scripts" / "install.ps1").read_text(encoding="ascii")
+
+    assert shell.index('log_info "Trying HTTPS clone..."') < shell.index(
+        'log_info "HTTPS failed, trying SSH..."'
+    )
+    assert powershell.index('Write-Info "Trying HTTPS clone..."') < powershell.index(
+        'Write-Info "HTTPS failed, trying SSH..."'
+    )

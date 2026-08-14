@@ -1411,18 +1411,18 @@ EOF
             exit 1
         fi
     else
-        # Try SSH first (for private repo access), fall back to HTTPS
-        # GIT_SSH_COMMAND disables interactive prompts and sets a short timeout
-        # so SSH fails fast instead of hanging when no key is configured.
-        log_info "Trying SSH clone..."
-        if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" \
-           git clone --depth 1 --branch "$BRANCH" "$REPO_URL_SSH" "$INSTALL_DIR" 2>/dev/null; then
-            log_success "Cloned via SSH"
+        # This distribution is public, so prefer HTTPS. Besides working without
+        # GitHub SSH keys, this avoids connected-but-stalled SSH agent/key flows.
+        # Keep SSH as a fallback for networks that permit it but block HTTPS.
+        log_info "Trying HTTPS clone..."
+        if git clone --depth 1 --branch "$BRANCH" "$REPO_URL_HTTPS" "$INSTALL_DIR"; then
+            log_success "Cloned via HTTPS"
         else
-            rm -rf "$INSTALL_DIR" 2>/dev/null  # Clean up partial SSH clone
-            log_info "SSH failed, trying HTTPS..."
-            if git clone --depth 1 --branch "$BRANCH" "$REPO_URL_HTTPS" "$INSTALL_DIR"; then
-                log_success "Cloned via HTTPS"
+            rm -rf "$INSTALL_DIR" 2>/dev/null  # Clean up partial HTTPS clone
+            log_info "HTTPS failed, trying SSH..."
+            if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" \
+               git clone --depth 1 --branch "$BRANCH" "$REPO_URL_SSH" "$INSTALL_DIR" 2>/dev/null; then
+                log_success "Cloned via SSH"
             else
                 log_error "Failed to clone repository"
                 exit 1

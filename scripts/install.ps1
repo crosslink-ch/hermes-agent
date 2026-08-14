@@ -2108,22 +2108,27 @@ function Install-Repository {
         $env:GIT_CONFIG_VALUE_0 = "false"
         git config --global windows.appendAtomically false 2>$null
 
-        # Try SSH first, then HTTPS, with -c flag for atomic write fix
-        Write-Info "Trying SSH clone..."
-        $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=5"
+        # This distribution is public, so prefer HTTPS. Besides working on
+        # machines without GitHub SSH keys, this avoids connected-but-stalled
+        # SSH agent/key flows that ConnectTimeout does not bound. Keep SSH as a
+        # fallback for networks that permit GitHub SSH but block HTTPS.
+        Write-Info "Trying HTTPS clone..."
         try {
-            Invoke-NativeWithRelaxedErrorAction { git -c windows.appendAtomically=false clone --depth 1 --branch $Branch $RepoUrlSsh $InstallDir }
+            Invoke-NativeWithRelaxedErrorAction { git -c windows.appendAtomically=false -c core.autocrlf=false clone --depth 1 --branch $Branch $RepoUrlHttps $InstallDir }
             if ($LASTEXITCODE -eq 0) { $cloneSuccess = $true }
         } catch { }
-        $env:GIT_SSH_COMMAND = $null
 
         if (-not $cloneSuccess) {
-            if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
-            Write-Info "SSH failed, trying HTTPS..."
+            if (Test-Path $InstallDir) {
+                Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue
+            }
+            Write-Info "HTTPS failed, trying SSH..."
+            $env:GIT_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=5"
             try {
-                Invoke-NativeWithRelaxedErrorAction { git -c windows.appendAtomically=false clone --depth 1 --branch $Branch $RepoUrlHttps $InstallDir }
+                Invoke-NativeWithRelaxedErrorAction { git -c windows.appendAtomically=false -c core.autocrlf=false clone --depth 1 --branch $Branch $RepoUrlSsh $InstallDir }
                 if ($LASTEXITCODE -eq 0) { $cloneSuccess = $true }
             } catch { }
+            $env:GIT_SSH_COMMAND = $null
         }
 
         # Fallback: download ZIP archive (bypasses git file I/O issues entirely)
@@ -2221,7 +2226,7 @@ function Install-Repository {
         }
 
         if (-not $cloneSuccess) {
-            throw "Failed to download repository (tried git clone SSH, HTTPS, and ZIP)"
+            throw "Failed to download repository (tried git clone HTTPS, SSH, and ZIP)"
         }
     }
 
