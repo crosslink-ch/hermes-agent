@@ -413,8 +413,7 @@ def _format_browser_timeout_error(
             hints.append(
                 "The browser daemon may still be starting, or Chromium may be "
                 "missing system libraries. Install/repair with: "
-                "npx agent-browser install --with-deps "
-                "(or: npx playwright install --with-deps chromium)"
+                "npx agent-browser install --with-deps"
             )
     if hints:
         parts.extend(hints)
@@ -1146,8 +1145,7 @@ def _run_chrome_fallback_command(
         else:
             hint = (
                 "Chrome fallback requires Chromium, but it is missing. Install it with: "
-                "npx agent-browser install --with-deps "
-                "(or: npx playwright install --with-deps chromium)"
+                "npx agent-browser install --with-deps"
             )
         return {"success": False, "error": hint}
 
@@ -2494,8 +2492,7 @@ def _run_browser_command(
         else:
             hint = (
                 "Chromium browser is missing. Install it with: "
-                "npx agent-browser install --with-deps "
-                "(or: npx playwright install --with-deps chromium)"
+                "npx agent-browser install --with-deps"
             )
         logger.warning("browser command blocked: %s", hint)
         return {"success": False, "error": hint}
@@ -4989,7 +4986,6 @@ if __name__ == "__main__":
                 else:
                     print("     Install it with:")
                     print("       npx agent-browser install --with-deps")
-                    print("     Or:  npx playwright install --with-deps chromium")
         except FileNotFoundError:
             print("   - agent-browser CLI not found")
             print(f"     Install: {_browser_install_hint()}")

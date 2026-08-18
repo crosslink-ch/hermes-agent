@@ -43,7 +43,7 @@ description: "如何为 Hermes Agent 做贡献 — 开发环境配置、代码�
 对大多数贡献者来说，最好的开发启动方式和用户安装方式相同：运行标准安装器，然后在它克隆出的仓库里开发。安装器会创建 Hermes venv、配置 `hermes` 命令、为 `hermes update` 写入安装方式标记，并把完整 git 项目克隆到 `$HERMES_HOME/hermes-agent`（通常是 `~/.hermes/hermes-agent`）。这样你的开发环境会和 CLI、updater、lazy dependency installer、gateway、docs 默认假设的布局一致。
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://share.kihub.ch/hermes/install.sh | bash
 cd "${HERMES_HOME:-$HOME/.hermes}/hermes-agent"
 
 # 在标准安装基础上添加开发/测试 extras。
@@ -65,7 +65,7 @@ scripts/run_tests.sh
 只有在你明确不想使用 Hermes managed install layout 时才使用这种方式（例如容器或 CI job 里的临时 clone）。如果这样安装，请确保运行的是这个 venv 里的 `hermes` entrypoint；运行系统 `python3 -m hermes_cli.main` 可能会加载无关的系统 Python 包。
 
 ```bash
-git clone https://github.com/NousResearch/hermes-agent.git
+git clone https://github.com/crosslink-ch/hermes-agent.git
 cd hermes-agent
 
 # 使用 Python 3.11 创建虚拟环境

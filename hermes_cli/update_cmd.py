@@ -37,6 +37,14 @@ from pathlib import Path
 from typing import Optional
 
 from hermes_cli.config import get_hermes_home
+from hermes_cli.distribution import (
+    ARCHIVE_BASE_URL,
+    REPOSITORY_CANONICAL,
+    REPOSITORY_HTTPS_URL,
+    REPOSITORY_SLUG,
+    REPOSITORY_URLS,
+    canonical_github_remote,
+)
 from hermes_constants import venv_python_path
 
 logger = logging.getLogger(__name__)
@@ -751,9 +759,7 @@ def _update_via_zip(args):
             f"--branch {branch}`, or update against main with `hermes update`."
         )
         _m().sys.exit(1)
-    zip_url = (
-        f"https://github.com/NousResearch/hermes-agent/archive/refs/heads/{branch}.zip"
-    )
+    zip_url = f"{ARCHIVE_BASE_URL}/refs/heads/{branch}.zip"
 
     print("→ Downloading latest version...")
     tmp_dir = tempfile.mkdtemp(prefix="hermes-update-")
@@ -1406,14 +1412,8 @@ def _discard_stashed_changes(
     print("→ Discarded local source changes (updates.non_interactive_local_changes=discard).")
     return True
 
-OFFICIAL_REPO_URLS = {
-    "https://github.com/NousResearch/hermes-agent.git",
-    "git@github.com:NousResearch/hermes-agent.git",
-    "https://github.com/NousResearch/hermes-agent",
-    "git@github.com:NousResearch/hermes-agent",
-}
-
-OFFICIAL_REPO_URL = "https://github.com/NousResearch/hermes-agent.git"
+OFFICIAL_REPO_URLS = set(REPOSITORY_URLS)
+OFFICIAL_REPO_URL = REPOSITORY_HTTPS_URL
 
 SKIP_UPSTREAM_PROMPT_FILE = ".skip_upstream_prompt"
 
@@ -1433,20 +1433,10 @@ def _get_origin_url(git_cmd: list[str], cwd: Path) -> Optional[str]:
     return None
 
 def _is_fork(origin_url: Optional[str]) -> bool:
-    """Check if the origin remote points to a fork (not the official repo)."""
+    """Check if origin is not the Crosslink distribution repository."""
     if not origin_url:
         return False
-    # Normalize URL for comparison (strip trailing .git if present)
-    normalized = origin_url.rstrip("/")
-    if normalized.endswith(".git"):
-        normalized = normalized[:-4]
-    for official in OFFICIAL_REPO_URLS:
-        official_normalized = official.rstrip("/")
-        if official_normalized.endswith(".git"):
-            official_normalized = official_normalized[:-4]
-        if normalized == official_normalized:
-            return False
-    return True
+    return canonical_github_remote(origin_url) != REPOSITORY_CANONICAL
 
 def _has_upstream_remote(git_cmd: list[str], cwd: Path) -> bool:
     """Check if an 'upstream' remote already exists."""
@@ -1538,8 +1528,8 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
 
         # Ask user if they want to add upstream
         print()
-        print("ℹ Your fork is not tracking the official Hermes repository.")
-        print("  This means you may miss updates from NousResearch/hermes-agent.")
+        print("ℹ Your fork is not tracking the Crosslink Hermes distribution.")
+        print(f"  This means you may miss updates from {REPOSITORY_SLUG}.")
         print()
         try:
             response = (
@@ -1552,17 +1542,13 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
         if response in {"", "y", "yes"}:
             print("→ Adding upstream remote...")
             if _add_upstream_remote(git_cmd, cwd):
-                print(
-                    "  ✓ Added upstream: https://github.com/NousResearch/hermes-agent.git"
-                )
+                print(f"  ✓ Added upstream: {REPOSITORY_HTTPS_URL}")
                 has_upstream = True
             else:
                 print("  ✗ Failed to add upstream remote. Skipping upstream sync.")
                 return
         else:
-            print(
-                "  Skipped. Run 'git remote add upstream https://github.com/NousResearch/hermes-agent.git' to add later."
-            )
+            print(f"  Skipped. Run 'git remote add upstream {REPOSITORY_HTTPS_URL}' to add later.")
             _mark_skip_upstream_prompt()
             return
 
@@ -3678,7 +3664,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         else:
             print("✗ Not a git repository. Please reinstall:")
             print(
-                "  curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
+                "  curl -fsSL https://share.kihub.ch/hermes/install.sh | bash"
             )
             sys.exit(1)
 

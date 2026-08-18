@@ -10,9 +10,14 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from urllib.parse import urlparse
 from hermes_constants import get_hermes_home
 from typing import TYPE_CHECKING, Dict, List, Optional
+from hermes_cli.distribution import (
+    RELEASE_URL_BASE,
+    REPOSITORY_CANONICAL,
+    REPOSITORY_HTTPS_URL,
+    canonical_github_remote as _canonical_distribution_remote,
+)
 
 # rich and prompt_toolkit are imported lazily (inside the functions that use
 # them) rather than at module level.  Importing this module is on the TUI
@@ -127,27 +132,13 @@ _UPDATE_CHECK_CACHE_SECONDS = 6 * 3600
 # (e.g. nix-built hermes — no local git history to count against).
 UPDATE_AVAILABLE_NO_COUNT = -1
 
-_UPSTREAM_REPO_URL = "https://github.com/NousResearch/hermes-agent.git"
-_OFFICIAL_REPO_CANONICAL = "github.com/nousresearch/hermes-agent"
+_UPSTREAM_REPO_URL = REPOSITORY_HTTPS_URL
+_OFFICIAL_REPO_CANONICAL = REPOSITORY_CANONICAL
 
 
 def _canonical_github_remote(url: str | None) -> str:
     """Return ``host/owner/repo`` for common GitHub remote URL forms."""
-    if not url:
-        return ""
-    value = url.strip()
-    if value.startswith("git@github.com:"):
-        value = "github.com/" + value[len("git@github.com:"):]
-    elif value.startswith("ssh://git@github.com/"):
-        value = "github.com/" + value[len("ssh://git@github.com/"):]
-    else:
-        parsed = urlparse(value)
-        if parsed.netloc and parsed.path:
-            value = f"{parsed.netloc}{parsed.path}"
-    value = value.strip().rstrip("/")
-    if value.endswith(".git"):
-        value = value[:-4]
-    return value.lower()
+    return _canonical_distribution_remote(url)
 
 
 def _is_ssh_remote(url: str | None) -> bool:
@@ -437,7 +428,7 @@ def get_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
     return {"upstream": upstream, "local": local, "ahead": max(ahead, 0)}
 
 
-_RELEASE_URL_BASE = "https://github.com/NousResearch/hermes-agent/releases/tag"
+_RELEASE_URL_BASE = RELEASE_URL_BASE
 _latest_release_cache: Optional[tuple] = None  # (tag, url) once resolved
 
 
@@ -446,7 +437,7 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
 
     Local-only — runs ``git describe --tags --abbrev=0`` against the
     Hermes checkout. Cached per-process. Release URL always points at the
-    canonical NousResearch/hermes-agent repo (forks don't get a link).
+    canonical Crosslink distribution repository (forks don't get a link).
     """
     global _latest_release_cache
     if _latest_release_cache is not None:

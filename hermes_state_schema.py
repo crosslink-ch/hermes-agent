@@ -17,6 +17,7 @@ from hermes_constants import get_hermes_home
 from hermes_state_common import (
     DEFERRED_INDEX_SQL,
     FTS_CJK_STALE_KEY,
+    FTS_STALE_KEY,
     FTS_SQL,
     FTS_STORAGE_VERSION,
     FTS_TRIGRAM_SQL,
@@ -24,6 +25,7 @@ from hermes_state_common import (
     LEGACY_FTS_TRIGRAM_SQL,
     SCHEMA_SQL,
     SCHEMA_VERSION,
+    _FTS_CJK_TRIGGERS,
     _FTS_TRIGGERS,
     _ephemeral_child_sql,
 )
@@ -67,6 +69,68 @@ class SessionSchemaMixin:
                 raise
             self._warn_fts5_unavailable(exc)
             return False
+
+    def _drop_all_fts_triggers(self, cursor: sqlite3.Cursor) -> None:
+        self._drop_fts_triggers(cursor)
+        for trigger in _FTS_CJK_TRIGGERS:
+            try:
+                cursor.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            except sqlite3.OperationalError:
+                pass
+
+    def _mark_fts_stale_and_drop_triggers(self, cursor: sqlite3.Cursor) -> None:
+        """Atomically record stale derived indexes before detaching sync."""
+        cursor.execute(
+            "INSERT INTO state_meta (key, value) VALUES (?, '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (FTS_STALE_KEY,),
+        )
+        cjk_placeholders = ",".join("?" for _ in _FTS_CJK_TRIGGERS)
+        cjk_triggers_present = cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'trigger' "
+            f"AND name IN ({cjk_placeholders}) LIMIT 1",
+            _FTS_CJK_TRIGGERS,
+        ).fetchone()
+        if cjk_triggers_present:
+            cursor.execute(
+                "INSERT INTO state_meta (key, value) VALUES (?, '1') "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (FTS_CJK_STALE_KEY,),
+            )
+        self._drop_all_fts_triggers(cursor)
+
+    def _detach_stale_fts_if_marked(self, cursor: sqlite3.Cursor) -> bool:
+        """Serialize marker observation and trigger detach with peer writers."""
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            stale = cursor.execute(
+                "SELECT 1 FROM state_meta WHERE key = ? LIMIT 1",
+                (FTS_STALE_KEY,),
+            ).fetchone()
+            if stale is None:
+                self._conn.rollback()
+                return False
+            self._mark_fts_stale_and_drop_triggers(cursor)
+            self._conn.commit()
+            return True
+        except BaseException:
+            if self._conn.in_transaction:
+                self._conn.rollback()
+            raise
+
+    @staticmethod
+    def _execute_script_in_transaction(
+        cursor: sqlite3.Cursor, script: str
+    ) -> None:
+        """Execute trusted schema SQL without ``executescript`` auto-commits."""
+        statement = ""
+        for char in script:
+            statement += char
+            if char == ";" and sqlite3.complete_statement(statement):
+                cursor.execute(statement)
+                statement = ""
+        if statement.strip():
+            cursor.execute(statement)
 
     @staticmethod
     def _fts_trigger_count(cursor: sqlite3.Cursor) -> int:
@@ -288,6 +352,123 @@ class SessionSchemaMixin:
             if "no such table" in str(exc).lower():
                 return False
             raise
+
+    def _recover_stale_fts(self, cursor: sqlite3.Cursor, *, legacy: bool) -> bool:
+        """Atomically rebuild stale base/trigram indexes and resume syncing.
+
+        The durable marker is re-read only after ``BEGIN IMMEDIATE``. That
+        serializes startup recovery with every peer writer and prevents a
+        constructor that observed an old marker from dropping triggers restored
+        by a peer. Schema statements are executed one-by-one because Python's
+        ``executescript`` commits any pending transaction before it starts.
+        """
+        include_trigram = False
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            marker = cursor.execute(
+                "SELECT 1 FROM state_meta WHERE key = ? LIMIT 1",
+                (FTS_STALE_KEY,),
+            ).fetchone()
+            if marker is None:
+                # A peer completed recovery after this constructor's initial
+                # read. Observe its committed state without touching triggers.
+                base_status = self._fts_table_probe(cursor, "messages_fts")
+                trigram_status = self._fts_table_probe(
+                    cursor, "messages_fts_trigram"
+                )
+                self._conn.rollback()
+                self._fts_stale = False
+                self._fts_enabled = base_status is True
+                self._trigram_available = trigram_status is True
+                return self._fts_enabled
+
+            try:
+                trigram_status = self._fts_table_probe(
+                    cursor, "messages_fts_trigram"
+                )
+            except sqlite3.DatabaseError:
+                # A corrupt vtable may fail even a LIMIT 0 probe. It still
+                # needs to be included in the drop-and-recreate recovery.
+                trigram_status = True
+            include_trigram = trigram_status is True
+
+            # Keep marker creation and every trigger/table transition in the
+            # same write transaction. The CJK marker is preserved separately.
+            self._mark_fts_stale_and_drop_triggers(cursor)
+            if include_trigram:
+                cursor.execute("DROP TABLE IF EXISTS messages_fts_trigram")
+            cursor.execute("DROP VIEW IF EXISTS messages_fts_trigram_src")
+            cursor.execute("DROP TABLE IF EXISTS messages_fts")
+
+            schema_sql = LEGACY_FTS_SQL if legacy else FTS_SQL
+            if include_trigram:
+                schema_sql += (
+                    LEGACY_FTS_TRIGRAM_SQL if legacy else FTS_TRIGRAM_SQL
+                )
+            self._execute_script_in_transaction(cursor, schema_sql)
+            if legacy:
+                self._rebuild_legacy_fts_indexes(
+                    cursor, include_trigram=include_trigram
+                )
+            else:
+                self._rebuild_fts_indexes(
+                    cursor, include_trigram=include_trigram
+                )
+            cursor.execute(
+                "DELETE FROM state_meta WHERE key = ?",
+                (FTS_STALE_KEY,),
+            )
+            self._conn.commit()
+        except sqlite3.DatabaseError as exc:
+            try:
+                if self._conn.in_transaction:
+                    self._conn.rollback()
+            except sqlite3.Error:
+                pass
+
+            # Recovery failed. Re-establish the marker/trigger invariant in a
+            # fresh transaction: triggers may be absent only while stale is
+            # durably recorded. This also repairs any pre-existing unmarked gap.
+            detach_exc = None
+            try:
+                self._conn.execute("BEGIN IMMEDIATE")
+                self._mark_fts_stale_and_drop_triggers(cursor)
+                self._conn.commit()
+            except sqlite3.Error as cleanup_exc:
+                detach_exc = cleanup_exc
+                try:
+                    if self._conn.in_transaction:
+                        self._conn.rollback()
+                except sqlite3.Error:
+                    pass
+
+            self._fts_stale = True
+            self._fts_enabled = False
+            self._trigram_available = False
+            self._fts_cjk_available = False
+            if detach_exc is not None:
+                logger.error(
+                    "Automatic FTS recovery failed (%s), and stale-marker "
+                    "cleanup also failed (%s).",
+                    exc,
+                    detach_exc,
+                )
+            else:
+                logger.error(
+                    "Automatic rebuild of stale FTS indexes failed (%s); "
+                    "canonical writes remain enabled with FTS detached.",
+                    exc,
+                )
+            return False
+
+        self._fts_stale = False
+        self._fts_enabled = True
+        self._trigram_available = include_trigram
+        logger.warning(
+            "Rebuilt stale state.db FTS indexes from canonical messages and "
+            "restored sync triggers."
+        )
+        return True
 
     @staticmethod
     def _parse_schema_columns(schema_sql: str) -> Dict[str, Dict[str, str]]:
@@ -586,6 +767,11 @@ class SessionSchemaMixin:
 
         cursor.executescript(SCHEMA_SQL)
 
+        # A previous writer may have entered fail-open before this process
+        # started. Observe the durable marker and detach derived triggers in one
+        # serialized transaction before any reconciliation updates messages.
+        self._fts_stale = self._detach_stale_fts_if_marked(cursor)
+
         # ── Declarative column reconciliation ──────────────────────────
         # Diff live tables against SCHEMA_SQL and ADD any missing columns.
         # This is idempotent and self-healing: even if a version-gated
@@ -640,6 +826,9 @@ class SessionSchemaMixin:
 
         fts5_available = self._sqlite_supports_fts5(cursor)
         fts_migrations_complete = True
+        # Re-check after reconciliation because a peer may have entered
+        # fail-open while this constructor was doing non-FTS schema work.
+        self._fts_stale = self._detach_stale_fts_if_marked(cursor)
         if not fts5_available:
             # Existing FTS triggers can still fire on messages INSERT/UPDATE
             # even though the current sqlite runtime cannot read the virtual
@@ -981,7 +1170,18 @@ class SessionSchemaMixin:
             # its inline triggers exist (via the legacy DDL), and skip the
             # v23 view/external tables entirely. Fresh installs and opted-in
             # DBs have no legacy inline FTS, so they get the v23 DDL.
-            if self._db_has_legacy_inline_fts(cursor):
+            legacy_fts = self._db_has_legacy_inline_fts(cursor)
+            if self._fts_stale:
+                if self._recover_stale_fts(cursor, legacy=legacy_fts):
+                    # CJK was detached alongside the corrupt base indexes and
+                    # has its own stale marker. Its existing ensure path keeps
+                    # it offline until its dedicated rebuild.
+                    self._ensure_fts_cjk_schema(cursor)
+                else:
+                    self._fts_enabled = False
+                    self._trigram_available = False
+                    self._fts_cjk_available = False
+            elif legacy_fts:
                 triggers_need_repair = (
                     self._fts_trigger_count(cursor) < len(_FTS_TRIGGERS)
                 )
@@ -1026,6 +1226,16 @@ class SessionSchemaMixin:
             # AFTER UPDATE OF variants. IF NOT EXISTS cannot rewrite them.
             if getattr(self, "_fts_enabled", False):
                 self._migrate_broad_fts_update_triggers(cursor)
+
+            # Close the constructor race with a peer that entered fail-open
+            # during FTS ensure/recovery. This is deliberately the final FTS DDL
+            # step: once a durable marker wins, this constructor must not
+            # recreate a trigger after detaching it.
+            if self._detach_stale_fts_if_marked(cursor):
+                self._fts_stale = True
+                self._fts_enabled = False
+                self._trigram_available = False
+                self._fts_cjk_available = False
 
         self._conn.commit()
 
