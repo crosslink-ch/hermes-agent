@@ -3849,9 +3849,8 @@ class BasePlatformAdapter(ABC):
             _is_multi = False
             try:
                 from tools import clarify_gateway as _cg
-                with _cg._lock:
-                    _entry = _cg._entries.get(clarify_id)
-                _is_multi = bool(_entry and getattr(_entry, "multi_select", False))
+                _request = _cg.get_pending_request(clarify_id)
+                _is_multi = bool(_request and _request.get("multi_select"))
             except Exception:
                 _is_multi = False
             lines = [f"❓ {question}", ""]

@@ -133,6 +133,23 @@ _HYGIENE_COOLDOWN_LADDER_MULTIPLIERS = (1, 3, 9)
 _HYGIENE_COOLDOWN_MAX_SECONDS = 3600.0
 
 
+def _callable_accepts_keyword(callback: Callable[..., Any], keyword: str) -> bool:
+    """Return whether *callback* safely accepts a named keyword.
+
+    Gateway platform plugins predate newer optional interaction fields.  We
+    inspect their signatures before adding a keyword so an adapter with the
+    historical ``send_exec_approval`` signature keeps working unchanged.
+    """
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):
+        return False
+    return keyword in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+
+
 def _hygiene_cooldown_for_failure(
     gateway,
     session_key: str,
@@ -5173,12 +5190,15 @@ class TurnRunner:
         # ------------------------------------------------------------------
         def _clarify_callback_sync(question: str, choices, multi_select: bool = False) -> str:
             from tools import clarify_gateway as _clarify_mod
-            import uuid as _uuid
+            import secrets as _secrets
 
             if not ctx._status_adapter:
                 return ""
 
-            clarify_id = _uuid.uuid4().hex[:10]
+            # Full-width cryptographic id: direct callbacks treat this as the
+            # authority token for one exact waiter, so 40-bit truncated ids are
+            # not sufficient for a long-lived multi-session gateway.
+            clarify_id = _secrets.token_urlsafe(24)
             _clarify_mod.register(
                 clarify_id=clarify_id,
                 session_key=ctx.session_key or "",
@@ -5366,17 +5386,24 @@ class TurnRunner:
             # false positives from MagicMock auto-attribute creation in tests.
             if getattr(type(ctx._status_adapter), "send_exec_approval", None) is not None:
                 try:
+                    _approval_send = ctx._status_adapter.send_exec_approval
+                    _approval_kwargs = {
+                        "chat_id": ctx._status_chat_id,
+                        "command": cmd,
+                        "session_key": _approval_session_key,
+                        "description": desc,
+                        "metadata": ctx._status_thread_metadata,
+                        "allow_permanent": approval_data.get("allow_permanent", True),
+                        "allow_session": approval_data.get("allow_session", True),
+                        "smart_denied": approval_data.get("smart_denied", False),
+                    }
+                    _request_id = approval_data.get("request_id")
+                    if _request_id and _callable_accepts_keyword(
+                        _approval_send, "request_id"
+                    ):
+                        _approval_kwargs["request_id"] = _request_id
                     _approval_fut = safe_schedule_threadsafe(
-                        ctx._status_adapter.send_exec_approval(
-                            chat_id=ctx._status_chat_id,
-                            command=cmd,
-                            session_key=_approval_session_key,
-                            description=desc,
-                            metadata=ctx._status_thread_metadata,
-                            allow_permanent=approval_data.get("allow_permanent", True),
-                            allow_session=approval_data.get("allow_session", True),
-                            smart_denied=approval_data.get("smart_denied", False),
-                        ),
+                        _approval_send(**_approval_kwargs),
                         ctx._loop_for_step,
                         logger=logger,
                         log_message="send_exec_approval scheduling error",
@@ -15103,8 +15130,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # so the user can retry; if it times out, the agent unblocks
             # with an empty response.
             if _raw_clarify_reply and not _raw_clarify_reply.startswith("/"):
+                _clarify_resolution: dict[str, str] = {}
                 _resolved = _clarify_mod.resolve_text_response_for_session(
-                    _quick_key, _raw_clarify_reply,
+                    _quick_key,
+                    _raw_clarify_reply,
+                    resolved=_clarify_resolution,
                 )
                 if _resolved:
                     logger.info(
@@ -15126,6 +15156,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 "Failed to resume typing after clarify response",
                                 exc_info=True,
                             )
+                        if (
+                            getattr(
+                                type(_clarify_adapter),
+                                "send_clarify_resolution",
+                                None,
+                            )
+                            is not None
+                        ):
+                            try:
+                                await _clarify_adapter.send_clarify_resolution(
+                                    chat_id=source.chat_id,
+                                    session_key=_clarify_resolution["session_key"],
+                                    request_id=_clarify_resolution["request_id"],
+                                    response=_clarify_resolution["response"],
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "Failed to publish typed clarify resolution",
+                                    exc_info=True,
+                                )
                     # Acknowledge with empty string so adapters that emit
                     # the agent's response don't double-post.  The agent
                     # itself will produce the next user-facing message.

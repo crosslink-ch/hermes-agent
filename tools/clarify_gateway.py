@@ -99,6 +99,8 @@ def register(
         awaiting_text=not bool(choices),
     )
     with _lock:
+        if clarify_id in _entries:
+            raise ValueError(f"Duplicate pending clarify id: {clarify_id}")
         _entries[clarify_id] = entry
         _session_index.setdefault(session_key, []).append(clarify_id)
     return entry
@@ -147,7 +149,8 @@ def wait_for_response(clarify_id: str, timeout: float) -> Optional[str]:
 
     with _lock:
         # Remove from indices regardless of resolution outcome.
-        _entries.pop(clarify_id, None)
+        if _entries.get(clarify_id) is entry:
+            _entries.pop(clarify_id, None)
         ids = _session_index.get(entry.session_key)
         if ids and clarify_id in ids:
             ids.remove(clarify_id)
@@ -169,11 +172,40 @@ def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
     """
     with _lock:
         entry = _entries.get(clarify_id)
-        if entry is None:
+        if entry is None or entry.event.is_set() or entry.response is not None:
             return False
-    entry.response = str(response) if response is not None else ""
-    entry.event.set()
-    return True
+        # Response assignment and the winner flag are one critical section.
+        # A typed reply and a direct callback may race on different threads;
+        # whichever holds the registry lock first is the sole winner.
+        entry.response = str(response) if response is not None else ""
+        entry.event.set()
+        return True
+
+
+def get_pending_request(clarify_id: str) -> Optional[Dict[str, object]]:
+    """Return a copy of one pending clarify request's public signature.
+
+    Platform adapters use this to render fields such as ``multi_select``
+    without reaching into the registry's private lock or entry mapping.
+    ``None`` means the request has already resolved, expired, or never
+    existed.
+    """
+    with _lock:
+        entry = _entries.get(clarify_id)
+        return (
+            entry.signature()
+            if entry is not None and not entry.event.is_set()
+            else None
+        )
+
+
+def get_request_state(clarify_id: str) -> str:
+    """Return ``pending``, ``resolved``, or ``missing`` for adapter cleanup."""
+    with _lock:
+        entry = _entries.get(clarify_id)
+        if entry is None:
+            return "missing"
+        return "resolved" if entry.event.is_set() else "pending"
 
 
 def get_pending_for_session(
@@ -194,7 +226,7 @@ def get_pending_for_session(
         ids = _session_index.get(session_key) or []
         for cid in ids:
             entry = _entries.get(cid)
-            if entry is None:
+            if entry is None or entry.event.is_set():
                 continue
             if include_choice_prompts or entry.awaiting_text:
                 return entry
@@ -313,7 +345,12 @@ def _coerce_multi_select_text(entry: _ClarifyEntry, text: str) -> Optional[str]:
     return _json.dumps(selected, ensure_ascii=False)
 
 
-def resolve_text_response_for_session(session_key: str, response: str) -> bool:
+def resolve_text_response_for_session(
+    session_key: str,
+    response: str,
+    *,
+    resolved: Optional[Dict[str, str]] = None,
+) -> bool:
     """Resolve the oldest pending clarify in ``session_key`` from typed text.
 
     Returns False if no pending clarify exists or if the response was rejected
@@ -328,10 +365,19 @@ def resolve_text_response_for_session(session_key: str, response: str) -> bool:
         # Response rejected: message should continue as a normal turn
         return False
 
-    return resolve_gateway_clarify(
+    accepted = resolve_gateway_clarify(
         entry.clarify_id,
         coerced,
     )
+    if accepted and resolved is not None:
+        resolved.update(
+            {
+                "request_id": entry.clarify_id,
+                "session_key": entry.session_key,
+                "response": coerced,
+            }
+        )
+    return accepted
 
 
 def mark_awaiting_text(clarify_id: str) -> bool:
@@ -341,7 +387,7 @@ def mark_awaiting_text(clarify_id: str) -> bool:
     """
     with _lock:
         entry = _entries.get(clarify_id)
-        if entry is None:
+        if entry is None or entry.event.is_set():
             return False
         entry.awaiting_text = True
         return True
@@ -351,7 +397,10 @@ def has_pending(session_key: str) -> bool:
     """Return True when this session has at least one pending clarify entry."""
     with _lock:
         ids = _session_index.get(session_key) or []
-        return any(_entries.get(cid) is not None for cid in ids)
+        return any(
+            (entry := _entries.get(cid)) is not None and not entry.event.is_set()
+            for cid in ids
+        )
 
 
 def clear_session(session_key: str) -> int:
@@ -372,8 +421,9 @@ def clear_session(session_key: str) -> int:
         # response by inspecting the wait_for_response return value
         # alongside its own timeout deadline.  Most callers just treat any
         # falsy result as "user did not respond".
-        entry.response = ""
-        entry.event.set()
+        if not entry.event.is_set():
+            entry.response = ""
+            entry.event.set()
         cancelled += 1
     return cancelled
 

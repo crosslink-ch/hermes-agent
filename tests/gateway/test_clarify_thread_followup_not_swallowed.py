@@ -39,6 +39,7 @@ SESSION_KEY = "agent:main:slack:dm:D123:1111.2222"
 class _StubAdapter(BasePlatformAdapter):
     def __init__(self):
         super().__init__(PlatformConfig(enabled=True, token="test"), Platform.SLACK)
+        self.clarify_resolutions = []
 
     async def connect(self, *, is_reconnect: bool = False):
         return True
@@ -51,6 +52,10 @@ class _StubAdapter(BasePlatformAdapter):
 
     async def get_chat_info(self, chat_id):
         return {"id": chat_id, "type": "im"}
+
+    async def send_clarify_resolution(self, **kwargs):
+        self.clarify_resolutions.append(kwargs)
+        return SendResult(success=True)
 
 
 class _FellThroughIntercept(Exception):
@@ -150,6 +155,13 @@ async def test_prose_still_accepted_after_other_flips_text_capture():
     assert entry is not None
     assert entry.event.is_set()
     assert entry.response == "a carousel actually"
+    assert adapter.clarify_resolutions == [
+        {
+            "chat_id": "D123",
+            "session_key": SESSION_KEY,
+            "request_id": "cl-other",
+            "response": "a carousel actually",
+        }
+    ]
     _clear_clarify_state()
-
 

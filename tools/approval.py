@@ -16,6 +16,7 @@ import hashlib
 import logging
 import os
 import re
+import secrets
 import shlex
 import sys
 import tempfile
@@ -2446,11 +2447,17 @@ def _denial_breaker_addendum(session_key: str) -> str:
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("event", "data", "result", "reason")
+    __slots__ = ("event", "data", "request_id", "result", "reason")
 
-    def __init__(self, data: dict):
+    def __init__(self, data: dict, *, request_id: Optional[str] = None):
         self.event = threading.Event()
-        self.data = data          # command, description, pattern_keys, …
+        # The id is generated before the entry is queued/notified and is
+        # deliberately unrelated to command/session content.  Direct gateway
+        # callbacks use it to target this exact waiter instead of approving
+        # whichever command happens to be at the head of the session FIFO.
+        self.request_id = request_id or secrets.token_urlsafe(18)
+        self.data = dict(data)    # command, description, pattern_keys, …
+        self.data["request_id"] = self.request_id
         self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
         # Optional free-text reason supplied with an explicit deny
         # (``/deny <reason>``) so the agent can adapt instead of only
@@ -2466,9 +2473,9 @@ def register_gateway_notify(session_key: str, cb) -> None:
     """Register a per-session callback for sending approval requests to the user.
 
     The callback signature is ``cb(approval_data: dict) -> None`` where
-    *approval_data* contains ``command``, ``description``, and
-    ``pattern_keys``.  The callback bridges sync→async (runs in the agent
-    thread, must schedule the actual send on the event loop).
+    *approval_data* contains ``request_id``, ``command``, ``description``,
+    and ``pattern_keys``.  The callback bridges sync→async (runs in the
+    agent thread, must schedule the actual send on the event loop).
     """
     with _lock:
         _gateway_notify_cbs[session_key] = cb
@@ -2489,13 +2496,25 @@ def unregister_gateway_notify(session_key: str) -> None:
 
 def resolve_gateway_approval(session_key: str, choice: str,
                              resolve_all: bool = False,
-                             reason: Optional[str] = None) -> int:
+                             reason: Optional[str] = None,
+                             request_id: Optional[str] = None,
+                             resolved_request_ids: Optional[list[str]] = None) -> int:
     """Called by the gateway's /approve or /deny handler to unblock
     waiting agent thread(s).
 
     When *resolve_all* is True every pending approval in the session is
     resolved at once (``/approve all``).  Otherwise only the oldest one
     is resolved (FIFO).
+
+    When *request_id* is supplied, it is resolved only when it names the
+    current FIFO head.  A missing/stale/later id returns 0 and never falls
+    back to FIFO; this is the safe path for direct platform callbacks.
+    ``resolve_all`` is intentionally ignored for an id-targeted resolution.
+
+    Callers that need to publish an exact structured resolution may pass an
+    empty *resolved_request_ids* list.  The opaque ids actually removed from
+    the queue are appended to it.  The optional output keeps the historical
+    integer return value and all existing platform/plugin call sites intact.
 
     *reason* is an optional free-text explanation attached to an explicit
     deny (``/deny <reason>``).  It is relayed back to the agent in the
@@ -2507,13 +2526,22 @@ def resolve_gateway_approval(session_key: str, choice: str,
         queue = _gateway_queues.get(session_key)
         if not queue:
             return 0
-        if resolve_all:
+        if request_id is not None:
+            target = queue[0]
+            if target.request_id != request_id:
+                return 0
+            queue.pop(0)
+            targets = [target]
+        elif resolve_all:
             targets = list(queue)
             queue.clear()
         else:
             targets = [queue.pop(0)]
         if not queue:
             _gateway_queues.pop(session_key, None)
+
+        if resolved_request_ids is not None:
+            resolved_request_ids.extend(entry.request_id for entry in targets)
 
     for entry in targets:
         entry.result = choice
@@ -2527,6 +2555,15 @@ def has_blocking_approval(session_key: str) -> bool:
     """Check if a session has one or more blocking gateway approvals waiting."""
     with _lock:
         return bool(_gateway_queues.get(session_key))
+
+
+def has_gateway_approval_request(session_key: str, request_id: str) -> bool:
+    """Return whether an exact unresolved request still exists in the FIFO."""
+    with _lock:
+        return any(
+            entry.request_id == request_id
+            for entry in (_gateway_queues.get(session_key) or [])
+        )
 
 
 def submit_pending(session_key: str, approval: dict):
@@ -3626,6 +3663,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     all_keys = approval_data.get("pattern_keys", [primary_key])
 
     entry = _ApprovalEntry(approval_data)
+    approval_data = entry.data
     with _lock:
         _gateway_queues.setdefault(session_key, []).append(entry)
 

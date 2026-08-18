@@ -156,6 +156,113 @@ class TestBlockingGatewayApproval:
         assert not e2.event.is_set()
         assert len(_gateway_queues[session_key]) == 1
 
+    def test_request_ids_are_unique_and_targeting_never_falls_back_to_fifo(self):
+        """A stale direct click must not approve the next queued command."""
+        from tools.approval import (
+            _ApprovalEntry,
+            _gateway_queues,
+            resolve_gateway_approval,
+        )
+
+        session_key = "test-targeted"
+        first = _ApprovalEntry({"command": "first"})
+        second = _ApprovalEntry({"command": "second"})
+        _gateway_queues[session_key] = [first, second]
+
+        assert first.request_id
+        assert second.request_id
+        assert first.request_id != second.request_id
+        assert first.data["request_id"] == first.request_id
+        assert second.data["request_id"] == second.request_id
+
+        assert resolve_gateway_approval(
+            session_key, "once", request_id="stale-request"
+        ) == 0
+        assert not first.event.is_set()
+        assert not second.event.is_set()
+
+        # An id-targeted callback has no authority to jump the FIFO head.
+        assert resolve_gateway_approval(
+            session_key, "deny", request_id=second.request_id
+        ) == 0
+        assert not first.event.is_set()
+        assert not second.event.is_set()
+
+        # The head can be resolved by its exact id, after which the next
+        # request becomes authoritative. Callers that omit request_id retain
+        # the historical FIFO behavior.
+        resolved_ids = []
+        assert resolve_gateway_approval(
+            session_key,
+            "once",
+            request_id=first.request_id,
+            resolved_request_ids=resolved_ids,
+        ) == 1
+        assert resolved_ids == [first.request_id]
+        assert first.event.is_set()
+        assert first.result == "once"
+        assert resolve_gateway_approval(session_key, "deny") == 1
+        assert second.event.is_set()
+        assert second.result == "deny"
+
+    def test_notify_callback_receives_queued_request_id(self):
+        from tools import approval as approval_module
+
+        notified = []
+
+        def notify(data):
+            notified.append(data)
+            approval_module.resolve_gateway_approval(
+                "notify-id-session",
+                "once",
+                request_id=data["request_id"],
+            )
+
+        decision = approval_module._await_gateway_decision(
+            "notify-id-session",
+            notify,
+            {
+                "command": "redacted command",
+                "description": "test",
+                "pattern_key": "dangerous",
+                "pattern_keys": ["dangerous"],
+            },
+        )
+
+        assert decision["resolved"] is True
+        assert decision["choice"] == "once"
+        assert len(notified) == 1
+        assert isinstance(notified[0]["request_id"], str)
+        assert notified[0]["request_id"]
+
+
+def test_request_id_keyword_compatibility_for_platform_overrides():
+    from gateway.run import _callable_accepts_keyword
+
+    class LegacyAdapter:
+        async def send_exec_approval(self, chat_id, command, session_key):
+            pass
+
+    class DirectInteractionAdapter:
+        async def send_exec_approval(
+            self, chat_id, command, session_key, request_id=None
+        ):
+            pass
+
+    class FlexibleAdapter:
+        async def send_exec_approval(self, **kwargs):
+            pass
+
+    assert not _callable_accepts_keyword(
+        LegacyAdapter().send_exec_approval, "request_id"
+    )
+    assert _callable_accepts_keyword(
+        DirectInteractionAdapter().send_exec_approval, "request_id"
+    )
+    assert _callable_accepts_keyword(
+        FlexibleAdapter().send_exec_approval, "request_id"
+    )
+
 
 # ------------------------------------------------------------------
 # /approve command
@@ -291,7 +398,8 @@ class TestApprovalResolutionNotice:
         runner.adapters = {Platform.TELEGRAM: adapter}
         source = _make_source()
         session_key = runner._session_key_for_source(source)
-        _gateway_queues[session_key] = [_ApprovalEntry({"command": "cmd"})]
+        entry = _ApprovalEntry({"command": "cmd"})
+        _gateway_queues[session_key] = [entry]
 
         await runner._handle_approve_command(_make_event("/approve session"))
 
@@ -302,6 +410,7 @@ class TestApprovalResolutionNotice:
                 "choice": "session",
                 "resolved_count": 1,
                 "resolve_all": False,
+                "request_ids": [entry.request_id],
             }
         ]
 
@@ -314,10 +423,12 @@ class TestApprovalResolutionNotice:
         runner.adapters = {Platform.TELEGRAM: adapter}
         source = _make_source()
         session_key = runner._session_key_for_source(source)
-        _gateway_queues[session_key] = [
+        entries = [
             _ApprovalEntry({"command": "cmd1"}),
             _ApprovalEntry({"command": "cmd2"}),
         ]
+        request_ids = [entry.request_id for entry in entries]
+        _gateway_queues[session_key] = entries
 
         await runner._handle_deny_command(_make_event("/deny all"))
 
@@ -328,6 +439,7 @@ class TestApprovalResolutionNotice:
                 "choice": "deny",
                 "resolved_count": 2,
                 "resolve_all": True,
+                "request_ids": request_ids,
             }
         ]
 
