@@ -197,6 +197,14 @@ install_in_sandbox() {
   if [ -z "$ref" ] || installer_supports "$ref" --skip-browser; then
     installer_flags+=(--skip-browser)
   fi
+  # Crosslink releases before distribution hardening could leave a checkout
+  # pointed at Nous. The current installer intentionally refuses to retarget
+  # that origin without explicit consent, so the fork E2E must exercise its
+  # migration flag when the installer under test supports it. Upstream's
+  # installer does not expose the flag and remains unchanged by this probe.
+  if [ -z "$ref" ] && installer_supports HEAD --migrate-legacy-origin; then
+    installer_flags+=(--migrate-legacy-origin)
+  fi
   # Sandbox flags must precede `--`; the rest goes to install.sh.
   args+=(-- "${installer_flags[@]}")
 

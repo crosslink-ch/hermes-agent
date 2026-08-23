@@ -99,6 +99,12 @@ def test_release_tag_picker_accepts_crosslink_release_tags(tmp_path):
     )
     assert "crosslink-v[0-9]+.[0-9]+.[0-9]+" in workflow
 
+    harness = (ROOT / "tests/install/install-update-e2e.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "installer_supports HEAD --migrate-legacy-origin" in harness
+    assert "installer_flags+=(--migrate-legacy-origin)" in harness
+
 
 def test_js_autofix_restores_app_auth_with_crosslink_pat_fallback():
     workflow = _load_yaml(".github/workflows/js-autofix.yml")
