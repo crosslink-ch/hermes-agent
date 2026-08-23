@@ -35,6 +35,23 @@ def test_ci_timing_report_never_receives_the_privileged_autofix_pat():
         assert "AUTOFIX_BOT_PAT" not in str(job), (path_name, job_id)
 
 
+def test_workflows_do_not_reference_unprovisioned_larger_runner_labels():
+    forbidden = {
+        "ubuntu-latest-32-core",
+        "ubuntu-latest-32-arm-core",
+        "ubuntu-latest-96-core",
+        "windows-latest-32-core",
+    }
+    offenders = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        for label in forbidden:
+            if label in text:
+                offenders.append((path.name, label))
+
+    assert offenders == []
+
+
 def test_js_autofix_restores_app_auth_with_crosslink_pat_fallback():
     workflow = _load_yaml(".github/workflows/js-autofix.yml")
     job = workflow["jobs"]["apply-patch"]
