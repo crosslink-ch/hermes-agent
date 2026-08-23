@@ -174,7 +174,10 @@ installer_supports() {
     git fetch -q --depth 1 "$UPSTREAM_URL" "$ref" 2>/dev/null || return 1
     script="$(git show FETCH_HEAD:scripts/install.sh 2>/dev/null)" || return 1
   }
-  printf '%s' "$script" | grep -qF -- "$flag"
+  # Avoid ``printf | grep -q`` under pipefail: grep exits as soon as it finds
+  # the flag, printf then gets SIGPIPE, and the successful probe is reported as
+  # false (the visible "printf: write error: Broken pipe" in CI).
+  [[ "$script" == *"$flag"* ]]
 }
 
 # Run the real install one-liner inside the sandbox. `ref` non-empty installs

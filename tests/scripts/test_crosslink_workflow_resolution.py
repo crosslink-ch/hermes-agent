@@ -102,6 +102,7 @@ def test_release_tag_picker_accepts_crosslink_release_tags(tmp_path):
     harness = (ROOT / "tests/install/install-update-e2e.sh").read_text(
         encoding="utf-8"
     )
+    assert '[[ "$script" == *"$flag"* ]]' in harness
     assert "installer_supports HEAD --migrate-legacy-origin" in harness
     assert "installer_flags+=(--migrate-legacy-origin)" in harness
 
