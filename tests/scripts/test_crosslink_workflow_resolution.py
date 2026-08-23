@@ -1,3 +1,5 @@
+import json
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -50,6 +52,52 @@ def test_workflows_do_not_reference_unprovisioned_larger_runner_labels():
                 offenders.append((path.name, label))
 
     assert offenders == []
+
+
+def test_release_tag_picker_accepts_crosslink_release_tags(tmp_path):
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "--allow-empty", "-q", "-m", "init"],
+        check=True,
+    )
+    for tag in (
+        "crosslink-v2026.5.14",
+        "crosslink-v2026.7.1",
+        "crosslink-v2026.8.11",
+        "backup/not-a-release",
+    ):
+        subprocess.run(["git", "-C", str(repo), "tag", tag], check=True)
+
+    result = subprocess.run(
+        [
+            str(ROOT / "scripts/sandbox/pick-release-tags.sh"),
+            "--repo",
+            str(repo),
+            "--count",
+            "2",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout) == [
+        "crosslink-v2026.5.14",
+        "crosslink-v2026.8.11",
+    ]
+
+    workflow = (ROOT / ".github/workflows/install-e2e.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "crosslink-v[0-9]+.[0-9]+.[0-9]+" in workflow
 
 
 def test_js_autofix_restores_app_auth_with_crosslink_pat_fallback():

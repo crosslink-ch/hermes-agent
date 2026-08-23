@@ -24,8 +24,8 @@
 # checkout has no tags and this exits non-zero rather than silently emitting an
 # empty matrix.
 #
-# Only vYYYY.M.D[.N] release tags are considered; the repo also carries
-# backup/* and one-off tags that are not releases.
+# Upstream vYYYY.M.D[.N] and Crosslink crosslink-vYYYY.M.D[.N] release tags are
+# considered; the repos also carry backup/* and one-off tags that are not releases.
 
 set -euo pipefail
 
@@ -65,10 +65,12 @@ if [ -z "$REPO" ]; then
 fi
 
 # sort -V orders v2026.4.8 before v2026.4.13 (numeric), which a plain
-# lexicographic sort gets wrong.
+# lexicographic sort gets wrong. Repositories use one release prefix in
+# practice, but accepting both keeps the selector valid in upstream and the
+# Crosslink distribution fork.
 mapfile -t tags < <(
-  git -C "$REPO" tag --list 'v*' \
-    | grep -E '^v[0-9]{4}\.[0-9]+\.[0-9]+(\.[0-9]+)?$' \
+  git -C "$REPO" tag --list \
+    | grep -E '^(crosslink-)?v[0-9]{4}\.[0-9]+\.[0-9]+(\.[0-9]+)?$' \
     | sort -V
 )
 

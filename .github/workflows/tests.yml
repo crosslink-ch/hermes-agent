@@ -17,7 +17,9 @@ jobs:
     # The Crosslink fork uses GitHub's standard hosted runner pool. Upstream's
     # custom 96-core label is not provisioned here and would queue forever.
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The full per-file suite is close to 30 minutes on the standard 4-vCPU
+    # runner, so leave enough margin for cold dependency caches and variance.
+    timeout-minutes: 45
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
