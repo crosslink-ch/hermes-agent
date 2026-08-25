@@ -318,6 +318,7 @@ class TestWindowsMsysPathResolution:
         to ``ntpath``/``Path``, and only a real Windows ``Path`` renders
         ``C:\\Users\\...`` — faking ``sys.platform`` left PosixPath in place."""
         import tools.file_tools as file_tools
+        from tools.environments import local as local_mod
 
         monkeypatch.setattr(file_tools.sys, "platform", "win32")
         monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
@@ -335,6 +336,7 @@ class TestWindowsMsysPathResolution:
         the host really is Windows, so the negative is only meaningful there.
         """
         import tools.file_tools as file_tools
+        from tools.environments import local as local_mod
 
         monkeypatch.setattr(file_tools.sys, "platform", "win32")
         monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
