@@ -306,7 +306,11 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
 
     raw_task_id = task_id or "default"
     resolution = _resolution or resolve_execution_target(target)
-    base_task_id = _resolve_container_task_id(raw_task_id)
+    config = (
+        _get_env_config(dict(resolution.config))
+        if resolution.named else _get_env_config()
+    )
+    base_task_id = _resolve_container_task_id(raw_task_id, config=config)
     task_id = resolution.environment_key(base_task_id)  # type: ignore[assignment]
     backend_task_id = resolution.backend_task_id(base_task_id)
 

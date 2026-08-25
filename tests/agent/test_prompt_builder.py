@@ -758,8 +758,35 @@ class TestPromptBuilderConstants:
 
 class TestEnvironmentHints:
 
+    def test_home_override_scopes_target_inventory_and_restores_context(
+        self, monkeypatch, tmp_path,
+    ):
+        import agent.prompt_builder as _pb
+        import tools.execution_targets as targets_mod
+        from hermes_constants import (
+            get_hermes_home,
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
 
+        outer_home = tmp_path / "outer"
+        agent_home = tmp_path / "agent"
+        outer_home.mkdir()
+        agent_home.mkdir()
+        seen_homes = []
+        monkeypatch.setattr(
+            targets_mod,
+            "list_execution_targets",
+            lambda: seen_homes.append(get_hermes_home()) or (),
+        )
+        token = set_hermes_home_override(outer_home)
+        try:
+            _pb.build_environment_hints(home_override=agent_home)
+            assert get_hermes_home() == outer_home
+        finally:
+            reset_hermes_home_override(token)
 
+        assert seen_homes == [agent_home]
 
 
     def test_build_environment_hints_suppresses_host_on_docker_backend(self, monkeypatch):
@@ -791,8 +818,12 @@ class TestEnvironmentHints:
 
         probe_calls = []
 
-        def _capture_probe(backend, terminal_config=None, target_name=""):
-            probe_calls.append((backend, terminal_config, target_name))
+        def _capture_probe(
+            backend, terminal_config=None, target_name="", runtime_scope="",
+        ):
+            probe_calls.append((
+                backend, terminal_config, target_name, runtime_scope,
+            ))
             return None
 
         monkeypatch.setattr(_pb, "is_wsl", lambda: False)
@@ -827,7 +858,7 @@ class TestEnvironmentHints:
         assert '"local" (local)' in result
         assert "select one with `execution_target`" in result
         assert "`search_files.target` remains" in result
-        assert probe_calls == [(
+        assert probe_calls[0][:3] == (
             "ssh",
             {
                 "backend": "ssh",
@@ -836,7 +867,10 @@ class TestEnvironmentHints:
                 "ssh_user": "agent",
             },
             "devbox",
-        )]
+        )
+        assert probe_calls[0][3] == targets_mod.resolve_execution_target(
+            "devbox"
+        ).security_scope
 
     def test_named_local_default_uses_target_cwd(self, monkeypatch, tmp_path):
         import agent.prompt_builder as _pb

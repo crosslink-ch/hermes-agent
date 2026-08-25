@@ -57,6 +57,119 @@ def isolated_target_state(monkeypatch):
             pass
 
 
+def test_named_docker_target_uses_selected_config_for_terminal_key(
+    monkeypatch, isolated_target_state,
+):
+    import tools.execution_targets as targets_mod
+
+    terminal_mod, _ = isolated_target_state
+    config = {
+        "terminal": {
+            "default_target": "local",
+            "targets": {
+                "local": {"backend": "local", "cwd": "/tmp"},
+                "sandbox": {
+                    "backend": "docker",
+                    "cwd": "/workspace",
+                    "container_persistent": False,
+                    "docker_mount_cwd_to_workspace": False,
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(targets_mod, "_load_merged_config", lambda: config)
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TERMINAL_CONTAINER_PERSISTENT", "true")
+    created = []
+
+    class FakeEnvironment:
+        backend = "docker"
+        cwd = "/workspace"
+        _persistent = True
+
+        def execute(self, _command, **_kwargs):
+            return {"output": "ok\n", "returncode": 0}
+
+        def cleanup(self, force_remove=False):
+            del force_remove
+
+        def wait_for_cleanup(self, timeout):
+            del timeout
+            return True
+
+    def fake_create(**kwargs):
+        created.append(dict(kwargs))
+        return FakeEnvironment()
+
+    monkeypatch.setattr(terminal_mod, "_create_environment", fake_create)
+
+    result = json.loads(terminal_mod.terminal_tool(
+        "pwd",
+        task_id="named-session",
+        execution_target="sandbox",
+    ))
+    resolution = targets_mod.resolve_execution_target("sandbox")
+
+    assert result["exit_code"] == 0
+    assert created[0]["task_id"] == resolution.backend_task_id("named-session")
+    assert created[0]["session_scoped"] is True
+
+
+@pytest.mark.parametrize("builder", ["file", "code"])
+def test_named_docker_target_uses_selected_config_for_nonterminal_builder(
+    builder, monkeypatch, isolated_target_state,
+):
+    import tools.code_execution_tool as code_mod
+    import tools.execution_targets as targets_mod
+
+    terminal_mod, file_mod = isolated_target_state
+    config = {
+        "terminal": {
+            "default_target": "local",
+            "targets": {
+                "local": {"backend": "local", "cwd": "/tmp"},
+                "sandbox": {
+                    "backend": "docker",
+                    "cwd": "/workspace",
+                    "container_persistent": False,
+                    "docker_mount_cwd_to_workspace": False,
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(targets_mod, "_load_merged_config", lambda: config)
+    monkeypatch.setenv("TERMINAL_ENV", "local")
+    monkeypatch.setenv("TERMINAL_CONTAINER_PERSISTENT", "true")
+    created = []
+
+    class FakeEnvironment:
+        backend = "docker"
+        cwd = "/workspace"
+        _persistent = True
+
+        def cleanup(self, force_remove=False):
+            del force_remove
+
+        def wait_for_cleanup(self, timeout):
+            del timeout
+            return True
+
+    def fake_create(**kwargs):
+        created.append(dict(kwargs))
+        return FakeEnvironment()
+
+    monkeypatch.setattr(terminal_mod, "_create_environment", fake_create)
+
+    if builder == "file":
+        file_mod._get_file_ops("named-session", "sandbox")
+    else:
+        code_mod._get_or_create_env("named-session", "sandbox")
+    resolution = targets_mod.resolve_execution_target("sandbox")
+
+    assert created[0]["task_id"] == resolution.backend_task_id("named-session")
+    assert created[0]["session_scoped"] is True
+
+
 def test_same_task_reuses_within_target_and_isolates_across_targets(
     monkeypatch, tmp_path, isolated_target_state,
 ):
@@ -1394,6 +1507,43 @@ def test_subdirectory_hints_follow_local_target_and_skip_remote_host(
     assert default_tracker.calls == 0
 
 
+def test_subdirectory_hints_reject_repointed_runtime_scope(
+    monkeypatch, tmp_path, isolated_target_state,
+):
+    from types import SimpleNamespace
+
+    import agent.tool_executor as executor
+    import tools.execution_targets as targets_mod
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    (second / "src").mkdir(parents=True)
+    (second / "src" / "AGENTS.md").write_text(
+        "REPLACEMENT TARGET HINT",
+        encoding="utf-8",
+    )
+    config_a = _named_config({"dev": str(first)}, default="dev")
+    config_b = _named_config({"dev": str(second)}, default="dev")
+    targets_mod.set_execution_target_config_source(config_a)
+    producing_scope = targets_mod.resolve_execution_target("dev").security_scope
+    targets_mod.set_execution_target_config_source(config_b)
+
+    try:
+        hint = executor._target_subdirectory_hints(
+            SimpleNamespace(_subdirectory_hints=None),
+            "session",
+            "read_file",
+            {"path": "src/main.py"},
+            "dev",
+            runtime_scope=producing_scope,
+        )
+    finally:
+        targets_mod.set_execution_target_config_source(None)
+
+    assert hint is None
+
+
 def test_targetless_intervening_tool_resets_all_target_read_trackers(
     monkeypatch, isolated_target_state,
 ):
@@ -1510,6 +1660,29 @@ def test_requirements_keep_tools_registered_when_any_target_is_usable(
 
     assert terminal_mod.check_terminal_requirements() is True
     assert checked == ["local"]
+
+
+def test_provider_backed_local_target_has_runtime_scoped_file_namespace(
+    isolated_target_state,
+):
+    _, file_mod = isolated_target_state
+    resolution = SimpleNamespace(
+        backend="local",
+        named=True,
+        target="local-runtime",
+        profile_scope="worker",
+        provider="hetzner",
+        security_scope="server-123",
+        config={"backend": "local", "cwd": "/workspace"},
+    )
+
+    namespace = file_mod._file_state_namespace(
+        "session",
+        "local-runtime",
+        _resolution=resolution,
+    )
+
+    assert namespace == "profile-worker:runtime-server-123:local"
 
 
 def test_local_target_aliases_share_file_state_lock_namespace(
@@ -2054,6 +2227,114 @@ def test_checkpoint_alias_flip_pins_dispatch_generation(monkeypatch, tmp_path):
     assert not (second / "sample.txt").exists()
     assert targets_mod.resolve_execution_target("dev").config["cwd"] == str(second)
     targets_mod.set_execution_target_config_source(None)
+
+
+def test_guardrail_alias_flip_pins_authorized_dispatch_generation(monkeypatch, tmp_path):
+    from agent import tool_executor
+    import tools.execution_targets as targets_mod
+    from tools.file_tools import write_file_tool
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    config_a = _named_config({"dev": str(first)}, default="dev")
+    config_b = _named_config({"dev": str(second)}, default="dev")
+    targets_mod.set_execution_target_config_source(config_a)
+
+    class Guardrails:
+        @staticmethod
+        def before_call(_name, _args):
+            targets_mod.set_execution_target_config_source(config_b)
+            return SimpleNamespace(allows_execution=True)
+
+    agent = SimpleNamespace(
+        session_id="session",
+        _current_turn_id="turn",
+        _current_api_request_id="request",
+        _tool_guardrails=Guardrails(),
+        _guardrail_block_result=lambda decision: decision,
+        quiet_mode=True,
+        tool_progress_mode="off",
+        verbose_logging=False,
+        tool_progress_callback=None,
+        tool_start_callback=None,
+        _checkpoint_mgr=SimpleNamespace(enabled=False),
+        _touch_activity=lambda *_args, **_kwargs: None,
+    )
+
+    managed = tool_executor._run_agent_tool_execution_middleware(
+        agent,
+        function_name="write_file",
+        function_args={
+            "path": "sample.txt",
+            "content": "authorized-generation",
+            "execution_target": "dev",
+        },
+        effective_task_id="target-race",
+        tool_call_id="call-guardrail",
+        execute=lambda args: write_file_tool(
+            args["path"], args["content"],
+            task_id="target-race",
+            execution_target=args["execution_target"],
+        ),
+    )
+
+    result = json.loads(managed.result)
+    assert result["cwd"] == str(first)
+    assert (first / "sample.txt").read_text() == "authorized-generation"
+    assert not (second / "sample.txt").exists()
+    assert targets_mod.resolve_execution_target("dev").config["cwd"] == str(second)
+    targets_mod.set_execution_target_config_source(None)
+
+
+def test_pre_tool_hook_selector_rewrite_is_revalidated_before_authorization(monkeypatch):
+    from agent import tool_executor
+
+    guardrail_calls = []
+    dispatch_calls = []
+
+    class Guardrails:
+        @staticmethod
+        def before_call(name, args):
+            guardrail_calls.append((name, dict(args)))
+            return SimpleNamespace(allows_execution=True)
+
+    monkeypatch.setattr(
+        "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+        lambda _name, args, **_kwargs: (
+            None,
+            {**args, "target": "content"},
+        ),
+    )
+    agent = SimpleNamespace(
+        session_id="session",
+        _current_turn_id="turn",
+        _current_api_request_id="request",
+        _tool_guardrails=Guardrails(),
+        _guardrail_block_result=lambda decision: decision,
+        quiet_mode=True,
+        tool_progress_mode="off",
+        verbose_logging=False,
+        tool_progress_callback=None,
+        tool_start_callback=None,
+        _checkpoint_mgr=SimpleNamespace(enabled=False),
+        _touch_activity=lambda *_args, **_kwargs: None,
+    )
+
+    managed = tool_executor._run_agent_tool_execution_middleware(
+        agent,
+        function_name="write_file",
+        function_args={"path": "sample.txt", "content": "data"},
+        effective_task_id="selector-rewrite",
+        tool_call_id="call-selector-rewrite",
+        execute=lambda args: dispatch_calls.append(dict(args)) or "dispatched",
+    )
+
+    assert managed.blocked is True
+    assert "does not accept 'target'" in str(managed.result)
+    assert guardrail_calls == []
+    assert dispatch_calls == []
 
 
 def test_removed_target_selector_blocks_before_agent_authorization(monkeypatch):

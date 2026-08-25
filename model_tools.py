@@ -603,7 +603,10 @@ _LEGACY_TOOL_ALIASES = {
     "tour": "gui_tour", "tip": "show_tip",
 }
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
-_TARGET_SELECTOR_TOOLS = {"terminal", "write_file", "patch", "execute_code"}
+_TARGET_SELECTOR_TOOLS = {
+    "terminal", "read_file", "write_file", "patch", "search_files", "execute_code",
+}
+_TARGET_RESULT_TOOLS = _TARGET_SELECTOR_TOOLS | {"process"}
 
 
 # --- Tool error sanitization --------------------------------------------------
@@ -932,6 +935,12 @@ def handle_function_call(
         validate_execution_target_args(function_name, function_args)
     except ExecutionTargetError as exc:
         return tool_error(str(exc))
+
+    target_config_stack = ExitStack()
+    if function_name in _TARGET_RESULT_TOOLS:
+        from tools.execution_targets import frozen_execution_target_config
+
+        target_config_stack.enter_context(frozen_execution_target_config())
 
     try:
         if function_name in _AGENT_LOOP_TOOLS:

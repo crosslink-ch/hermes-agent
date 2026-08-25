@@ -733,6 +733,17 @@ def _run_agent_tool_execution_middleware(
             authorization_gate=authorization_gate,
         )
 
+    def _freeze_and_authorize(candidate_args: dict[str, Any]) -> Any:
+        from contextlib import nullcontext
+
+        target_config_scope = nullcontext()
+        if function_name in _TARGET_RESULT_TOOLS:
+            from tools.execution_targets import frozen_execution_target_config
+
+            target_config_scope = frozen_execution_target_config()
+        with target_config_scope:
+            return _authorized_dispatch(candidate_args)
+
     def _hermes_pipeline(relay_args: dict[str, Any]) -> Any:
         request_result = apply_tool_request_middleware(
             function_name,

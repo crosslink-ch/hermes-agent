@@ -135,6 +135,48 @@ class TestContextFileCwd:
         assert "chosen workspace instructions" in context
 
 
+def test_environment_hints_receive_agent_profile_home(tmp_path):
+    agent_home = tmp_path / "profile-home"
+    agent_home.mkdir()
+    agent = _make_agent(
+        _session_db=SimpleNamespace(db_path=agent_home / "state.db")
+    )
+    calls = []
+
+    with (
+        patch("run_agent.load_soul_md", return_value=""),
+        patch("run_agent.build_nous_subscription_prompt", return_value=""),
+        patch(
+            "run_agent.build_environment_hints",
+            side_effect=lambda **kwargs: calls.append(dict(kwargs)) or "",
+        ),
+        patch("run_agent.build_context_files_prompt", return_value=""),
+    ):
+        build_system_prompt_parts(agent)
+
+    assert calls == [{"home_override": agent_home}]
+
+
+def test_environment_hints_ignore_non_path_session_db():
+    from unittest.mock import MagicMock
+
+    agent = _make_agent(_session_db=MagicMock())
+    calls = []
+
+    with (
+        patch("run_agent.load_soul_md", return_value=""),
+        patch("run_agent.build_nous_subscription_prompt", return_value=""),
+        patch(
+            "run_agent.build_environment_hints",
+            side_effect=lambda **kwargs: calls.append(dict(kwargs)) or "",
+        ),
+        patch("run_agent.build_context_files_prompt", return_value=""),
+    ):
+        build_system_prompt_parts(agent)
+
+    assert calls == [{"home_override": None}]
+
+
 def _stable_prompt(agent):
     with (
         patch("agent.prompt_builder.load_soul_md", return_value=""),

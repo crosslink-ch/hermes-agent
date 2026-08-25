@@ -1378,6 +1378,10 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 "started_at": session.started_at,
                 **({"target": session.target} if session.target else {}),
                 **({"backend": session.backend} if session.backend else {}),
+                **(
+                    {"runtime_scope": session.runtime_scope}
+                    if session.runtime_scope else {}
+                ),
                 **({"cwd": session.cwd} if session.cwd else {}),
             }
             _redact_process_result(notification)

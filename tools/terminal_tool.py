@@ -372,8 +372,9 @@ def clear_task_env_overrides(task_id: str):
     """Drop a task's overrides, cwd record and container alias (rollout cleanup)."""
     _task_env_overrides.pop(task_id, None)
     clear_session_cwd(task_id)
+    alias_key = _container_alias_key(task_id)
     with _container_alias_lock:
-        _container_aliases.pop(task_id, None)
+        _container_aliases.pop(alias_key, None)
 
 
 def register_container_alias(child_task_id: str, parent_task_id: Optional[str]) -> None:
@@ -381,19 +382,23 @@ def register_container_alias(child_task_id: str, parent_task_id: Optional[str]) 
     delegate_task spawn). A missing parent id aliases to ``"default"``."""
     if not child_task_id:
         return
+    alias_key = _container_alias_key(child_task_id)
     with _container_alias_lock:
-        _container_aliases[child_task_id] = str(parent_task_id or "default")
+        _container_aliases[alias_key] = str(parent_task_id or "default")
 
 
 def _resolve_container_alias(task_id: str) -> str:
-    """Follow the child→parent alias chain (cycle-safe) for *task_id*."""
-    seen = set()
-    key = task_id
+    """Follow the profile-scoped child→parent alias chain, cycle-safe."""
+    profile_scope = _container_alias_profile_scope()
+    seen: set[tuple[str, str]] = set()
+    raw_task_id = str(task_id)
     with _container_alias_lock:
+        key = (profile_scope, raw_task_id)
         while key in _container_aliases and key not in seen:
             seen.add(key)
-            key = _container_aliases[key]
-    return key
+            raw_task_id = _container_aliases[key]
+            key = (profile_scope, raw_task_id)
+    return raw_task_id
 
 
 _ISOLATION_OVERRIDE_KEYS = frozenset({
@@ -520,7 +525,23 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     return "default" if profile == "default" else f"profile:{profile}"
 
 
-def resolve_task_overrides(task_id: Optional[str]) -> Dict[str, Any]:
+def _docker_environment_is_session_scoped(
+    config: Mapping[str, Any],
+    raw_task_id: Optional[str],
+    base_task_id: str,
+) -> bool:
+    return bool(
+        _docker_session_isolation_enabled(config)
+        and base_task_id != "default"
+        and not _has_isolation_overrides(raw_task_id)
+    )
+
+
+def resolve_task_overrides(
+    task_id: Optional[str],
+    *,
+    config: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
     """Return the env overrides for *task_id*, raw key first then collapsed.
 
     ``register_task_env_overrides`` writes under the *raw* task/session id, but
@@ -532,7 +553,9 @@ def resolve_task_overrides(task_id: Optional[str]) -> Dict[str, Any]:
     """
     raw = task_id or "default"
     scoped_raw = _profile_scoped_task_key(raw)
-    scoped_collapsed = _profile_scoped_task_key(_resolve_container_task_id(raw))
+    scoped_collapsed = _profile_scoped_task_key(
+        _resolve_container_task_id(raw, config=config)
+    )
     return (
         _task_env_overrides.get(scoped_raw)
         or _task_env_overrides.get(scoped_collapsed)
