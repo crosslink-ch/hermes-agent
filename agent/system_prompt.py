@@ -303,7 +303,7 @@ def _agent_home(agent: Any) -> Optional[Path]:
     try:
         db = getattr(agent, "_session_db", None)
         db_path = getattr(db, "db_path", None)
-        if db_path:
+        if isinstance(db_path, (str, Path)) and db_path:
             return Path(db_path).parent
     except Exception:
         pass
@@ -571,7 +571,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # Environment hints (WSL, Termux, etc.) — tell the agent about the
     # execution environment so it can translate paths and adapt behavior.
     # Stable for the lifetime of the process.
-    _env_hints = _r.build_environment_hints()
+    _env_hints = _r.build_environment_hints(
+        home_override=_agent_home(agent),
+    )
     if _env_hints:
         stable_parts.append(_env_hints)
 

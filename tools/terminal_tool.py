@@ -1330,8 +1330,16 @@ def _profile_scoped_task_key(task_key: Hashable) -> Hashable:
 
 
 def _turn_scope_key(task_id: Hashable) -> Hashable:
-    collapsed = _resolve_container_task_id(str(task_id))
-    return _profile_scoped_task_key(collapsed)
+    try:
+        resolution = _target_resolution(None)
+        collapsed = _resolve_container_task_id(
+            str(task_id),
+            config=resolution.config,
+        )
+        return resolution.scope_task_key(collapsed)
+    except Exception:
+        collapsed = _resolve_container_task_id(str(task_id))
+        return _profile_scoped_task_key(collapsed)
 
 
 def _run_deferred_environment_cleanup(task_id: Hashable) -> None:
@@ -1514,7 +1522,10 @@ def execution_environment_turn_key(
         from tools.execution_targets import resolve_execution_target
 
         resolution = resolve_execution_target(arguments.get("execution_target"))
-        base_task_id = _resolve_container_task_id(str(task_id))
+        base_task_id = _resolve_container_task_id(
+            str(task_id),
+            config=resolution.config,
+        )
         return resolution.session_key(base_task_id)
     except Exception:
         # Invalid-target tools still execute to return their normal user-visible
@@ -1702,7 +1713,13 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
         # isolation-keyed rollouts. Try the raw id first, then the container id,
         # so a CWD-only override (which collapses to "default") still finds and
         # updates the originating session's env.
-        container_id = _resolve_container_task_id(task_id)
+        container_id = _resolve_container_task_id(
+            task_id,
+            config=(
+                default_resolution.config
+                if default_resolution is not None else None
+            ),
+        )
         with _env_lock:
             if (
                 default_resolution is not None
@@ -1732,8 +1749,9 @@ def clear_task_env_overrides(task_id: str):
     """
     _task_env_overrides.pop(_profile_scoped_task_key(task_id), None)
     clear_session_cwd(task_id)
+    alias_key = _container_alias_key(task_id)
     with _container_alias_lock:
-        _container_aliases.pop(task_id, None)
+        _container_aliases.pop(alias_key, None)
 
 
 # Subagent → parent container aliasing.  delegate_task children get their own
@@ -1742,8 +1760,19 @@ def clear_task_env_overrides(task_id: str):
 # packages.  With per-session container isolation active (docker +
 # container_persistent: false), the collapse-to-"default" shortcut no longer
 # provides that sharing, so the spawn site registers an explicit alias.
-_container_aliases: Dict[str, str] = {}
+_container_aliases: Dict[tuple[str, str], str] = {}
 _container_alias_lock = threading.Lock()
+
+
+def _container_alias_profile_scope() -> str:
+    try:
+        return str(_target_resolution(None).profile_scope or "")
+    except Exception:
+        return ""
+
+
+def _container_alias_key(task_id: str) -> tuple[str, str]:
+    return (_container_alias_profile_scope(), str(task_id))
 
 
 def register_container_alias(child_task_id: str, parent_task_id: Optional[str]) -> None:
@@ -1755,35 +1784,57 @@ def register_container_alias(child_task_id: str, parent_task_id: Optional[str]) 
     """
     if not child_task_id:
         return
+    alias_key = _container_alias_key(child_task_id)
     with _container_alias_lock:
-        _container_aliases[child_task_id] = str(parent_task_id or "default")
+        _container_aliases[alias_key] = str(parent_task_id or "default")
 
 
 def _resolve_container_alias(task_id: str) -> str:
-    """Follow the child→parent alias chain (cycle-safe) for *task_id*."""
-    seen = set()
-    key = task_id
+    """Follow the profile-scoped child→parent alias chain, cycle-safe."""
+    profile_scope = _container_alias_profile_scope()
+    seen: set[tuple[str, str]] = set()
+    raw_task_id = str(task_id)
     with _container_alias_lock:
+        key = (profile_scope, raw_task_id)
         while key in _container_aliases and key not in seen:
             seen.add(key)
-            key = _container_aliases[key]
-    return key
+            raw_task_id = _container_aliases[key]
+            key = (profile_scope, raw_task_id)
+    return raw_task_id
 
 
-def _docker_session_isolation_enabled() -> bool:
-    """True when docker sessions get their OWN containers (issue: stale
-    workspace mounts leaking between desktop sessions).
+def _docker_session_isolation_enabled(
+    config: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    """True when the effective config requests per-session Docker containers.
 
-    Gated on ``terminal.backend: docker`` + ``container_persistent: false``:
-    a non-persistent sandbox is a statement that state must not survive the
-    session, so sharing one container across sessions contradicts it. With
-    ``container_persistent: true`` the documented ONE-long-lived-container
-    contract is unchanged.
+    ``config`` is the selected target's normalized/raw environment mapping.
+    Legacy callers without a target continue to use the process environment.
     """
-    _ensure_terminal_env_bridged()
-    if os.getenv("TERMINAL_ENV", "local") != "docker":
-        return False
-    return os.getenv("TERMINAL_CONTAINER_PERSISTENT", "true").lower() not in {"true", "1", "yes"}
+    if config is None:
+        _ensure_terminal_env_bridged()
+        backend = os.getenv("TERMINAL_ENV", "local")
+        persistent_value: Any = os.getenv(
+            "TERMINAL_CONTAINER_PERSISTENT", "true"
+        )
+    else:
+        backend = (
+            config.get("env_type")
+            or config.get("backend")
+            or os.getenv("TERMINAL_ENV", "local")
+        )
+        persistent_value = config.get("container_persistent")
+        if persistent_value is None:
+            persistent_value = os.getenv(
+                "TERMINAL_CONTAINER_PERSISTENT", "true"
+            )
+    if isinstance(persistent_value, bool):
+        persistent = persistent_value
+    else:
+        persistent = str(persistent_value).strip().lower() in {
+            "true", "1", "yes", "on",
+        }
+    return str(backend).strip().lower() == "docker" and not persistent
 
 
 _ISOLATION_OVERRIDE_KEYS = frozenset({
@@ -1810,7 +1861,11 @@ def _has_isolation_overrides(task_id: Optional[str]) -> bool:
     )
 
 
-def _resolve_container_task_id(task_id: Optional[str]) -> str:
+def _resolve_container_task_id(
+    task_id: Optional[str],
+    *,
+    config: Optional[Mapping[str, Any]] = None,
+) -> str:
     """
     Map a tool-call ``task_id`` to the container/sandbox key used by
     ``_active_environments``.
@@ -1843,7 +1898,7 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     """
     if task_id and _has_isolation_overrides(task_id):
         return str(task_id)
-    if task_id and _docker_session_isolation_enabled():
+    if task_id and _docker_session_isolation_enabled(config):
         return _resolve_container_alias(task_id)
     # Per-session isolation: when a session key is present (the WebUI streaming
     # layer sets it per-session, the gateway per-message via contextvars), scope
@@ -1863,7 +1918,23 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     return "default"
 
 
-def resolve_task_overrides(task_id: Optional[str]) -> Dict[str, Any]:
+def _docker_environment_is_session_scoped(
+    config: Mapping[str, Any],
+    raw_task_id: Optional[str],
+    base_task_id: str,
+) -> bool:
+    return bool(
+        _docker_session_isolation_enabled(config)
+        and base_task_id != "default"
+        and not _has_isolation_overrides(raw_task_id)
+    )
+
+
+def resolve_task_overrides(
+    task_id: Optional[str],
+    *,
+    config: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
     """Return the env overrides for *task_id*, raw key first then collapsed.
 
     ``register_task_env_overrides`` writes under the *raw* task/session id, but
@@ -1877,7 +1948,9 @@ def resolve_task_overrides(task_id: Optional[str]) -> Dict[str, Any]:
     """
     raw = task_id or "default"
     scoped_raw = _profile_scoped_task_key(raw)
-    scoped_collapsed = _profile_scoped_task_key(_resolve_container_task_id(raw))
+    scoped_collapsed = _profile_scoped_task_key(
+        _resolve_container_task_id(raw, config=config)
+    )
     return (
         _task_env_overrides.get(scoped_raw)
         or _task_env_overrides.get(scoped_collapsed)
@@ -1909,12 +1982,12 @@ def _resolve_task_host_cwd(config: Dict[str, Any], task_id: Optional[str]) -> Op
         return None
     if not config.get("docker_mount_cwd_to_workspace"):
         return None
-    if not _docker_session_isolation_enabled():
+    if not _docker_session_isolation_enabled(config):
         return config.get("host_cwd")
-    if _resolve_container_task_id(task_id) == "default":
+    if _resolve_container_task_id(task_id, config=config) == "default":
         # Top-level CLI parent — single-session process, legacy behavior.
         return config.get("host_cwd")
-    overrides = resolve_task_overrides(task_id)
+    overrides = resolve_task_overrides(task_id, config=config)
     if overrides.get("cwd_source") == "process":
         return None
     candidate = overrides.get("cwd")
@@ -2718,6 +2791,7 @@ def _create_environment(
     local_config: Optional[dict] = None,
     task_id: str = "default",
     host_cwd: Optional[str] = None,
+    session_scoped: Optional[bool] = None,
 ):
     """
     Create an execution environment for sandboxed command execution.
@@ -2769,11 +2843,12 @@ def _create_environment(
         # running container behind for every chat ever opened. The shared
         # "default" container and RL/benchmark override sandboxes keep their
         # existing lifecycle.
-        session_scoped = (
-            _docker_session_isolation_enabled()
-            and task_id != "default"
-            and not _has_isolation_overrides(task_id)
-        )
+        if session_scoped is None:
+            session_scoped = (
+                _docker_session_isolation_enabled()
+                and task_id != "default"
+                and not _has_isolation_overrides(task_id)
+            )
         docker_env_obj = _DockerEnvironment(
             image=image, cwd=cwd, timeout=timeout,
             cpu=cpu, memory=memory, disk=disk,
@@ -3030,7 +3105,10 @@ def _stop_cleanup_thread():
 def get_active_env(task_id: str, target: Optional[str] = None):
     """Return the active BaseEnvironment for *task_id*, or None."""
     resolution = _target_resolution(target)
-    lookup = _environment_scope_key(_resolve_container_task_id(task_id), resolution)
+    lookup = _environment_scope_key(
+        _resolve_container_task_id(task_id, config=resolution.config),
+        resolution,
+    )
     raw_lookup = _environment_scope_key(task_id, resolution)
     with _env_lock:
         return _active_environments.get(lookup) or _active_environments.get(raw_lookup)
@@ -3041,10 +3119,18 @@ def get_environment_for_target_scope(
 ):
     """Find the active/retired environment that produced a scoped result."""
     raw = task_id or "default"
-    collapsed = _resolve_container_task_id(raw)
+    try:
+        resolution = _target_resolution(target)
+        collapsed = _resolve_container_task_id(
+            raw,
+            config=resolution.config,
+        )
+    except Exception:
+        collapsed = _resolve_container_task_id(raw)
     bases = {
         _profile_scoped_task_key(raw),
         _profile_scoped_task_key(collapsed),
+        _profile_scoped_task_key("default"),
     }
 
     def _matches(key: Hashable, env: Any) -> bool:
@@ -3072,6 +3158,7 @@ def _environment_is_persistent(env: Any) -> bool:
     return bool(
         getattr(env, "_persistent", False)
         or getattr(env, "persistent_filesystem", False)
+        or getattr(env, "_session_scoped", False)
     )
 
 
@@ -3101,7 +3188,7 @@ def ensure_task_env(
         return None
 
     raw_task_id = task_id or "default"
-    base_task_id = _resolve_container_task_id(raw_task_id)
+    base_task_id = _resolve_container_task_id(raw_task_id, config=config)
     effective_task_id = _environment_scope_key(base_task_id, resolution)
     raw_environment_key = _environment_scope_key(raw_task_id, resolution)
     backend_task_id = resolution.backend_task_id(base_task_id)
@@ -3119,7 +3206,7 @@ def ensure_task_env(
     if existing is not None:
         return existing
 
-    overrides = resolve_task_overrides(task_id)
+    overrides = resolve_task_overrides(task_id, config=config)
     if env_type == "docker":
         image = overrides.get("docker_image") or config["docker_image"]
     elif env_type == "singularity":
@@ -3191,6 +3278,11 @@ def ensure_task_env(
                 local_config=local_config,
                 task_id=backend_task_id,
                 host_cwd=host_cwd,
+                session_scoped=_docker_environment_is_session_scoped(
+                    config,
+                    raw_task_id,
+                    base_task_id,
+                ),
             )
             _record_environment_lifetime(new_env, config)
             _record_environment_target(new_env, resolution)
@@ -3362,7 +3454,10 @@ def cleanup_vm(
         try:
             resolution = _target_resolution(None)
             scoped_task_id = resolution.scope_task_key(task_id)
-            collapsed_task_id = _resolve_container_task_id(str(task_id))
+            collapsed_task_id = _resolve_container_task_id(
+                str(task_id),
+                config=resolution.config,
+            )
             scoped_collapsed_task_id = resolution.scope_task_key(collapsed_task_id)
         except Exception:
             scoped_task_id = task_id
@@ -3913,7 +4008,10 @@ def terminal_tool(
         # task_ids collapse back to "default" so the top-level agent and
         # every delegate_task child share one container; only task_ids with
         # a registered env override (RL benchmarks) get isolated sandboxes.
-        effective_base_task_id = _resolve_container_task_id(task_id)
+        effective_base_task_id = _resolve_container_task_id(
+            task_id,
+            config=config,
+        )
         effective_task_id = _environment_scope_key(
             effective_base_task_id, target_resolution,
         )
@@ -3928,7 +4026,7 @@ def terminal_tool(
         # CWD-only override (which collapses ``effective_task_id`` to
         # ``"default"``) is still found under its originating session id while
         # isolation-keyed RL/benchmark overrides keep resolving as before.
-        overrides = resolve_task_overrides(task_id)
+        overrides = resolve_task_overrides(task_id, config=config)
         
         # Select image based on env type, with per-task override support
         if env_type == "docker":
@@ -4111,6 +4209,13 @@ def terminal_tool(
                             local_config=local_config,
                             task_id=backend_task_id,
                             host_cwd=host_cwd,
+                            session_scoped=(
+                                _docker_environment_is_session_scoped(
+                                    config,
+                                    task_id,
+                                    effective_base_task_id,
+                                )
+                            ),
                         )
                         _record_environment_lifetime(new_env, config)
                         _record_environment_target(new_env, target_resolution)
@@ -5120,8 +5225,12 @@ def _evict_environment_for_task(
     connection, defeating automatic recovery.
     """
     resolution = _target_resolution(target)
+    config = (
+        _get_env_config(dict(resolution.config))
+        if resolution.named else _get_env_config()
+    )
     raw_task_id = task_id or "default"
-    base_task_id = _resolve_container_task_id(raw_task_id)
+    base_task_id = _resolve_container_task_id(raw_task_id, config=config)
     keys = {
         _environment_scope_key(base_task_id, resolution),
         _environment_scope_key(raw_task_id, resolution),

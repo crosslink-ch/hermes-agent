@@ -632,6 +632,10 @@ class ProcessRegistry:
                     "message_id": session.watcher_message_id,
                     **({"target": session.target} if session.target else {}),
                     **({"backend": session.backend} if session.backend else {}),
+                    **(
+                        {"runtime_scope": session.runtime_scope}
+                        if session.runtime_scope else {}
+                    ),
                     **({"cwd": session.cwd} if session.cwd else {}),
                     "message": (
                         f"Watch patterns disabled for process {session.id} — "
@@ -669,6 +673,10 @@ class ProcessRegistry:
             "message_id": session.watcher_message_id,
             **({"target": session.target} if session.target else {}),
             **({"backend": session.backend} if session.backend else {}),
+            **(
+                {"runtime_scope": session.runtime_scope}
+                if session.runtime_scope else {}
+            ),
             **({"cwd": session.cwd} if session.cwd else {}),
         }
         _redact_process_result(notification)
@@ -1639,6 +1647,10 @@ class ProcessRegistry:
                 "started_at": session.started_at,
                 **({"target": session.target} if session.target else {}),
                 **({"backend": session.backend} if session.backend else {}),
+                **(
+                    {"runtime_scope": session.runtime_scope}
+                    if session.runtime_scope else {}
+                ),
                 **({"cwd": session.cwd} if session.cwd else {}),
             }
             _redact_process_result(notification)
@@ -2170,10 +2182,10 @@ class ProcessRegistry:
         # (`0 or max_timeout`) to the DEFAULT wait instead of erroring.
         # Salvaged from PR #60004 (credit @isheng-eqi).
         if requested_timeout is not None and requested_timeout <= 0:
-            return {
+            return self._with_execution_metadata({
                 "status": "error",
                 "error": f"timeout must be positive (got {requested_timeout})",
-            }
+            }, session)
 
         if requested_timeout and requested_timeout > max_timeout:
             effective_timeout = max_timeout

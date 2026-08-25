@@ -134,6 +134,41 @@ def test_kill_all_backward_compat_and_exclude_ids(registry):
     assert sorted(c[0] for c in calls) == ["proc_a", "proc_b"]
 
 
+def test_wait_validation_error_preserves_execution_target_metadata(registry):
+    session = _make_session(sid="proc_wait_invalid")
+    session.target = "box"
+    session.backend = "ssh"
+    session.runtime_scope = "scope-server-1"
+    registry._running[session.id] = session
+
+    result = registry.wait(session.id, timeout=0)
+
+    assert result == {
+        "status": "error",
+        "error": "timeout must be positive (got 0)",
+        "target": "box",
+        "backend": "ssh",
+        "runtime_scope": "scope-server-1",
+    }
+
+
+def test_completion_notification_preserves_execution_target_metadata(registry):
+    session = _make_session(sid="proc_notify_target", exited=True, exit_code=0)
+    session.notify_on_complete = True
+    session.target = "box"
+    session.backend = "ssh"
+    session.runtime_scope = "scope-server-1"
+    registry._running[session.id] = session
+
+    with patch.object(registry, "_write_checkpoint"):
+        registry._move_to_finished(session)
+
+    event = registry.completion_queue.get_nowait()
+    assert event["target"] == "box"
+    assert event["backend"] == "ssh"
+    assert event["runtime_scope"] == "scope-server-1"
+
+
 def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.05) -> bool:
     """Poll a predicate until it returns truthy or the timeout elapses."""
     deadline = time.monotonic() + timeout

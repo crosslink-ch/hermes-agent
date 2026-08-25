@@ -16375,9 +16375,29 @@ def _resolve_chat_argv(
     # An explicit profile scope below still overrides HERMES_HOME afterwards.
     from tools.environments.local import build_subprocess_env
     env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=True)
+    if profile_dir is not None:
+        env["HERMES_HOME"] = str(profile_dir)
     try:
-        from hermes_cli.config import apply_terminal_config_to_env
-        apply_terminal_config_to_env(env=env)
+        from hermes_cli.config import (
+            TERMINAL_CONFIG_ENV_MAP,
+            apply_terminal_config_to_env,
+        )
+
+        if profile_dir is not None:
+            for env_name in set(TERMINAL_CONFIG_ENV_MAP.values()):
+                env.pop(env_name, None)
+            from hermes_constants import (
+                reset_hermes_home_override,
+                set_hermes_home_override,
+            )
+
+            home_token = set_hermes_home_override(profile_dir)
+            try:
+                apply_terminal_config_to_env(env=env)
+            finally:
+                reset_hermes_home_override(home_token)
+        else:
+            apply_terminal_config_to_env(env=env)
     except Exception:
         _log.debug("Failed to apply terminal config bridge for dashboard chat", exc_info=True)
     _apply_tui_python_env(env)

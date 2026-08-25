@@ -780,8 +780,35 @@ class TestPromptBuilderConstants:
 
 class TestEnvironmentHints:
 
+    def test_home_override_scopes_target_inventory_and_restores_context(
+        self, monkeypatch, tmp_path,
+    ):
+        import agent.prompt_builder as _pb
+        import tools.execution_targets as targets_mod
+        from hermes_constants import (
+            get_hermes_home,
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
 
+        outer_home = tmp_path / "outer"
+        agent_home = tmp_path / "agent"
+        outer_home.mkdir()
+        agent_home.mkdir()
+        seen_homes = []
+        monkeypatch.setattr(
+            targets_mod,
+            "list_execution_targets",
+            lambda: seen_homes.append(get_hermes_home()) or (),
+        )
+        token = set_hermes_home_override(outer_home)
+        try:
+            _pb.build_environment_hints(home_override=agent_home)
+            assert get_hermes_home() == outer_home
+        finally:
+            reset_hermes_home_override(token)
 
+        assert seen_homes == [agent_home]
 
 
     def test_build_environment_hints_suppresses_host_on_docker_backend(self, monkeypatch):
@@ -815,8 +842,12 @@ class TestEnvironmentHints:
 
         probe_calls = []
 
-        def _capture_probe(backend, terminal_config=None, target_name=""):
-            probe_calls.append((backend, terminal_config, target_name))
+        def _capture_probe(
+            backend, terminal_config=None, target_name="", runtime_scope="",
+        ):
+            probe_calls.append((
+                backend, terminal_config, target_name, runtime_scope,
+            ))
             return None
 
         monkeypatch.setattr(_pb, "is_wsl", lambda: False)
@@ -851,7 +882,7 @@ class TestEnvironmentHints:
         assert '"local" (local)' in result
         assert "select one with `execution_target`" in result
         assert "`search_files.target` remains" in result
-        assert probe_calls == [(
+        assert probe_calls[0][:3] == (
             "ssh",
             {
                 "backend": "ssh",
@@ -860,7 +891,10 @@ class TestEnvironmentHints:
                 "ssh_user": "agent",
             },
             "devbox",
-        )]
+        )
+        assert probe_calls[0][3] == targets_mod.resolve_execution_target(
+            "devbox"
+        ).security_scope
 
     def test_named_local_default_uses_target_cwd(self, monkeypatch, tmp_path):
         import agent.prompt_builder as _pb
@@ -953,6 +987,53 @@ class TestEnvironmentHints:
         assert line is not None
         assert "Linux 6.8.0" in line
         assert "root" in line
+
+    def test_remote_probe_is_partitioned_by_runtime_scope(self, monkeypatch):
+        import agent.prompt_builder as _pb
+        import tools.terminal_tool as _tt
+
+        _pb._clear_backend_probe_cache()
+        created = []
+
+        class _FakeEnv:
+            def execute(self, _cmd, timeout=None):
+                del timeout
+                return {
+                    "returncode": 0,
+                    "output": (
+                        "os=Linux\nkernel=6.8.0\nhome=/home/dev\n"
+                        "cwd=/workspace\nuser=dev\n"
+                    ),
+                }
+
+        def _fake_create_environment(**kwargs):
+            created.append(dict(kwargs))
+            return _FakeEnv()
+
+        monkeypatch.setattr(_tt, "_create_environment", _fake_create_environment)
+        config = {
+            "ssh_host": "devbox.example.com",
+            "ssh_user": "dev",
+            "cwd": "/workspace",
+        }
+
+        _pb._probe_remote_backend(
+            "ssh",
+            terminal_config=config,
+            target_name="devbox",
+            runtime_scope="generation-a",
+        )
+        _pb._probe_remote_backend(
+            "ssh",
+            terminal_config=config,
+            target_name="devbox",
+            runtime_scope="generation-b",
+        )
+
+        assert len(created) == 2
+        assert created[0]["task_id"] != created[1]["task_id"]
+        assert created[0]["ssh_config"]["runtime_scope"] == "generation-a"
+        assert created[1]["ssh_config"]["runtime_scope"] == "generation-b"
 
 
     def test_environment_hint_from_env_var_is_appended(self, monkeypatch):

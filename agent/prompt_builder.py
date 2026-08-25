@@ -1224,7 +1224,7 @@ _BACKEND_FALLBACK_DESCRIPTIONS: dict[str, str] = {
 # a mid-process backend switch rebuilds the string. Kept in-module (not on
 # disk) because the probe captures live backend state that may change
 # across Hermes restarts.
-_BACKEND_PROBE_CACHE: dict[tuple[str, str, str], str] = {}
+_BACKEND_PROBE_CACHE: dict[tuple[str, str, str, str], str] = {}
 
 
 def _windows_marketing_version() -> str:
@@ -1275,6 +1275,7 @@ def _probe_remote_backend(
     env_type: str,
     terminal_config: dict | None = None,
     target_name: str = "",
+    runtime_scope: str = "",
 ) -> str | None:
     """Run a tiny introspection command inside the active terminal backend.
 
@@ -1290,7 +1291,7 @@ def _probe_remote_backend(
             terminal_config, sort_keys=True, default=str, ensure_ascii=True,
         )
         config_identity = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-    cache_key = (env_type, target_name, config_identity)
+    cache_key = (env_type, target_name, config_identity, runtime_scope)
     cached = _BACKEND_PROBE_CACHE.get(cache_key)
     if cached is not None:
         return cached or None
@@ -1333,6 +1334,7 @@ def _probe_remote_backend(
                 "port": config.get("ssh_port", 22),
                 "key": config.get("ssh_key", ""),
                 "persistent": config.get("ssh_persistent", False),
+                "runtime_scope": runtime_scope,
             }
 
         container_config = None
@@ -1364,7 +1366,10 @@ def _probe_remote_backend(
             task_id=(
                 "prompt-backend-probe-"
                 + hashlib.sha256(
-                    f"{env_type}:{target_name}:{config_identity}".encode("utf-8")
+                    (
+                        f"{env_type}:{target_name}:{config_identity}:"
+                        f"{runtime_scope}"
+                    ).encode("utf-8")
                 ).hexdigest()[:12]
             ),
             host_cwd=config.get("host_cwd"),
@@ -1423,7 +1428,27 @@ def _clear_backend_probe_cache() -> None:
     _BACKEND_PROBE_CACHE.clear()
 
 
-def build_environment_hints() -> str:
+def build_environment_hints(
+    *,
+    home_override: Path | str | None = None,
+) -> str:
+    """Build environment hints under an optional agent-profile Hermes home."""
+    if home_override is None:
+        return _build_environment_hints_unscoped()
+
+    from hermes_constants import (
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    token = set_hermes_home_override(home_override)
+    try:
+        return _build_environment_hints_unscoped()
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _build_environment_hints_unscoped() -> str:
     """Return environment-specific guidance for the system prompt.
 
     Always emits a factual block describing the execution environment:
@@ -1516,6 +1541,7 @@ def build_environment_hints() -> str:
                     if default_target.profile_scope
                     else default_target.target
                 ),
+                runtime_scope=default_target.security_scope,
             )
             if default_target is not None
             else _probe_remote_backend(backend)

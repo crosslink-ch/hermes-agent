@@ -293,6 +293,8 @@ def _target_subdirectory_hints(
     tool_name: str,
     args: dict,
     target: str | None,
+    *,
+    runtime_scope: str | None = None,
 ):
     """Load local hints from the selected target; never scan host paths for remotes."""
     try:
@@ -301,12 +303,18 @@ def _target_subdirectory_hints(
         from tools.terminal_tool import _get_env_config, get_session_cwd
 
         resolution = resolve_execution_target(target)
+        if runtime_scope and resolution.security_scope != runtime_scope:
+            return None
         if resolution.backend != "local":
             return None
         if not resolution.named:
             return agent._subdirectory_hints.check_tool_call(tool_name, args)
         selected_target = resolution.target
-        cwd = get_session_cwd(task_id, target=selected_target)
+        cwd = get_session_cwd(
+            task_id,
+            target=selected_target,
+            _resolution=resolution,
+        )
         if not cwd:
             cwd = _get_env_config(dict(resolution.config)).get("cwd")
         if not isinstance(cwd, str) or not cwd.strip():
@@ -909,11 +917,12 @@ def _run_agent_tool_execution_middleware(
 
         block_message = scope_block
         block_error_type = "tool_scope_block"
+        selector_rewrite_error = False
         if block_message is None:
             block_error_type = "plugin_block"
 
             def _resolve_pre_tool_block():
-                nonlocal final_args
+                nonlocal final_args, selector_rewrite_error
                 try:
                     from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
 
@@ -929,8 +938,13 @@ def _run_agent_tool_execution_middleware(
                         middleware_trace=list(state["middleware_trace"]),
                     )
                     if modified_args is not None:
-                        final_args = modified_args
-                        state["args"] = modified_args
+                        try:
+                            validate_execution_target_args(function_name, modified_args)
+                        except ExecutionTargetError as exc:
+                            selector_rewrite_error = True
+                            return str(exc)
+                        final_args = dict(modified_args)
+                        state["args"] = final_args
                     return block_msg
                 except Exception:
                     return None
@@ -940,6 +954,8 @@ def _run_agent_tool_execution_middleware(
                 if authorization_gate is None
                 else authorization_gate.run(_resolve_pre_tool_block)
             )
+            if selector_rewrite_error:
+                block_error_type = "execution_target_validation"
 
         guardrail_decision = None
         if block_message is None:
@@ -1024,6 +1040,17 @@ def _run_agent_tool_execution_middleware(
                 _hb_stop.set()
                 _hb_thread.join(timeout=2.0)
 
+    def _freeze_and_authorize(candidate_args: dict[str, Any]) -> Any:
+        from contextlib import nullcontext
+
+        target_config_scope = nullcontext()
+        if function_name in _TARGET_RESULT_TOOLS:
+            from tools.execution_targets import frozen_execution_target_config
+
+            target_config_scope = frozen_execution_target_config()
+        with target_config_scope:
+            return _authorized_dispatch(candidate_args)
+
     def _hermes_pipeline(relay_args: dict[str, Any]) -> Any:
         request_result = apply_tool_request_middleware(
             function_name,
@@ -1045,7 +1072,7 @@ def _run_agent_tool_execution_middleware(
         return run_tool_execution_middleware(
             function_name,
             request_args,
-            lambda next_args: _authorized_dispatch(
+            lambda next_args: _freeze_and_authorize(
                 next_args if isinstance(next_args, dict) else request_args
             ),
             original_args=function_args,
@@ -2120,7 +2147,12 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
             )
 
         subdir_hints = _target_subdirectory_hints(
-            agent, effective_task_id, name, args, result_execution_target,
+            agent,
+            effective_task_id,
+            name,
+            args,
+            result_execution_target,
+            runtime_scope=result_runtime_scope,
         )
         if subdir_hints:
             if _is_multimodal_tool_result(function_result):
@@ -3071,6 +3103,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             function_name,
             function_args,
             result_execution_target,
+            runtime_scope=result_runtime_scope,
         )
         if subdir_hints:
             if _is_multimodal_tool_result(function_result):

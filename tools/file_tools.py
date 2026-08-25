@@ -11,7 +11,7 @@ import posixpath
 import sys
 import threading
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 from agent.file_safety import get_read_block_error
 from tools.binary_extensions import (
@@ -193,7 +193,10 @@ def _terminal_env_type_for_task(
         resolution = _resolution or resolve_execution_target(execution_target)
         try:
             container_key = resolution.environment_key(
-                _resolve_container_task_id(task_id)
+                _resolve_container_task_id(
+                    task_id,
+                    config=resolution.config,
+                )
             )
             raw_key = resolution.environment_key(task_id)
         except Exception:
@@ -252,12 +255,15 @@ def _file_state_namespace(
             if resolution.provider is not None
             else ""
         )
+        profile = (
+            f"profile-{resolution.profile_scope}:"
+            if resolution.profile_scope else ""
+        )
         if resolution.backend == "local":
             return f"{profile}{runtime_prefix}local" if runtime_prefix else None
         # Preserve the pre-target single-profile legacy state key.
         if not resolution.named:
             return None
-        profile = f"profile-{resolution.profile_scope}:" if resolution.profile_scope else ""
         if resolution.backend == "ssh":
             # Two names for the same SSH account/root address the same physical
             # filesystem and must share stale-write locks/read state.
@@ -277,7 +283,10 @@ def _file_state_namespace(
                 from tools.terminal_tool import _resolve_container_task_id
 
                 owner = resolution.storage_task_id(
-                    _resolve_container_task_id(str(task_id)),
+                    _resolve_container_task_id(
+                        str(task_id),
+                        config=resolution.config,
+                    ),
                 )
                 return f"{profile}{runtime_prefix}docker-storage:{owner}"
         # Other remote/container targets create distinct backend resources even
@@ -427,7 +436,11 @@ def _configured_terminal_cwd() -> str | None:
     return _sentinel_free_abs_cwd(os.environ.get("TERMINAL_CWD"))
 
 
-def _registered_task_cwd_override(task_id: str = "default") -> str | None:
+def _registered_task_cwd_override(
+    task_id: str = "default",
+    *,
+    config: Mapping[str, Any] | None = None,
+) -> str | None:
     """Return a registered cwd override for the raw task id, when available.
 
     ``terminal_tool`` intentionally collapses CWD-only task overrides to the
@@ -439,7 +452,7 @@ def _registered_task_cwd_override(task_id: str = "default") -> str | None:
     try:
         from tools.terminal_tool import resolve_task_overrides
 
-        overrides = resolve_task_overrides(task_id)
+        overrides = resolve_task_overrides(task_id, config=config)
     except Exception:
         return None
 
@@ -540,7 +553,13 @@ def _authoritative_workspace_root(
             and target_resolution.named
             and target_resolution.backend == "ssh"
         )
-        else _registered_task_cwd_override(task_id)
+        else _registered_task_cwd_override(
+            task_id,
+            config=(
+                target_resolution.config
+                if target_resolution is not None else None
+            ),
+        )
     )
     if registered:
         return registered
@@ -1370,7 +1389,12 @@ def _get_container_mirror_prefix_for_task(
         from tools.execution_targets import resolve_execution_target
 
         resolution = _resolution or resolve_execution_target(execution_target)
-        container_key = resolution.environment_key(_resolve_container_task_id(task_id))
+        container_key = resolution.environment_key(
+            _resolve_container_task_id(
+                task_id,
+                config=resolution.config,
+            )
+        )
         raw_key = resolution.environment_key(task_id)
     except Exception:
         return None
@@ -1783,6 +1807,7 @@ def _get_file_ops(
         _environment_has_stable_storage,
         _apply_task_cwd_override,
         _build_environment_constructor_configs,
+        _docker_environment_is_session_scoped,
         _resolve_task_host_cwd,
         _is_unusable_container_cwd,
         _CONTAINER_BACKENDS,
@@ -1796,7 +1821,11 @@ def _get_file_ops(
 
     raw_task_id = task_id or "default"
     resolution = _resolution or resolve_execution_target(target)
-    base_task_id = _resolve_container_task_id(raw_task_id)
+    config = (
+        _get_env_config(dict(resolution.config))
+        if resolution.named else _get_env_config()
+    )
+    base_task_id = _resolve_container_task_id(raw_task_id, config=config)
     task_id = resolution.environment_key(base_task_id)  # type: ignore[assignment]
     backend_task_id = resolution.backend_task_id(base_task_id)
 
@@ -1868,12 +1897,8 @@ def _get_file_ops(
             )
             from tools.terminal_tool import resolve_task_overrides
 
-            config = (
-                _get_env_config(dict(resolution.config))
-                if resolution.named else _get_env_config()
-            )
             env_type = config["env_type"]
-            overrides = resolve_task_overrides(raw_task_id)
+            overrides = resolve_task_overrides(raw_task_id, config=config)
 
             if env_type == "docker":
                 image = overrides.get("docker_image") or config["docker_image"]
@@ -1947,6 +1972,11 @@ def _get_file_ops(
                 local_config=local_config,
                 task_id=backend_task_id,
                 host_cwd=_resolve_task_host_cwd(config, raw_task_id),
+                session_scoped=_docker_environment_is_session_scoped(
+                    config,
+                    raw_task_id,
+                    base_task_id,
+                ),
             )
             _record_environment_lifetime(terminal_env, config)
             _record_environment_target(terminal_env, resolution)

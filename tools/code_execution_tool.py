@@ -918,7 +918,7 @@ def _resolve_remote_operation_cwd(task_id: str, resolution: Any, config: dict) -
     )
 
     raw_task_id = task_id or "default"
-    overrides = resolve_task_overrides(raw_task_id)
+    overrides = resolve_task_overrides(raw_task_id, config=config)
     cwd_override = (
         overrides.get("cwd")
         if (
@@ -958,6 +958,7 @@ def _get_or_create_env(
         _cleanup_environment_resource,
         _environment_has_stable_storage,
         _build_environment_constructor_configs,
+        _docker_environment_is_session_scoped,
     )
     from tools.execution_targets import (
         execution_target_config_is_frozen,
@@ -974,13 +975,13 @@ def _get_or_create_env(
         raise ValueError(
             f"Execution target {resolution.target!r} changed after approval."
         )
-    base_task_id = _resolve_container_task_id(raw_task_id)
-    effective_task_id = resolution.environment_key(base_task_id)
-    backend_task_id = resolution.backend_task_id(base_task_id)
     config = (
         _get_env_config(dict(resolution.config))
         if resolution.named else _get_env_config()
     )
+    base_task_id = _resolve_container_task_id(raw_task_id, config=config)
+    effective_task_id = resolution.environment_key(base_task_id)
+    backend_task_id = resolution.backend_task_id(base_task_id)
 
     # Fast path: environment already exists
     with _env_lock:
@@ -1013,7 +1014,7 @@ def _get_or_create_env(
             raise ValueError(str(exc)) from exc
 
         env_type = config["env_type"]
-        overrides = resolve_task_overrides(raw_task_id)
+        overrides = resolve_task_overrides(raw_task_id, config=config)
 
         if env_type == "docker":
             image = overrides.get("docker_image") or config["docker_image"]
@@ -1072,6 +1073,11 @@ def _get_or_create_env(
             local_config=local_config,
             task_id=backend_task_id,
             host_cwd=_resolve_task_host_cwd(config, raw_task_id),
+            session_scoped=_docker_environment_is_session_scoped(
+                config,
+                raw_task_id,
+                base_task_id,
+            ),
         )
         _record_environment_lifetime(env, config)
         _record_environment_target(env, resolution)
