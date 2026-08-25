@@ -213,10 +213,36 @@ def run_tool_execution_middleware(
     callbacks = _get_middleware_callbacks(TOOL_EXECUTION_MIDDLEWARE)
     if not callbacks:
         return next_call(args)
+
+    from tools.execution_targets import (
+        uses_execution_target_argument,
+        validate_execution_target_dispatch_args,
+    )
+
+    if uses_execution_target_argument(tool_name):
+        # Validate before copying so attacker-controlled container subclasses
+        # never get a chance to run __deepcopy__ or redefine key access.
+        validate_execution_target_dispatch_args(tool_name, args, args)
+        authorized_args = dict(args)
+    else:
+        authorized_args = _safe_copy(args)
+
+    def guarded_next_call(dispatch_args: Dict[str, Any]) -> Any:
+        if uses_execution_target_argument(tool_name):
+            validate_execution_target_dispatch_args(
+                tool_name, authorized_args, dispatch_args,
+            )
+            # Dispatch a plain detached object so later sinks cannot observe
+            # polymorphic access or mutation through middleware-owned aliases.
+            final_args = dict(dispatch_args)
+        else:
+            final_args = _safe_copy(dispatch_args)
+        return next_call(final_args)
+
     return _run_execution_chain(
         TOOL_EXECUTION_MIDDLEWARE,
         callbacks,
-        next_call,
+        guarded_next_call,
         tool_name=tool_name,
         args=args,
         original_args=context.pop("original_args", args),

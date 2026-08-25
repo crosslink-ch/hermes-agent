@@ -24,7 +24,7 @@ import os
 import json
 import re
 import asyncio
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 import logging
 import threading
@@ -742,6 +742,10 @@ def _resolve_active_context_length() -> int:
 # so if something slips through, the LLM sees a sensible message.
 _AGENT_LOOP_TOOLS = {"todo", "memory", "session_search", "delegate_task"}
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
+_TARGET_SELECTOR_TOOLS = {
+    "terminal", "read_file", "write_file", "patch", "search_files", "execute_code",
+}
+_TARGET_RESULT_TOOLS = _TARGET_SELECTOR_TOOLS | {"process"}
 
 
 # =========================================================================
@@ -1366,6 +1370,25 @@ def handle_function_call(
         except Exception as _mw_err:
             logger.debug("tool_request middleware error: %s", _mw_err)
 
+    # Enforce the canonical execution-routing API before pre-tool hooks,
+    # ACP edit approval, guardrails, progress, checkpoints, or dispatch.
+    try:
+        from tools.execution_targets import (
+            ExecutionTargetError,
+            validate_execution_target_args,
+            validate_execution_target_dispatch_args,
+        )
+
+        validate_execution_target_args(function_name, function_args)
+    except ExecutionTargetError as exc:
+        return tool_error(str(exc))
+
+    target_config_stack = ExitStack()
+    if function_name in _TARGET_RESULT_TOOLS:
+        from tools.execution_targets import frozen_execution_target_config
+
+        target_config_stack.enter_context(frozen_execution_target_config())
+
     try:
         if function_name in _AGENT_LOOP_TOOLS:
             return tool_error(f"{function_name} must be handled by the agent loop")
@@ -1396,7 +1419,11 @@ def handle_function_call(
                     middleware_trace=list(_tool_middleware_trace),
                 )
                 if modified_args is not None:
-                    function_args = modified_args
+                    try:
+                        validate_execution_target_args(function_name, modified_args)
+                    except ExecutionTargetError as exc:
+                        return tool_error(str(exc))
+                    function_args = dict(modified_args)
             except Exception as _hook_err:
                 logger.debug("pre_tool_call hook error: %s", _hook_err)
 
@@ -1464,9 +1491,21 @@ def handle_function_call(
         if function_name not in _READ_SEARCH_TOOLS:
             try:
                 from tools.file_tools import notify_other_tool_call
-                notify_other_tool_call(task_id or "default")
+                notify_other_tool_call(
+                    task_id or "default",
+                    (
+                        function_args.get("execution_target")
+                        if function_name in _TARGET_SELECTOR_TOOLS
+                        else None
+                    ),
+                )
             except Exception:
                 pass  # file_tools may not be loaded yet
+
+        # Pin the arguments that hooks and approvals evaluated. Execution
+        # middleware may rewrite ordinary arguments, but changing the routing
+        # selector here would retarget the call after authorization.
+        _authorized_function_args = dict(function_args)
 
         # Measure tool dispatch latency so post_tool_call and
         # transform_tool_result hooks can observe per-tool duration.
@@ -1494,7 +1533,7 @@ def handle_function_call(
                 # Prefer the caller-provided list so subagents can't overwrite
                 # the parent's tool set via the process-global.
                 sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
-                def _dispatch(next_args: Dict[str, Any]) -> Any:
+                def _registry_dispatch(next_args: Dict[str, Any]) -> Any:
                     return registry.dispatch(
                         function_name, next_args,
                         task_id=task_id,
@@ -1502,13 +1541,35 @@ def handle_function_call(
                         enabled_tools=sandbox_enabled,
                     )
             else:
-                def _dispatch(next_args: Dict[str, Any]) -> Any:
+                def _registry_dispatch(next_args: Dict[str, Any]) -> Any:
                     return registry.dispatch(
                         function_name, next_args,
                         task_id=task_id,
                         session_id=session_id,
                         user_task=user_task,
                     )
+
+            def _dispatch(next_args: Dict[str, Any]) -> Any:
+                validate_execution_target_dispatch_args(
+                    function_name, _authorized_function_args, next_args,
+                )
+                if function_name in _TARGET_RESULT_TOOLS:
+                    from tools.terminal_tool import (
+                        environment_turn_usage,
+                        execution_environment_turn_key,
+                    )
+
+                    with environment_turn_usage(
+                        task_id or "default",
+                        environment_key=execution_environment_turn_key(
+                            function_name,
+                            next_args,
+                            task_id=task_id or "default",
+                        ),
+                    ):
+                        return _registry_dispatch(next_args)
+                return _registry_dispatch(next_args)
+
             if skip_tool_execution_middleware:
                 result = _dispatch(function_args)
             else:
@@ -1610,6 +1671,8 @@ def handle_function_call(
             middleware_trace=list(_tool_middleware_trace),
         )
         return result
+    finally:
+        target_config_stack.close()
 
 
 # =============================================================================

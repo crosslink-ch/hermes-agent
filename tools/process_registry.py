@@ -419,6 +419,13 @@ class ProcessSession:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _reader_thread: Optional[threading.Thread] = field(default=None, repr=False)
     _pty: Any = field(default=None, repr=False)  # ptyprocess handle (when use_pty=True)
+    # Trailing fields preserve the positional constructor contract for every
+    # pre-existing ProcessSession field.
+    target: str = ""                           # Named execution target (empty in legacy mode)
+    backend: str = ""                          # Resolved terminal backend
+    timeout_seconds: int = 0                   # Selected target's wait ceiling
+    environment_task_key: str = ""            # Profile-scoped env ownership key
+    runtime_scope: str = ""                   # Producing target generation/scope
 
 
 class ProcessRegistry:
@@ -494,6 +501,22 @@ class ProcessRegistry:
         # terminal tab. Distinct from kill — the process keeps running; only the
         # UI view is dropped (the user can reopen it from the status stack).
         self.on_close = None
+
+    @staticmethod
+    def _with_execution_metadata(result: dict, session: ProcessSession) -> dict:
+        """Add stable target/backend identity to a process result."""
+        if session.target:
+            result["target"] = session.target
+        if session.backend:
+            result["backend"] = session.backend
+        runtime_scope = session.runtime_scope or getattr(
+            session.env_ref, "_hermes_target_scope", None
+        )
+        if isinstance(runtime_scope, str) and runtime_scope:
+            result["runtime_scope"] = runtime_scope
+        if session.cwd and "cwd" not in result:
+            result["cwd"] = session.cwd
+        return result
 
     @staticmethod
     def _clean_shell_noise(text: str) -> str:
@@ -607,6 +630,13 @@ class ProcessRegistry:
                     "user_name": session.watcher_user_name,
                     "thread_id": session.watcher_thread_id,
                     "message_id": session.watcher_message_id,
+                    **({"target": session.target} if session.target else {}),
+                    **({"backend": session.backend} if session.backend else {}),
+                    **(
+                        {"runtime_scope": session.runtime_scope}
+                        if session.runtime_scope else {}
+                    ),
+                    **({"cwd": session.cwd} if session.cwd else {}),
                     "message": (
                         f"Watch patterns disabled for process {session.id} — "
                         f"{WATCH_STRIKE_LIMIT} consecutive rate-limit windows triggered "
@@ -641,6 +671,13 @@ class ProcessRegistry:
             "user_name": session.watcher_user_name,
             "thread_id": session.watcher_thread_id,
             "message_id": session.watcher_message_id,
+            **({"target": session.target} if session.target else {}),
+            **({"backend": session.backend} if session.backend else {}),
+            **(
+                {"runtime_scope": session.runtime_scope}
+                if session.runtime_scope else {}
+            ),
+            **({"cwd": session.cwd} if session.cwd else {}),
         }
         _redact_process_result(notification)
         self.completion_queue.put(notification)
@@ -979,6 +1016,12 @@ class ProcessRegistry:
         session_key: str = "",
         env_vars: dict = None,
         use_pty: bool = False,
+        target: str = "",
+        backend: str = "",
+        timeout_seconds: int = 0,
+        environment_task_key: str = "",
+        runtime_scope: str = "",
+        env_ref: Any = None,
     ) -> ProcessSession:
         """
         Spawn a background process locally.
@@ -1005,6 +1048,12 @@ class ProcessRegistry:
             task_id=task_id,
             session_key=session_key,
             cwd=_resolve_safe_cwd(cwd or os.getcwd()),
+            target=target,
+            backend=backend or "local",
+            timeout_seconds=timeout_seconds,
+            environment_task_key=environment_task_key,
+            runtime_scope=runtime_scope,
+            env_ref=env_ref,
             started_at=time.time(),
         )
 
@@ -1217,6 +1266,11 @@ class ProcessRegistry:
         task_id: str = "",
         session_key: str = "",
         timeout: int = 10,
+        target: str = "",
+        backend: str = "",
+        timeout_seconds: int = 0,
+        environment_task_key: str = "",
+        runtime_scope: str = "",
     ) -> ProcessSession:
         """
         Spawn a background process through a non-local environment backend.
@@ -1235,6 +1289,11 @@ class ProcessRegistry:
             task_id=task_id,
             session_key=session_key,
             cwd=cwd,
+            target=target,
+            backend=backend,
+            timeout_seconds=timeout_seconds,
+            environment_task_key=environment_task_key,
+            runtime_scope=runtime_scope,
             started_at=time.time(),
             env_ref=env,
             pid_scope="sandbox",
@@ -1260,6 +1319,7 @@ class ProcessRegistry:
         try:
             result = env.execute(
                 bg_command,
+                cwd=cwd,
                 timeout=timeout,
                 rewrite_compound_background=False,
             )
@@ -1585,6 +1645,13 @@ class ProcessRegistry:
                 # a consumer-observed completion timestamp, this does not vary
                 # based on which watcher notices exit first.
                 "started_at": session.started_at,
+                **({"target": session.target} if session.target else {}),
+                **({"backend": session.backend} if session.backend else {}),
+                **(
+                    {"runtime_scope": session.runtime_scope}
+                    if session.runtime_scope else {}
+                ),
+                **({"cwd": session.cwd} if session.cwd else {}),
             }
             _redact_process_result(notification)
             self.completion_queue.put(notification)
@@ -2014,6 +2081,7 @@ class ProcessRegistry:
             "uptime_seconds": int(time.time() - session.started_at),
             "output_preview": output_preview,
         }
+        self._with_execution_metadata(result, session)
         if session.exited:
             result["exit_code"] = session.exit_code
             result["completion_reason"] = session.completion_reason
@@ -2072,6 +2140,7 @@ class ProcessRegistry:
             "total_lines": total_lines,
             "showing": f"{len(selected)} lines",
         }
+        self._with_execution_metadata(result, session)
         if session.exited and observed_completion_output:
             self._completion_consumed.add(session_id)
         return result
@@ -2082,7 +2151,7 @@ class ProcessRegistry:
 
         Args:
             session_id: The process to wait for.
-            timeout: Max seconds to block. Falls back to TERMINAL_TIMEOUT config.
+            timeout: Max seconds to block. Falls back to the process target's timeout.
 
         Returns:
             dict with status ("exited", "timeout", "interrupted", "not_found")
@@ -2091,8 +2160,16 @@ class ProcessRegistry:
         from tools.ansi_strip import strip_ansi
         from tools.interrupt import is_interrupted as _is_interrupted
 
+        session = self.get(session_id)
+        if session is None:
+            return {"status": "not_found", "error": f"No process with ID {session_id}"}
+
         try:
-            default_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
+            default_timeout = (
+                int(session.timeout_seconds)
+                if int(session.timeout_seconds) > 0
+                else int(os.getenv("TERMINAL_TIMEOUT", "180"))
+            )
         except (ValueError, TypeError):
             default_timeout = 180
         max_timeout = default_timeout
@@ -2105,10 +2182,10 @@ class ProcessRegistry:
         # (`0 or max_timeout`) to the DEFAULT wait instead of erroring.
         # Salvaged from PR #60004 (credit @isheng-eqi).
         if requested_timeout is not None and requested_timeout <= 0:
-            return {
+            return self._with_execution_metadata({
                 "status": "error",
                 "error": f"timeout must be positive (got {requested_timeout})",
-            }
+            }, session)
 
         if requested_timeout and requested_timeout > max_timeout:
             effective_timeout = max_timeout
@@ -2118,10 +2195,6 @@ class ProcessRegistry:
             )
         else:
             effective_timeout = requested_timeout or max_timeout
-
-        session = self.get(session_id)
-        if session is None:
-            return {"status": "not_found", "error": f"No process with ID {session_id}"}
 
         deadline = time.monotonic() + effective_timeout
 
@@ -2143,6 +2216,7 @@ class ProcessRegistry:
                     "termination_source": session.termination_source,
                     "output": strip_ansi(session.output_buffer[-2000:]),
                 }
+                self._with_execution_metadata(result, session)
                 if timeout_note:
                     result["timeout_note"] = timeout_note
                 return result
@@ -2154,6 +2228,7 @@ class ProcessRegistry:
                     "output": strip_ansi(session.output_buffer[-1000:]),
                     "note": "User sent a new message -- wait interrupted",
                 }
+                self._with_execution_metadata(result, session)
                 if timeout_note:
                     result["timeout_note"] = timeout_note
                 return result
@@ -2172,6 +2247,7 @@ class ProcessRegistry:
             # identical waits after misreading this result as an error.
             "process_running": True,
         }
+        self._with_execution_metadata(result, session)
         uptime = time.time() - session.started_at if session.started_at else None
         base_note = (
             f"Wait window of {effective_timeout}s elapsed — the process is "
@@ -2234,6 +2310,7 @@ class ProcessRegistry:
                     "termination_source": session.termination_source,
                     "output": strip_ansi(session.output_buffer[-2000:]),
                 }
+            self._with_execution_metadata(result, session)
             # Only suppress the autonomous turn after its output is present in
             # the explicit kill result, matching wait/log consumption.
             if consume_output:
@@ -2275,20 +2352,22 @@ class ProcessRegistry:
                     if consume_output:
                         self._completion_consumed.add(session_id)
                     self._move_to_finished(session)
-                    return {
+                    result = {
                         "status": "already_exited",
                         "exit_code": session.exit_code,
                         "output": output,
                     }
+                    return self._with_execution_metadata(result, session)
                 self._terminate_host_pid(session.pid, session.host_start_time)
             else:
-                return {
+                result = {
                     "status": "error",
                     "error": (
                         "Recovered process cannot be killed after restart because "
                         "its original runtime handle is no longer available"
                     ),
                 }
+                return self._with_execution_metadata(result, session)
 
             # If the worker was spawned in its own systemd scope (#70716),
             # stop the entire unit to reap any double-forked descendants that
@@ -2312,15 +2391,18 @@ class ProcessRegistry:
                 session.termination_source = source
             self._move_to_finished(session)
             self._write_checkpoint()
-            return {
+            result = {
                 "status": "killed",
                 "session_id": session.id,
                 "completion_reason": session.completion_reason,
                 "termination_source": session.termination_source,
                 "output": output,
             }
+            return self._with_execution_metadata(result, session)
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            return self._with_execution_metadata(
+                {"status": "error", "error": str(e)}, session,
+            )
 
     def write_stdin(self, session_id: str, data: str) -> dict:
         """Send raw data to a running process's stdin (no newline appended)."""
@@ -2479,6 +2561,7 @@ class ProcessRegistry:
                 "status": "exited" if s.exited else "running",
                 "output_preview": s.output_buffer[-200:] if s.output_buffer else "",
             }
+            self._with_execution_metadata(entry, s)
             # Flag processes surfaced only because they share the gateway
             # session (not the current task) — these are the long-lived
             # background processes a user may have forgotten about (#29177).
@@ -2501,8 +2584,27 @@ class ProcessRegistry:
 
     # ----- Session/Task Queries (for gateway integration) -----
 
-    def has_active_processes(self, task_id: str) -> bool:
+    def has_active_processes(self, task_id: Any) -> bool:
         """Check if there are active (running) processes for a task_id."""
+        with self._lock:
+            sessions = list(self._running.values())
+
+        for session in sessions:
+            self._refresh_detached_session(session)
+
+        if isinstance(task_id, tuple) and len(task_id) == 2:
+            base_task_id, target = task_id
+            matches = lambda s: (
+                (s.environment_task_key or s.task_id) == base_task_id
+                and s.target == target
+            )
+        else:
+            matches = lambda s: (s.environment_task_key or s.task_id) == task_id
+        with self._lock:
+            return any(matches(s) and not s.exited for s in self._running.values())
+
+    def has_active_environment(self, env: Any) -> bool:
+        """Return whether a running session still references *env* by identity."""
         with self._lock:
             sessions = list(self._running.values())
 
@@ -2511,8 +2613,8 @@ class ProcessRegistry:
 
         with self._lock:
             return any(
-                s.task_id == task_id and not s.exited
-                for s in self._running.values()
+                session.env_ref is env and not session.exited
+                for session in self._running.values()
             )
 
     def has_active_for_session(
@@ -2697,6 +2799,11 @@ class ProcessRegistry:
                             "started_at": s.started_at,
                             "task_id": s.task_id,
                             "session_key": s.session_key,
+                            "target": s.target,
+                            "backend": s.backend,
+                            "timeout_seconds": s.timeout_seconds,
+                            "environment_task_key": s.environment_task_key,
+                            "runtime_scope": s.runtime_scope,
                             "watcher_platform": s.watcher_platform,
                             "watcher_chat_id": s.watcher_chat_id,
                             "watcher_user_id": s.watcher_user_id,
@@ -2792,6 +2899,11 @@ class ProcessRegistry:
                 pid_scope=pid_scope,
                 systemd_unit=entry.get("systemd_unit", ""),
                 cwd=entry.get("cwd"),
+                target=entry.get("target", ""),
+                backend=entry.get("backend", ""),
+                timeout_seconds=int(entry.get("timeout_seconds") or 0),
+                environment_task_key=entry.get("environment_task_key", ""),
+                runtime_scope=entry.get("runtime_scope", ""),
                 started_at=entry.get("started_at", time.time()),
                 detached=True,  # Can't read output, but can report status + kill
                 watcher_platform=entry.get("watcher_platform", ""),
@@ -3241,11 +3353,15 @@ def _handle_process(args, **kw):
                 ensure_ascii=False,
             )
         elif action == "write":
-            return json.dumps(process_registry.write_stdin(session_id, str(args.get("data", ""))), ensure_ascii=False)
+            result = process_registry.write_stdin(session_id, str(args.get("data", "")))
         elif action == "submit":
-            return json.dumps(process_registry.submit_stdin(session_id, str(args.get("data", ""))), ensure_ascii=False)
+            result = process_registry.submit_stdin(session_id, str(args.get("data", "")))
         elif action == "close":
-            return json.dumps(process_registry.close_stdin(session_id), ensure_ascii=False)
+            result = process_registry.close_stdin(session_id)
+        session = process_registry.get(session_id)
+        if session is not None:
+            process_registry._with_execution_metadata(result, session)
+        return json.dumps(result, ensure_ascii=False)
     return tool_error(f"Unknown process action: {action}. Use: list, poll, log, wait, kill, write, submit, close")
 
 

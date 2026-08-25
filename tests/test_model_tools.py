@@ -3,6 +3,7 @@
 import json
 from unittest.mock import ANY, call, patch
 
+import pytest
 
 from model_tools import (
     handle_function_call,
@@ -151,6 +152,322 @@ class TestHandleFunctionCall:
         assert pre_call[1]["middleware_trace"] == expected_trace
         assert post_call[1]["middleware_trace"] == expected_trace
 
+    def test_tool_request_middleware_can_select_target_before_authorization(
+        self, monkeypatch,
+    ):
+        policy_checked = []
+        approved = []
+        dispatched = []
+
+        def request_middleware(kind, **kwargs):
+            if kind != "tool_request":
+                return []
+            return [{
+                "args": {
+                    **kwargs["args"],
+                    "execution_target": "beta",
+                },
+                "source": "target-selector",
+            }]
+
+        manager = type("Manager", (), {"_middleware": {}})()
+        monkeypatch.setattr(
+            "hermes_cli.plugins.has_middleware",
+            lambda kind: kind == "tool_request",
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.invoke_middleware", request_middleware,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_manager", lambda: manager,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+            lambda _name, args, **_kwargs: (
+                policy_checked.append(dict(args)),
+                None,
+            ),
+        )
+        monkeypatch.setattr(
+            "acp_adapter.edit_approval.maybe_require_edit_approval",
+            lambda _name, args: approved.append(dict(args)) or None,
+        )
+        monkeypatch.setattr(
+            "model_tools.registry.dispatch",
+            lambda name, args, **kwargs: (
+                dispatched.append((name, dict(args), kwargs))
+                or json.dumps({"ok": True})
+            ),
+        )
+
+        result = json.loads(handle_function_call(
+            "terminal",
+            {"command": "true", "execution_target": "alpha"},
+        ))
+        selected = {"command": "true", "execution_target": "beta"}
+
+        assert result == {"ok": True}
+        assert policy_checked == [selected]
+        assert approved == [selected]
+        assert dispatched[0][0:2] == ("terminal", selected)
+
+    def test_tool_execution_middleware_cannot_retarget_after_authorization(
+        self, monkeypatch,
+    ):
+        policy_checked = []
+        approved = []
+        dispatched = []
+
+        def execution_middleware(**kwargs):
+            return kwargs["next_call"]({
+                **kwargs["args"],
+                "execution_target": "beta",
+            })
+
+        manager = type(
+            "Manager",
+            (),
+            {"_middleware": {"tool_execution": [execution_middleware]}},
+        )()
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_manager", lambda: manager,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+            lambda _name, args, **_kwargs: (
+                policy_checked.append(dict(args)),
+                None,
+            ),
+        )
+        monkeypatch.setattr(
+            "acp_adapter.edit_approval.maybe_require_edit_approval",
+            lambda _name, args: approved.append(dict(args)) or None,
+        )
+        monkeypatch.setattr(
+            "model_tools.registry.dispatch",
+            lambda *args, **kwargs: dispatched.append((args, kwargs)) or "{}",
+        )
+
+        original = {
+            "path": "never-written.txt",
+            "content": "x",
+            "execution_target": "alpha",
+        }
+        result = json.loads(handle_function_call("write_file", original))
+
+        assert policy_checked == [original]
+        assert approved == [original]
+        assert "cannot change 'execution_target' after authorization" in result["error"]
+        assert dispatched == []
+
+    def test_direct_dispatch_freezes_target_generation_before_pre_hook(
+        self, tmp_path,
+    ):
+        import tools.execution_targets as targets_mod
+
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        config_a = {
+            "terminal": {
+                "default_target": "dev",
+                "targets": {"dev": {"backend": "local", "cwd": str(first)}},
+            },
+        }
+        config_b = {
+            "terminal": {
+                "default_target": "dev",
+                "targets": {"dev": {"backend": "local", "cwd": str(second)}},
+            },
+        }
+        targets_mod.set_execution_target_config_source(config_a)
+
+        def invoke_hook(hook_name, **kwargs):
+            assert hook_name == "pre_tool_call"
+            targets_mod.set_execution_target_config_source(config_b)
+            return {"args": dict(kwargs["args"])}
+
+        def dispatch(_name, args, **_kwargs):
+            resolution = targets_mod.resolve_execution_target(
+                args["execution_target"]
+            )
+            return json.dumps({"cwd": resolution.config["cwd"]})
+
+        try:
+            with (
+                patch("model_tools.registry.dispatch", side_effect=dispatch),
+                patch(
+                    "hermes_cli.plugins.has_hook",
+                    side_effect=lambda name: name == "pre_tool_call",
+                ),
+                patch("hermes_cli.plugins.invoke_hook", side_effect=invoke_hook),
+            ):
+                result = json.loads(handle_function_call(
+                    "write_file",
+                    {
+                        "path": "note.txt",
+                        "content": "data",
+                        "execution_target": "dev",
+                    },
+                    task_id="direct-session",
+                ))
+        finally:
+            targets_mod.set_execution_target_config_source(None)
+
+        assert result["cwd"] == str(first)
+
+    def test_direct_target_dispatch_holds_environment_turn_lease(self, monkeypatch):
+        import tools.execution_targets as targets_mod
+        import tools.terminal_tool as terminal_mod
+
+        config = {
+            "terminal": {
+                "default_target": "dev",
+                "targets": {"dev": {"backend": "local", "cwd": "/tmp"}},
+            },
+        }
+        targets_mod.set_execution_target_config_source(config)
+        monkeypatch.setattr(terminal_mod, "_active_turn_counts", {})
+        observed = []
+        key_holder = []
+
+        def dispatch(name, args, **kwargs):
+            key = terminal_mod.execution_environment_turn_key(
+                name,
+                args,
+                task_id=kwargs["task_id"],
+            )
+            key_holder.append(key)
+            observed.append(terminal_mod._current_owned_environment_turns(key))
+            return "{}"
+
+        try:
+            with (
+                patch("model_tools.registry.dispatch", side_effect=dispatch),
+                patch("hermes_cli.plugins.has_hook", return_value=False),
+                patch(
+                    "acp_adapter.edit_approval.maybe_require_edit_approval",
+                    return_value=None,
+                ),
+            ):
+                result = json.loads(handle_function_call(
+                    "write_file",
+                    {
+                        "path": "note.txt",
+                        "content": "data",
+                        "execution_target": "dev",
+                    },
+                    task_id="direct-session",
+                ))
+        finally:
+            targets_mod.set_execution_target_config_source(None)
+
+        assert result == {}
+        assert observed == [1]
+        assert terminal_mod.active_environment_turns(key_holder[0]) == 0
+
+    def test_direct_pre_hook_selector_rewrite_is_revalidated_before_approval(self):
+        modified = {
+            "path": "note.txt",
+            "content": "data",
+            "target": "content",
+        }
+        with (
+            patch(
+                "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+                return_value=(None, modified),
+            ),
+            patch(
+                "acp_adapter.edit_approval.maybe_require_edit_approval",
+                return_value=None,
+            ) as edit_approval,
+            patch("model_tools.registry.dispatch", return_value="{}") as dispatch,
+        ):
+            result = json.loads(handle_function_call(
+                "write_file",
+                {"path": "note.txt", "content": "data"},
+                task_id="direct-session",
+            ))
+
+        assert "does not accept 'target'" in result["error"]
+        edit_approval.assert_not_called()
+        dispatch.assert_not_called()
+
+    def test_tool_execution_middleware_can_rewrite_non_routing_args(
+        self, monkeypatch,
+    ):
+        dispatched = []
+
+        def execution_middleware(**kwargs):
+            return kwargs["next_call"]({
+                **kwargs["args"],
+                "command": "printf ok",
+            })
+
+        manager = type(
+            "Manager",
+            (),
+            {"_middleware": {"tool_execution": [execution_middleware]}},
+        )()
+        monkeypatch.setattr(
+            "hermes_cli.plugins.get_plugin_manager", lambda: manager,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.plugins.resolve_pre_tool_block",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "model_tools.registry.dispatch",
+            lambda name, args, **kwargs: (
+                dispatched.append((name, dict(args), kwargs))
+                or json.dumps({"ok": True})
+            ),
+        )
+
+        result = json.loads(handle_function_call(
+            "terminal",
+            {"command": "true", "execution_target": "alpha"},
+        ))
+
+        assert result == {"ok": True}
+        assert dispatched[0][0:2] == (
+            "terminal",
+            {"command": "printf ok", "execution_target": "alpha"},
+        )
+
+    def test_execution_target_dispatch_guard_preserves_selector_only(self):
+        from tools.execution_targets import (
+            ExecutionTargetError,
+            validate_execution_target_dispatch_args,
+        )
+
+        validate_execution_target_dispatch_args(
+            "terminal",
+            {"command": "true", "execution_target": "alpha"},
+            {"command": "printf ok", "execution_target": "alpha"},
+        )
+        validate_execution_target_dispatch_args(
+            "search_files",
+            {"pattern": "x", "target": "content", "execution_target": "alpha"},
+            {"pattern": "x", "target": "files", "execution_target": "alpha"},
+        )
+
+        changed_selectors = [
+            ({"execution_target": "alpha"}, {"execution_target": "beta"}),
+            ({"execution_target": "alpha"}, {}),
+            ({}, {"execution_target": "alpha"}),
+            (
+                {"execution_target": "alpha"},
+                {"execution_target": "alpha", "target": "beta"},
+            ),
+        ]
+        for authorized, dispatch in changed_selectors:
+            with pytest.raises(ExecutionTargetError):
+                validate_execution_target_dispatch_args(
+                    "terminal", authorized, dispatch,
+                )
+
     def test_registry_exception_emits_terminal_tool_hook(self, monkeypatch):
         from hermes_cli import lifecycle
 
@@ -219,6 +536,28 @@ class TestHandleFunctionCall:
         [post_call] = [call for call in hook_calls if call[0] == "post_tool_call"]
         assert post_call[1]["status"] == "blocked"
         assert post_call[1]["error_type"] == "edit_approval_denied"
+
+    def test_removed_target_selector_fails_before_hooks_or_edit_approval(self):
+        with (
+            patch("hermes_cli.plugins.resolve_pre_tool_block") as pre_hook,
+            patch(
+                "acp_adapter.edit_approval.maybe_require_edit_approval"
+            ) as edit_approval,
+            patch("model_tools.registry.dispatch") as dispatch,
+        ):
+            result = json.loads(handle_function_call(
+                "write_file",
+                {
+                    "path": "private.txt",
+                    "content": "private",
+                    "target": "alpha",
+                },
+            ))
+
+        assert "does not accept 'target'" in result["error"]
+        pre_hook.assert_not_called()
+        edit_approval.assert_not_called()
+        dispatch.assert_not_called()
 
 
 # =========================================================================

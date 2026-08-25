@@ -92,6 +92,19 @@ class TestSessionIsolationKeying:
         monkeypatch.setenv("TERMINAL_CONTAINER_PERSISTENT", "false")
         assert terminal_tool._resolve_container_task_id("tui:sess-1") == "default"
 
+    def test_selected_docker_target_overrides_process_global_isolation(self, monkeypatch):
+        monkeypatch.setenv("TERMINAL_ENV", "local")
+        monkeypatch.setenv("TERMINAL_CONTAINER_PERSISTENT", "true")
+        selected_config = {
+            "env_type": "docker",
+            "container_persistent": False,
+        }
+
+        assert terminal_tool._resolve_container_task_id(
+            "tui:sess-1",
+            config=selected_config,
+        ) == "tui:sess-1"
+
     def test_rl_override_isolation_still_wins(self, monkeypatch):
         """Image/env_type overrides keep their own key in BOTH modes."""
         _enable_isolation(monkeypatch)
@@ -128,6 +141,23 @@ class TestSessionIsolationKeying:
         # Any terminating answer is fine; the invariant is no infinite loop.
         assert terminal_tool._resolve_container_task_id("x") in {"x", "y"}
 
+    def test_container_aliases_are_profile_scoped(self, monkeypatch):
+        from types import SimpleNamespace
+
+        profile = {"name": "profile-a"}
+        monkeypatch.setattr(
+            terminal_tool,
+            "_target_resolution",
+            lambda _target: SimpleNamespace(profile_scope=profile["name"]),
+        )
+        terminal_tool.register_container_alias("child", "parent")
+
+        profile["name"] = "profile-b"
+        assert terminal_tool._resolve_container_alias("child") == "child"
+
+        profile["name"] = "profile-a"
+        assert terminal_tool._resolve_container_alias("child") == "parent"
+
 
 class TestSessionScopedMountResolution:
     """_resolve_task_host_cwd: the single owner of the cwd→/workspace mount policy."""
@@ -146,6 +176,14 @@ class TestSessionScopedMountResolution:
             terminal_tool._resolve_task_host_cwd(cfg, "tui:sess-1")
             == "/Users/prev/dev/oldrepo"
         )
+
+    def test_selected_docker_target_blocks_process_global_mount(self, monkeypatch):
+        monkeypatch.setenv("TERMINAL_ENV", "local")
+        monkeypatch.setenv("TERMINAL_CONTAINER_PERSISTENT", "true")
+        cfg = self._config(host_cwd="/Users/prev/dev/oldrepo")
+        cfg["container_persistent"] = False
+
+        assert terminal_tool._resolve_task_host_cwd(cfg, "tui:sess-1") is None
 
     def test_isolation_refuses_process_global_mount(self, monkeypatch, tmp_path):
         """The reported leak: a fresh session with NO attached workspace must
@@ -216,6 +254,18 @@ class TestSessionScopedMountResolution:
         cfg = self._config()
         cfg["env_type"] = "modal"
         assert terminal_tool._resolve_task_host_cwd(cfg, "t") is None
+
+
+def test_session_scoped_environment_survives_turn_cleanup():
+    from types import SimpleNamespace
+
+    env = SimpleNamespace(
+        _persistent=False,
+        persistent_filesystem=False,
+        _session_scoped=True,
+    )
+
+    assert terminal_tool._environment_is_persistent(env) is True
 
 
 class TestRecordedHostCwdDiscardedOnContainers:

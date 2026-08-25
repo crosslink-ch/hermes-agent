@@ -142,7 +142,11 @@ def test_background_command_prefers_recorded_session_cwd_over_init_time_cwd(monk
     monkeypatch.setattr(terminal_tool, "_task_env_overrides", {task_id: {"cwd": "/workspace/init"}})
     monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: _minimal_terminal_config(cwd="/workspace/init"))
     monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
-    monkeypatch.setattr(terminal_tool, "_resolve_container_task_id", lambda value: value or "default")
+    monkeypatch.setattr(
+        terminal_tool,
+        "_resolve_container_task_id",
+        lambda value, **_kwargs: value or "default",
+    )
     monkeypatch.setattr(
         terminal_tool,
         "_check_all_guards",

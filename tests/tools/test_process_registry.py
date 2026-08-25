@@ -134,6 +134,41 @@ def test_kill_all_backward_compat_and_exclude_ids(registry):
     assert sorted(c[0] for c in calls) == ["proc_a", "proc_b"]
 
 
+def test_wait_validation_error_preserves_execution_target_metadata(registry):
+    session = _make_session(sid="proc_wait_invalid")
+    session.target = "box"
+    session.backend = "ssh"
+    session.runtime_scope = "scope-server-1"
+    registry._running[session.id] = session
+
+    result = registry.wait(session.id, timeout=0)
+
+    assert result == {
+        "status": "error",
+        "error": "timeout must be positive (got 0)",
+        "target": "box",
+        "backend": "ssh",
+        "runtime_scope": "scope-server-1",
+    }
+
+
+def test_completion_notification_preserves_execution_target_metadata(registry):
+    session = _make_session(sid="proc_notify_target", exited=True, exit_code=0)
+    session.notify_on_complete = True
+    session.target = "box"
+    session.backend = "ssh"
+    session.runtime_scope = "scope-server-1"
+    registry._running[session.id] = session
+
+    with patch.object(registry, "_write_checkpoint"):
+        registry._move_to_finished(session)
+
+    event = registry.completion_queue.get_nowait()
+    assert event["target"] == "box"
+    assert event["backend"] == "ssh"
+    assert event["runtime_scope"] == "scope-server-1"
+
+
 def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.05) -> bool:
     """Poll a predicate until it returns truthy or the timeout elapses."""
     deadline = time.monotonic() + timeout
@@ -661,6 +696,15 @@ class TestActiveQueries:
         assert registry.has_active_processes("t1") is True
         assert registry.has_active_processes("t2") is False
 
+    def test_has_active_environment_uses_object_identity(self, registry):
+        old_env = object()
+        new_env = object()
+        s = _make_session(task_id="t1")
+        s.env_ref = old_env
+        registry._running[s.id] = s
+        assert registry.has_active_environment(old_env) is True
+        assert registry.has_active_environment(new_env) is False
+
     def test_has_active_for_session_with_max_age_stale(self, registry):
         """Stale process (older than max_active_age) is ignored."""
         s = _make_session(started_at=time.time() - 90000)  # 25 hours ago
@@ -949,6 +993,22 @@ class TestSpawnRewriteCompoundBackground:
 # =========================================================================
 
 class TestCheckpoint:
+    def test_write_checkpoint_includes_execution_target_metadata(self, registry, tmp_path):
+        with patch("tools.process_registry.CHECKPOINT_PATH", tmp_path / "procs.json"):
+            s = _make_session()
+            s.target = "alpha"
+            s.backend = "local"
+            s.runtime_scope = "scope-v1"
+            registry._running[s.id] = s
+            registry._write_checkpoint()
+
+            data = json.loads((tmp_path / "procs.json").read_text())
+            assert len(data) == 1
+            assert data[0]["session_id"] == s.id
+            assert data[0]["target"] == "alpha"
+            assert data[0]["backend"] == "local"
+            assert data[0]["runtime_scope"] == "scope-v1"
+
     def test_recover_dead_pid(self, registry, tmp_path):
         checkpoint = tmp_path / "procs.json"
         checkpoint.write_text(json.dumps([{
@@ -960,6 +1020,41 @@ class TestCheckpoint:
         with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
             recovered = registry.recover_from_checkpoint()
             assert recovered == 0
+
+    def test_recover_enqueues_watchers_with_execution_target_metadata(self, registry, tmp_path):
+        checkpoint = tmp_path / "procs.json"
+        checkpoint.write_text(json.dumps([{
+            "session_id": "proc_live",
+            "command": "sleep 999",
+            "pid": os.getpid(),  # current process — guaranteed alive
+            "task_id": "t1",
+            "session_key": "sk1",
+            "watcher_platform": "telegram",
+            "watcher_chat_id": "123",
+            "watcher_user_id": "u123",
+            "watcher_user_name": "alice",
+            "watcher_thread_id": "42",
+            "watcher_interval": 60,
+            "target": "alpha",
+            "backend": "local",
+            "runtime_scope": "scope-v1",
+        }]))
+        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+            recovered = registry.recover_from_checkpoint()
+            assert recovered == 1
+            assert len(registry.pending_watchers) == 1
+            w = registry.pending_watchers[0]
+            assert w["session_id"] == "proc_live"
+            assert w["platform"] == "telegram"
+            assert w["chat_id"] == "123"
+            assert w["user_id"] == "u123"
+            assert w["user_name"] == "alice"
+            assert w["thread_id"] == "42"
+            assert w["check_interval"] == 60
+            session = registry.get("proc_live")
+            assert session.target == "alpha"
+            assert session.backend == "local"
+            assert session.runtime_scope == "scope-v1"
 
     def test_recover_dead_wrapper_retries_unreaped_systemd_scope(
         self, registry, tmp_path, monkeypatch
@@ -1097,6 +1192,30 @@ class TestKillProcess:
             assert ("terminate", 424242) in terminate_calls
         finally:
             registry._running.pop(s.id, None)
+
+    def test_kill_error_preserves_execution_target_metadata(self, registry):
+        s = _make_session(sid="proc_kill_error", command="sleep 999")
+        s.process = MagicMock()
+        s.process.pid = 424242
+        s.target = "box"
+        s.backend = "local"
+        s.runtime_scope = "scope-server-1"
+        registry._running[s.id] = s
+
+        with patch.object(
+            registry,
+            "_terminate_host_pid",
+            side_effect=RuntimeError("termination raced with process exit"),
+        ):
+            result = registry.kill_process(s.id)
+
+        assert result == {
+            "status": "error",
+            "error": "termination raced with process exit",
+            "target": "box",
+            "backend": "local",
+            "runtime_scope": "scope-server-1",
+        }
 
 
 # =========================================================================

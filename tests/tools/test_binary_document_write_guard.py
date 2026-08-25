@@ -117,6 +117,37 @@ class TestWriteFileToolGuard:
         assert result.get("error")
         assert pdf.read_bytes() == original
 
+    def test_named_target_rejects_relative_existing_pdf(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        import tools.execution_targets as targets
+
+        pdf = tmp_path / "doc.pdf"
+        pdf.write_bytes(b"%PDF-1.4\n%%EOF\n")
+        original = pdf.read_bytes()
+        config = {
+            "terminal": {
+                "default_target": "pdf_guard_target",
+                "targets": {
+                    "pdf_guard_target": {
+                        "backend": "local",
+                        "cwd": str(tmp_path),
+                    },
+                },
+            },
+        }
+        monkeypatch.setattr(targets, "_load_merged_config", lambda: config)
+
+        result = json.loads(write_file_tool(
+            "doc.pdf",
+            "replacement text",
+            task_id="binary-pdf-target",
+            execution_target="pdf_guard_target",
+        ))
+
+        assert result.get("error")
+        assert pdf.read_bytes() == original
+
     def test_write_file_allows_new_pdf_creation(self, tmp_path: Path):
         pdf = tmp_path / "generated.pdf"
         result = json.loads(write_file_tool(str(pdf), "%PDF-1.4\n%%EOF\n"))

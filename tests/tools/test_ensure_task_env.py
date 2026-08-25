@@ -43,6 +43,46 @@ def test_non_local_creates_and_reuses(monkeypatch):
         _clear(eff, task_id)
 
 
+def test_named_default_creates_in_target_scope_and_reuses(monkeypatch):
+    """Lazy creation must use the same cache key and binding as terminal calls."""
+    import tools.execution_targets as targets
+
+    config = {
+        "terminal": {
+            "default_target": "devbox",
+            "targets": {
+                "devbox": {
+                    "backend": "ssh",
+                    "ssh_host": "example.invalid",
+                    "ssh_user": "tester",
+                    "cwd": "~",
+                },
+            },
+        },
+    }
+    monkeypatch.setattr(targets, "_load_merged_config", lambda: config)
+    resolution = targets.resolve_execution_target(None)
+    task_id = "t-named-lazy"
+    base_task_id = tt._resolve_container_task_id(task_id)
+    effective_key = resolution.environment_key(base_task_id)
+    raw_key = resolution.environment_key(task_id)
+    _clear(effective_key, raw_key)
+    fake = SimpleNamespace(
+        execute=lambda *a, **k: {"returncode": 0, "output": ""},
+    )
+
+    try:
+        with patch.object(tt, "_create_environment", return_value=fake) as create:
+            assert tt.ensure_task_env(task_id) is fake
+            assert tt.get_active_env(task_id, "devbox") is fake
+            assert tt.ensure_task_env(task_id) is fake
+            create.assert_called_once()
+        assert fake._hermes_target_name == "devbox"
+        assert fake._hermes_target_backend == "ssh"
+    finally:
+        _clear(effective_key, raw_key)
+
+
 def test_creation_failure_returns_none_and_caches_nothing(monkeypatch):
     """A failed bring-up is best-effort: return None and leave no env cached so
     the caller keeps its fail-closed path."""

@@ -318,6 +318,7 @@ def maybe_persist_tool_result(
     env=None,
     config: BudgetConfig = DEFAULT_BUDGET,
     threshold: int | float | None = None,
+    allow_host_without_env: bool = True,
 ) -> str:
     """Layer 2: persist oversized result into the sandbox, return preview + path.
 
@@ -332,6 +333,10 @@ def maybe_persist_tool_result(
         env: The active BaseEnvironment instance, or None.
         config: BudgetConfig controlling thresholds and preview size.
         threshold: Explicit override; takes precedence over config resolution.
+        allow_host_without_env: Keep the current-main host spill fallback when
+            no environment exists. Target-aware callers set this false when a
+            missing producing environment would make the host path unreachable
+            from the target named in the tool result.
 
     Returns:
         Original content if small, or <persisted-output> replacement.
@@ -350,7 +355,11 @@ def maybe_persist_tool_result(
     # Always persist host-side first: $HERMES_HOME/cache/spillover is the
     # single canonical home for spilled results (with the other Hermes-owned
     # caches, pruned by gateway housekeeping) regardless of backend.
-    host_path = _write_to_spillover(content, filename)
+    host_path = (
+        _write_to_spillover(content, filename)
+        if env is not None or allow_host_without_env
+        else None
+    )
 
     if _is_host_side_env(env):
         if host_path is not None:
@@ -399,6 +408,7 @@ def maybe_persist_tool_result(
 def enforce_turn_budget(
     tool_messages: list[dict],
     env=None,
+    env_resolver=None,
     config: BudgetConfig = DEFAULT_BUDGET,
 ) -> list[dict]:
     """Layer 3: enforce aggregate budget across all tool results in a turn.
@@ -407,7 +417,9 @@ def enforce_turn_budget(
     first (via sandbox write) until under budget. Already-persisted results
     are skipped.
 
-    Mutates the list in-place and returns it.
+    ``env_resolver`` may return the producing environment for each message;
+    this keeps saved outputs on the same named execution target as the tool
+    call. Mutates the list in-place and returns it.
     """
     candidates = []
     total_size = 0
@@ -430,13 +442,17 @@ def enforce_turn_budget(
         content = msg["content"]
         tool_use_id = msg.get("tool_call_id", f"budget_{idx}")
 
+        message_env = env_resolver(msg) if callable(env_resolver) else env
         replacement = maybe_persist_tool_result(
             content=content,
             tool_name=_BUDGET_TOOL_NAME,
             tool_use_id=tool_use_id,
-            env=env,
+            env=message_env if callable(env_resolver) else env,
             config=config,
             threshold=0,
+            allow_host_without_env=(
+                not callable(env_resolver) or message_env is not None
+            ),
         )
         if replacement != content:
             total_size -= size

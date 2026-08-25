@@ -65,6 +65,51 @@ class TestSshConfigApprovalGate:
 
         assert is_write_approval_required(str(tmp_path / "notes.txt")) is False
 
+    def test_named_ssh_targets_use_separate_approval_scopes(self, monkeypatch):
+        import tools.approval as approval
+        import tools.execution_targets as targets
+        from tools.file_tools import _check_approval_required_write
+
+        config = {
+            "terminal": {
+                "default_target": "alpha",
+                "targets": {
+                    "alpha": {
+                        "backend": "ssh",
+                        "ssh_host": "alpha.invalid",
+                        "ssh_user": "tester",
+                        "cwd": "~",
+                    },
+                    "beta": {
+                        "backend": "ssh",
+                        "ssh_host": "beta.invalid",
+                        "ssh_user": "tester",
+                        "cwd": "~",
+                    },
+                },
+            },
+        }
+        monkeypatch.setattr(targets, "_load_merged_config", lambda: config)
+        pattern_keys = []
+
+        def approve(**kwargs):
+            pattern_keys.append(kwargs["pattern_key"])
+            return {"approved": True}
+
+        monkeypatch.setattr(approval, "_run_approval_gate", approve)
+        for target in ("alpha", "beta"):
+            resolution = targets.resolve_execution_target(target)
+            assert _check_approval_required_write(
+                ["~/.ssh/config"],
+                "approval-target-test",
+                target,
+                _resolution=resolution,
+            ) is None
+
+        assert len(pattern_keys) == 2
+        assert pattern_keys[0] != pattern_keys[1]
+        assert all(key.startswith("ssh_config_write:") for key in pattern_keys)
+
 
 
 class TestSafeWriteRoot:

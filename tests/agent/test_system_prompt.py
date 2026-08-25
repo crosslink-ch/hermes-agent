@@ -24,6 +24,7 @@ def _make_agent(**overrides):
         platform="",
         pass_session_id=False,
         session_id="",
+        _emit_status=lambda *_args, **_kwargs: None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -60,6 +61,48 @@ class TestContextFileCwd:
     def test_configured_dir_when_terminal_cwd_set(self, monkeypatch, tmp_path):
         monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
         assert _captured_context_cwd(_make_agent()) == tmp_path
+
+
+def test_environment_hints_receive_agent_profile_home(tmp_path):
+    agent_home = tmp_path / "profile-home"
+    agent_home.mkdir()
+    agent = _make_agent(
+        _session_db=SimpleNamespace(db_path=agent_home / "state.db")
+    )
+    calls = []
+
+    with (
+        patch("run_agent.load_soul_md", return_value=""),
+        patch("run_agent.build_nous_subscription_prompt", return_value=""),
+        patch(
+            "run_agent.build_environment_hints",
+            side_effect=lambda **kwargs: calls.append(dict(kwargs)) or "",
+        ),
+        patch("run_agent.build_context_files_prompt", return_value=""),
+    ):
+        build_system_prompt_parts(agent)
+
+    assert calls == [{"home_override": agent_home}]
+
+
+def test_environment_hints_ignore_non_path_session_db():
+    from unittest.mock import MagicMock
+
+    agent = _make_agent(_session_db=MagicMock())
+    calls = []
+
+    with (
+        patch("run_agent.load_soul_md", return_value=""),
+        patch("run_agent.build_nous_subscription_prompt", return_value=""),
+        patch(
+            "run_agent.build_environment_hints",
+            side_effect=lambda **kwargs: calls.append(dict(kwargs)) or "",
+        ),
+        patch("run_agent.build_context_files_prompt", return_value=""),
+    ):
+        build_system_prompt_parts(agent)
+
+    assert calls == [{"home_override": None}]
 
 
 def _stable_prompt(agent):
