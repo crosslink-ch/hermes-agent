@@ -49,16 +49,16 @@ Prefer the terminal?
 On macOS/Linux/WSL2/Android, run
 
 ```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://share.kihub.ch/hermes/install.sh | bash
 ```
 
 On Windows, run
 
 ```powershell
-iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+iex (irm https://share.kihub.ch/hermes/install.ps1)
 ```
 
-Prefer to review first? Download [`install.sh`](https://hermes-agent.nousresearch.com/install.sh), inspect it, then run it.
+Prefer to review first? Download [`install.sh`](https://share.kihub.ch/hermes/install.sh), inspect it, then run it.
 
 After it finishes, reload your shell:
 

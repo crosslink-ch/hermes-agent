@@ -6,7 +6,7 @@
 # Uses uv for desktop/server installs and Python's stdlib venv + pip on Termux.
 #
 # Usage:
-#   curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+#   curl -fsSL https://share.kihub.ch/hermes/install.sh | bash
 #
 # Or with options:
 #   curl -fsSL ... | bash -s -- --no-venv --skip-setup
@@ -43,8 +43,11 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Configuration
-REPO_URL_SSH="git@github.com:NousResearch/hermes-agent.git"
-REPO_URL_HTTPS="https://github.com/NousResearch/hermes-agent.git"
+REPO_SLUG="crosslink-ch/hermes-agent"
+REPO_URL_SSH="git@github.com:${REPO_SLUG}.git"
+REPO_URL_HTTPS="https://github.com/${REPO_SLUG}.git"
+DISTRIBUTION_REPO_CANONICAL="github.com/crosslink-ch/hermes-agent"
+LEGACY_REPO_CANONICAL="github.com/nousresearch/hermes-agent"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 # INSTALL_DIR is resolved AFTER arg parsing and OS detection so we can pick an
 # FHS-style layout for root installs.  Track whether the user gave us an
@@ -57,7 +60,7 @@ else
     INSTALL_DIR_EXPLICIT=false
 fi
 PYTHON_VERSION="3.11"
-NODE_VERSION="22"
+NODE_VERSION="26"
 
 # FHS-style root install layout (set by resolve_install_layout when applicable):
 #   code at /usr/local/lib/hermes-agent, command at /usr/local/bin/hermes,
@@ -70,6 +73,7 @@ DETECTED_BROWSER_EXECUTABLE=""
 USE_VENV=true
 RUN_SETUP=true
 SKIP_BROWSER=false
+SKIP_COMPUTER_USE=false
 NO_SKILLS=false
 BRANCH="main"
 INSTALL_COMMIT=""
@@ -81,6 +85,7 @@ STAGE_NAME=""
 JSON_OUTPUT=false
 NON_INTERACTIVE=false
 INCLUDE_DESKTOP=false
+MIGRATE_LEGACY_ORIGIN=false
 
 # Detect non-interactive mode (e.g. curl | bash)
 # When stdin is not a terminal, read -p will fail with EOF,
@@ -104,6 +109,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-browser|--no-playwright)
             SKIP_BROWSER=true
+            shift
+            ;;
+        --skip-computer-use)
+            SKIP_COMPUTER_USE=true
             shift
             ;;
         --no-skills)
@@ -138,6 +147,10 @@ while [[ $# -gt 0 ]]; do
             NON_INTERACTIVE=true
             shift
             ;;
+        --migrate-legacy-origin|-MigrateLegacyOrigin)
+            MIGRATE_LEGACY_ORIGIN=true
+            shift
+            ;;
         --include-desktop|-IncludeDesktop)
             INCLUDE_DESKTOP=true
             shift
@@ -165,6 +178,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --no-venv      Don't create virtual environment"
             echo "  --skip-setup   Skip interactive setup wizard"
             echo "  --skip-browser Skip Playwright/Chromium install (browser tools won't work)"
+            echo "  --skip-computer-use  Skip the cua-driver (Computer Use) install"
             echo "  --no-skills    Start with a blank slate — seed no bundled skills, and"
             echo "                   write \$HERMES_HOME/.no-bundled-skills so future"
             echo "                   'hermes update' runs never inject bundled skills either"
@@ -176,6 +190,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --stage NAME   Run one desktop bootstrap stage"
             echo "  --json         Print a JSON result frame for --stage"
             echo "  --non-interactive  Skip stages that require user input"
+            echo "  --migrate-legacy-origin  Retarget a known Nous install to Crosslink"
             echo "  --include-desktop  Also build the desktop app (apps/desktop -> Hermes.app)"
             echo "  --dir PATH     Installation directory"
             echo "                   default (non-root):  ~/.hermes/hermes-agent"
@@ -529,7 +544,7 @@ detect_os() {
             OS="windows"
             DISTRO="windows"
             log_error "Windows detected. Please use the PowerShell installer:"
-            log_info "  iex (irm https://hermes-agent.nousresearch.com/install.ps1)"
+            log_info "  iex (irm https://share.kihub.ch/hermes/install.ps1)"
             exit 1
             ;;
         *)
@@ -829,8 +844,16 @@ check_node() {
     # enough for the desktop build AND an npm that can read our .npmrc. A
     # bad-band npm (see npm_supports_npmrc) fails `npm ci` outright, and the
     # managed Node we install instead bundles one that works.
-    if command -v node &> /dev/null && node_satisfies_build "$(node --version)"; then
-        if ! command -v npm &> /dev/null || npm_supports_npmrc "$(npm --version 2>/dev/null)"; then
+    #
+    # npm must actually be reachable, not just node: a stray `node` symlink
+    # without a sibling npm (leftover from a node version manager) makes
+    # `command -v node` succeed while every later `npm install` silently
+    # fails and the desktop build dies with an opaque "Node.js / npm
+    # unavailable" (#77003). Node only counts as found when npm resolves on
+    # the same PATH.
+    if command -v node &> /dev/null && command -v npm &> /dev/null \
+        && node_satisfies_build "$(node --version)"; then
+        if npm_supports_npmrc "$(npm --version 2>/dev/null)"; then
             log_success "Node.js $(node --version) found"
             HAS_NODE=true
             return 0
@@ -842,14 +865,17 @@ check_node() {
     fi
 
     # Prefer a Hermes-managed Node from a previous run over a too-old system one.
-    if [ -x "$HERMES_HOME/node/bin/node" ] && node_satisfies_build "$("$HERMES_HOME/node/bin/node" --version)"; then
+    if [ -x "$HERMES_HOME/node/bin/node" ] && [ -x "$HERMES_HOME/node/bin/npm" ] \
+        && node_satisfies_build "$("$HERMES_HOME/node/bin/node" --version)"; then
         export PATH="$HERMES_HOME/node/bin:$PATH"
         log_success "Node.js $("$HERMES_HOME/node/bin/node" --version) found (Hermes-managed)"
         HAS_NODE=true
         return 0
     fi
 
-    if command -v node &> /dev/null; then
+    if command -v node &> /dev/null && ! command -v npm &> /dev/null; then
+        log_warn "node found but npm is not on PATH (stray node symlink?) — installing Hermes-managed Node $NODE_VERSION LTS..."
+    elif command -v node &> /dev/null; then
         log_warn "Node.js $(node --version) is too old (Hermes requires Node >=26) — installing Hermes-managed Node $NODE_VERSION..."
     elif [ "$DISTRO" = "termux" ]; then
         log_info "Node.js not found — installing Node.js via pkg..."
@@ -1225,6 +1251,60 @@ show_manual_install_hint() {
 # Installation
 # ============================================================================
 
+canonical_repository_remote() {
+    local value
+    value=$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')
+    case "$value" in
+        git@github.com:*) value="github.com/${value#git@github.com:}" ;;
+        ssh://git@github.com/*) value="github.com/${value#ssh://git@github.com/}" ;;
+        http://*|https://*) value="${value#*://}" ;;
+    esac
+    value="${value%/}"
+    value="${value%.git}"
+    printf '%s\n' "$value"
+}
+
+ensure_distribution_origin() {
+    local origin_url canonical target_url
+    origin_url=$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)
+    canonical=$(canonical_repository_remote "$origin_url")
+
+    if [ "$canonical" = "$DISTRIBUTION_REPO_CANONICAL" ]; then
+        return 0
+    fi
+
+    if [ "$canonical" = "$LEGACY_REPO_CANONICAL" ]; then
+        local should_migrate="$MIGRATE_LEGACY_ORIGIN"
+        if [ "$should_migrate" != true ]; then
+            log_warn "This installation currently follows NousResearch/hermes-agent."
+            log_warn "Crosslink Hermes should follow $REPO_SLUG for future updates."
+            if prompt_yes_no "Migrate this managed checkout to Crosslink now?" "false"; then
+                should_migrate=true
+            fi
+        fi
+
+        if [ "$should_migrate" != true ]; then
+            log_error "Legacy Nous origin detected; no files were modified."
+            log_info "Re-run with --migrate-legacy-origin to retarget it, or change origin manually."
+            return 1
+        fi
+
+        case "$origin_url" in
+            git@*|ssh://*) target_url="$REPO_URL_SSH" ;;
+            *) target_url="$REPO_URL_HTTPS" ;;
+        esac
+        log_info "Migrating managed checkout origin to $target_url..."
+        git -C "$INSTALL_DIR" remote set-url origin "$target_url"
+        log_success "Managed checkout now follows $REPO_SLUG"
+        return 0
+    fi
+
+    [ -n "$origin_url" ] || origin_url="<missing origin>"
+    log_warn "Existing checkout uses a custom origin: $origin_url"
+    log_info "Leaving the custom origin unchanged."
+    return 0
+}
+
 clone_repo() {
     log_info "Installing to $INSTALL_DIR..."
 
@@ -1242,6 +1322,9 @@ clone_repo() {
 
     if [ -d "$INSTALL_DIR" ]; then
         if [ -d "$INSTALL_DIR/.git" ]; then
+            if ! ensure_distribution_origin; then
+                return 1
+            fi
             log_info "Existing installation found, updating..."
             cd "$INSTALL_DIR"
 
@@ -1345,18 +1428,18 @@ EOF
             exit 1
         fi
     else
-        # Try SSH first (for private repo access), fall back to HTTPS
-        # GIT_SSH_COMMAND disables interactive prompts and sets a short timeout
-        # so SSH fails fast instead of hanging when no key is configured.
-        log_info "Trying SSH clone..."
-        if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" \
-           git clone --depth 1 --branch "$BRANCH" "$REPO_URL_SSH" "$INSTALL_DIR" 2>/dev/null; then
-            log_success "Cloned via SSH"
+        # This distribution is public, so prefer HTTPS. Besides working without
+        # GitHub SSH keys, this avoids connected-but-stalled SSH agent/key flows.
+        # Keep SSH as a fallback for networks that permit it but block HTTPS.
+        log_info "Trying HTTPS clone..."
+        if git clone --depth 1 --branch "$BRANCH" "$REPO_URL_HTTPS" "$INSTALL_DIR"; then
+            log_success "Cloned via HTTPS"
         else
-            rm -rf "$INSTALL_DIR" 2>/dev/null  # Clean up partial SSH clone
-            log_info "SSH failed, trying HTTPS..."
-            if git clone --depth 1 --branch "$BRANCH" "$REPO_URL_HTTPS" "$INSTALL_DIR"; then
-                log_success "Cloned via HTTPS"
+            rm -rf "$INSTALL_DIR" 2>/dev/null  # Clean up partial HTTPS clone
+            log_info "HTTPS failed, trying SSH..."
+            if GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=5" \
+               git clone --depth 1 --branch "$BRANCH" "$REPO_URL_SSH" "$INSTALL_DIR" 2>/dev/null; then
+                log_success "Cloned via SSH"
             else
                 log_error "Failed to clone repository"
                 exit 1
@@ -1367,6 +1450,13 @@ EOF
     cd "$INSTALL_DIR"
 
     if [ -n "$INSTALL_COMMIT" ]; then
+        # Validate the commit argument: must look like a hex SHA (full 40-char
+        # or abbreviated 7-39 char). Reject anything else early so the user
+        # gets a clear error instead of a misleading git message (#87268).
+        if ! printf '%s' "$INSTALL_COMMIT" | grep -qE '^[0-9a-fA-F]{7,40}$'; then
+            log_error "--commit expects a hex SHA (7-40 chars), got: $INSTALL_COMMIT"
+            return 1
+        fi
         # A commit pin must never move an existing install BACKWARDS. The
         # bootstrap installer bakes its build-time commit into the binary
         # (BUILD_PIN_COMMIT) and passes it as --commit on every install-mode
@@ -1376,21 +1466,32 @@ EOF
         # current venv. Only pin when the target is not already an ancestor of
         # HEAD; a fresh clone has no such ancestry and pins normally.
         if ! git cat-file -e "$INSTALL_COMMIT^{commit}" 2>/dev/null; then
-            git fetch origin "$INSTALL_COMMIT" || true
+            if ! git fetch origin "$INSTALL_COMMIT"; then
+                log_error "Could not fetch commit $INSTALL_COMMIT from origin."
+                log_error "Abbreviated SHAs are not supported — use the full 40-char hash."
+                log_error "Find it with: git ls-remote origin | grep <short-sha>"
+                return 1
+            fi
         fi
         if git rev-parse --verify --quiet HEAD >/dev/null 2>&1 \
            && git merge-base --is-ancestor "$INSTALL_COMMIT" HEAD 2>/dev/null \
            && [ "$(git rev-parse "$INSTALL_COMMIT^{commit}" 2>/dev/null)" != "$(git rev-parse HEAD)" ]; then
             if [ "$FORCE_COMMIT" = true ]; then
                 log_warn "--force-commit: rolling this install back to $INSTALL_COMMIT."
-                git checkout --detach "$INSTALL_COMMIT"
+                if ! git checkout --detach "$INSTALL_COMMIT"; then
+                    log_error "Failed to detach at $INSTALL_COMMIT"
+                    return 1
+                fi
             else
                 log_warn "Ignoring --commit $INSTALL_COMMIT: the checkout is already newer."
                 log_warn "Pinning to it would roll this install back. Pass --force-commit to override."
             fi
         else
             log_info "Pinning checkout to commit $INSTALL_COMMIT..."
-            git checkout --detach "$INSTALL_COMMIT"
+            if ! git checkout --detach "$INSTALL_COMMIT"; then
+                log_error "Failed to detach at $INSTALL_COMMIT"
+                return 1
+            fi
         fi
     fi
 
@@ -1683,7 +1784,7 @@ PY
         exit 1
     fi
 
-    if [ "$_tier_name" != "all (with RL/matrix extras)" ]; then
+    if [ "$_tier_name" != "all" ]; then
         log_warn "Note: installed via fallback tier ($_tier_name)."
         log_info "Some optional features may be missing. After resolving any"
         log_info "PyPI/network issue, re-run: $UV_CMD pip install -e '.[all]'"
@@ -2146,98 +2247,15 @@ run_with_timeout() {
     return 124
 }
 
-# Return success only when the host is an apt release NEWER than the newest one
-# Playwright's platform resolver recognizes — the exact condition that makes
-# `playwright install` hang uninterruptibly (#35166). We scope the override
-# retry to this case rather than retrying on *any* failure, so a genuine
-# network/disk/permission failure doesn't get a mismatched-glibc build forced
-# onto it. Newest Playwright-known apt releases as of this writing: Ubuntu
-# 24.04, Debian 13. Anything above triggers the fallback; everything Playwright
-# already handles (and every non-apt distro) does not.
-playwright_host_unrecognized() {
-    # Compare dotted versions: returns 0 if $1 > $2.
-    _ver_gt() {
-        [ "$1" = "$2" ] && return 1
-        [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
-    }
-    case "$DISTRO" in
-        ubuntu) _ver_gt "${DISTRO_VERSION:-0}" "24.04" ;;
-        debian) _ver_gt "${DISTRO_VERSION:-0}" "13" ;;
-        *) return 1 ;;  # Non-apt or unknown — not the #35166 hang condition.
-    esac
-}
-
-# Compute the PLAYWRIGHT_HOST_PLATFORM_OVERRIDE value to retry an install with
-# when Playwright's platform resolver rejects the host. ubuntu24.04 is the
-# newest Linux build Playwright has shipped across recent releases and runs on
-# newer apt releases (its binaries are dynamically linked); we point too-new /
-# unrecognized hosts at it. Only x64/arm64 Linux have Playwright builds — emit
-# nothing for anything else so the caller skips the retry. Echoes the value
-# (e.g. "ubuntu24.04-x64") or nothing.
-playwright_fallback_platform() {
-    case "$(uname -m)" in
-        x86_64|amd64) echo "ubuntu24.04-x64" ;;
-        aarch64|arm64) echo "ubuntu24.04-arm64" ;;
-        *) : ;;  # No Playwright Linux build for this arch.
-    esac
-}
-
-# Run a `playwright install ...` command, and if it fails or hangs (the
-# uninterruptible "Installing Playwright Chromium with system dependencies"
-# stall on apt releases Playwright doesn't recognize yet — Ubuntu 26.04,
-# Debian 14, future distros — see #35166), retry it ONCE with
-# PLAYWRIGHT_HOST_PLATFORM_OVERRIDE pinned to the newest known build.
+# Keep browser-engine downloads bounded and interruptible. agent-browser owns
+# the compatible Chrome-for-Testing version and system-dependency workflow;
+# invoking its installed CLI avoids adding a second raw Playwright dependency.
 #
-# The override retry is scoped to the actual hang condition: it fires only when
-# the host is an apt release NEWER than Playwright recognizes
-# (playwright_host_unrecognized). On every release Playwright already supports
-# (Ubuntu <=24.04, Debian <=13) and every non-apt distro, the first attempt is
-# authoritative and a failure is reported as-is — we never force a
-# mismatched-glibc build (microsoft/playwright#35114) onto a host Playwright
-# handles correctly. This is deliberately narrower than a retry-on-any-failure:
-# a network/disk/permission error on a supported host should surface, not get
-# papered over with a platform override. Playwright's maintainers bless this
-# env var as the supported escape hatch for unrecognized platforms
-# (microsoft/playwright#33434); a hardcoded full distro/version table was
-# rejected upstream (microsoft/playwright#33432), so we only need the
-# newest-known floor here.
-#
-# An operator-provided PLAYWRIGHT_HOST_PLATFORM_OVERRIDE is always respected:
-# it is inherited by the first attempt, and the retry is skipped.
-#
-# Usage: run_playwright_install <timeout_seconds> npx playwright install [args...]
-run_playwright_install() {
+# Usage: run_agent_browser_install <timeout_seconds> npx agent-browser install [args...]
+run_agent_browser_install() {
     local timeout_seconds="$1"
     shift
-
-    # First attempt: native platform resolution (inherits any operator override).
-    if run_browser_install_with_timeout "$timeout_seconds" "$@" 2>/dev/null; then
-        return 0
-    fi
-
-    # Operator already pinned the platform — their choice already applied to the
-    # attempt above; a second identical run won't help.
-    if [ -n "${PLAYWRIGHT_HOST_PLATFORM_OVERRIDE:-}" ]; then
-        return 1
-    fi
-
-    # Only retry with an override on the apt releases too new for Playwright to
-    # recognize (the #35166 hang). Any other failure is a real failure and is
-    # surfaced unchanged.
-    if ! playwright_host_unrecognized; then
-        return 1
-    fi
-
-    local fallback
-    fallback="$(playwright_fallback_platform)"
-    if [ -z "$fallback" ]; then
-        return 1  # No usable fallback build for this arch.
-    fi
-
-    log_warn "Playwright doesn't recognize ${DISTRO} ${DISTRO_VERSION} yet — retrying with PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=$fallback"
-    log_info "(apt releases newer than Playwright knows hang at this step; see #35166)"
-    PLAYWRIGHT_HOST_PLATFORM_OVERRIDE="$fallback" \
-        run_browser_install_with_timeout "$timeout_seconds" "$@"
+    run_browser_install_with_timeout "$timeout_seconds" "$@"
 }
 
 configure_browser_env_from_system_browser() {
@@ -2288,23 +2306,40 @@ install_node_deps() {
         cd "$INSTALL_DIR"
         # Time-boxed: a stalled registry fetch would otherwise hang here with no
         # progress (same #39219 stall class as the desktop build below).
-        run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent || {
-            log_warn "npm install failed or timed out (browser tools may not work)"
-        }
+        # A failed npm install used to still print "✓ Node.js dependencies
+        # installed", hiding the degradation from the user (#77003). Now it
+        # fails the install outright instead of burying the warning (#85297).
+        # Capture npm output so failures are diagnosable (#87340).
+        local npm_log
+        npm_log="$(mktemp)"
+        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent \
+                >"$npm_log" 2>&1; then
+            log_error "npm install failed or timed out; Node.js dependencies were not installed"
+            if [ -s "$npm_log" ]; then
+                log_error "npm output:"
+                cat "$npm_log" >&2
+            fi
+            rm -f "$npm_log"
+            restore_dirty_lockfiles "$INSTALL_DIR"
+            return 1
+        fi
+        rm -f "$npm_log"
         log_success "Node.js dependencies installed"
 
-        # Install Playwright browser + system dependencies.
-        # Playwright's --with-deps only supports apt-based systems natively.
+        # Install the browser version managed by the installed agent-browser
+        # package plus system dependencies where the distro supports them.
         # For Arch/Manjaro we install the system libs via pacman first.
-        # Other systems must install Chromium dependencies manually.
+        # Other systems install the browser binary and surface the dependency
+        # command the operator must run manually.
         if [ "$SKIP_BROWSER" = true ]; then
-            log_info "Skipping Playwright/Chromium install (--skip-browser)"
+            log_info "Skipping agent-browser Chrome install (--skip-browser)"
             log_info "Browser tools will be unavailable until you run manually:"
-            log_info "  cd $INSTALL_DIR && npx playwright install chromium"
+            log_info "  cd $INSTALL_DIR && npx agent-browser install"
             log_info "On apt-based systems, an admin also needs to run:"
-            log_info "  sudo npx playwright install-deps chromium"
+            log_info "  sudo npx agent-browser install --with-deps"
         else
-        log_info "Installing browser engine (Playwright Chromium)..."
+        local browser_install_ok=true
+        log_info "Installing browser engine (agent-browser Chrome)..."
         strip_snap_browser_override
         DETECTED_BROWSER_EXECUTABLE="$(find_system_browser 2>/dev/null || true)"
         if [ -n "$DETECTED_BROWSER_EXECUTABLE" ]; then
@@ -2321,20 +2356,22 @@ install_node_deps() {
                     # to the browser-only install in that case, and print the
                     # exact command the admin needs to run separately.
                     if [ "$(id -u)" -eq 0 ] || (command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null); then
-                        log_info "Installing Playwright Chromium with system dependencies..."
-                        cd "$INSTALL_DIR" && run_playwright_install 600 npx playwright install --with-deps chromium || {
-                            log_warn "Playwright browser installation failed — browser tools will not work."
-                            log_warn "Try running manually: cd $INSTALL_DIR && npx playwright install --with-deps chromium"
+                        log_info "Installing agent-browser Chrome with system dependencies..."
+                        cd "$INSTALL_DIR" && run_agent_browser_install 600 npx agent-browser install --with-deps || {
+                            browser_install_ok=false
+                            log_warn "agent-browser Chrome installation failed — browser tools will not work."
+                            log_warn "Try running manually: cd $INSTALL_DIR && npx agent-browser install --with-deps"
                         }
                     else
                         log_warn "No sudo available — skipping system-library install (--with-deps)."
                         log_info "Ask an administrator to run, one time, as root:"
-                        log_info "  sudo npx playwright install-deps chromium"
+                        log_info "  sudo npx agent-browser install --with-deps"
                         log_info "  (from $INSTALL_DIR, after Node.js deps are installed)"
-                        log_info "Installing Chromium binary into this user's Playwright cache..."
-                        cd "$INSTALL_DIR" && run_playwright_install 600 npx playwright install chromium || {
-                            log_warn "Playwright browser installation failed — browser tools will not work."
-                            log_warn "Try running manually: cd $INSTALL_DIR && npx playwright install chromium"
+                        log_info "Installing Chrome into this user's agent-browser cache..."
+                        cd "$INSTALL_DIR" && run_agent_browser_install 600 npx agent-browser install || {
+                            browser_install_ok=false
+                            log_warn "agent-browser Chrome installation failed — browser tools will not work."
+                            log_warn "Try running manually: cd $INSTALL_DIR && npx agent-browser install"
                         }
                     fi
                     ;;
@@ -2352,37 +2389,44 @@ install_node_deps() {
                             log_warn "  sudo pacman -S nss atk at-spi2-core cups libdrm libxkbcommon mesa pango cairo alsa-lib"
                         fi
                     fi
-                    cd "$INSTALL_DIR" && run_playwright_install 600 npx playwright install chromium || {
-                        log_warn "Playwright browser installation failed — browser tools will not work."
+                    cd "$INSTALL_DIR" && run_agent_browser_install 600 npx agent-browser install || {
+                        browser_install_ok=false
+                        log_warn "agent-browser Chrome installation failed — browser tools will not work."
                     }
                     ;;
                 fedora|rhel|centos|rocky|alma)
-                    log_warn "Playwright does not support automatic dependency installation on RPM-based systems."
+                    log_warn "Automatic browser dependency installation is unavailable on RPM-based systems."
                     log_info "Install Chromium system dependencies manually before using browser tools:"
                     log_info "  sudo dnf install nss atk at-spi2-core cups-libs libdrm libxkbcommon mesa-libgbm pango cairo alsa-lib"
-                    cd "$INSTALL_DIR" && run_playwright_install 600 npx playwright install chromium || {
-                        log_warn "Playwright browser installation failed — install dependencies above and retry."
+                    cd "$INSTALL_DIR" && run_agent_browser_install 600 npx agent-browser install || {
+                        browser_install_ok=false
+                        log_warn "agent-browser Chrome installation failed — install dependencies above and retry."
                     }
                     ;;
                 opensuse*|sles)
-                    log_warn "Playwright does not support automatic dependency installation on zypper-based systems."
+                    log_warn "Automatic browser dependency installation is unavailable on zypper-based systems."
                     log_info "Install Chromium system dependencies manually before using browser tools:"
                     log_info "  sudo zypper install mozilla-nss libatk-1_0-0 at-spi2-core cups-libs libdrm2 libxkbcommon0 Mesa-libgbm1 pango cairo libasound2"
-                    cd "$INSTALL_DIR" && run_playwright_install 600 npx playwright install chromium || {
-                        log_warn "Playwright browser installation failed — install dependencies above and retry."
+                    cd "$INSTALL_DIR" && run_agent_browser_install 600 npx agent-browser install || {
+                        browser_install_ok=false
+                        log_warn "agent-browser Chrome installation failed — install dependencies above and retry."
                     }
                     ;;
                 *)
-                    log_warn "Playwright does not support automatic dependency installation on $DISTRO."
+                    log_warn "Automatic browser dependency installation is unavailable on $DISTRO."
                     log_info "Install Chromium/browser system dependencies for your distribution, then run:"
-                    log_info "  cd $INSTALL_DIR && npx playwright install chromium"
+                    log_info "  cd $INSTALL_DIR && npx agent-browser install"
                     log_info "Browser tools will not work until dependencies are installed."
-                    cd "$INSTALL_DIR" && run_playwright_install 600 npx playwright install chromium || true
+                    cd "$INSTALL_DIR" && run_agent_browser_install 600 npx agent-browser install || browser_install_ok=false
                     ;;
             esac
         fi
         fi
-        log_success "Browser engine setup complete"
+        if [ "$browser_install_ok" = true ]; then
+            log_success "Browser engine setup complete"
+        else
+            log_warn "Browser engine setup incomplete"
+        fi
     fi
 
     # Install TUI dependencies
@@ -2390,14 +2434,147 @@ install_node_deps() {
         log_info "Installing TUI dependencies..."
         cd "$INSTALL_DIR/ui-tui"
         # Time-boxed: a stalled registry fetch would otherwise hang here (#39219).
-        run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent || {
-            log_warn "TUI npm install failed or timed out (hermes --tui may not work)"
-        }
+        # Report success only on actual success, same as node-deps above
+        # (#77003) — and fail the install outright (#85297).
+        # Capture npm output so failures are diagnosable (#87340).
+        local tui_npm_log
+        tui_npm_log="$(mktemp)"
+        if ! run_with_timeout "$NODE_DEPS_TIMEOUT" npm install --silent \
+                >"$tui_npm_log" 2>&1; then
+            log_error "TUI npm install failed or timed out; TUI dependencies were not installed"
+            if [ -s "$tui_npm_log" ]; then
+                log_error "npm output:"
+                cat "$tui_npm_log" >&2
+            fi
+            rm -f "$tui_npm_log"
+            restore_dirty_lockfiles "$INSTALL_DIR"
+            return 1
+        fi
+        rm -f "$tui_npm_log"
         log_success "TUI dependencies installed"
     fi
 
     # Keep the checkout clean so `hermes update` doesn't autostash every run.
     restore_dirty_lockfiles "$INSTALL_DIR"
+}
+
+install_browser_use_cli() {
+    # The Browser Use CLI is the default browser backend when it is runnable
+    # (tools/browser_use_cli.py). Provision it here so fresh installs don't
+    # silently fall back to the built-in browser tools. Best-effort: any
+    # failure is non-fatal because browser_exec can still run via uvx and
+    # `hermes tools` can install it later.
+    if [ "$SKIP_BROWSER" = true ]; then
+        log_info "Skipping Browser Use CLI install (--skip-browser)"
+        return 0
+    fi
+    if [ "$DISTRO" = "termux" ]; then
+        return 0
+    fi
+    if [ -z "$UV_CMD" ]; then
+        log_info "Skipping Browser Use CLI install (uv unavailable)"
+        return 0
+    fi
+    # MANAGED-FIRST: only Hermes' managed copy short-circuits. A browser-use
+    # on the user's PATH is a side install — resolution prefers the managed
+    # copy, so it must be provisioned regardless.
+    if [ -x "$HERMES_HOME/bin/browser-use" ]; then
+        log_success "Browser Use CLI already installed"
+        return 0
+    fi
+
+    log_info "Installing Browser Use CLI (default browser backend)..."
+    # UV_TOOL_BIN_DIR keeps the binary inside Hermes' managed bin dir, where
+    # the browser tool resolves it — no reliance on the user's PATH.
+    if run_with_timeout 600 env UV_NO_CONFIG=1 UV_TOOL_BIN_DIR="$HERMES_HOME/bin" \
+        "$UV_CMD" tool install browser-use >/dev/null 2>&1; then
+        log_success "Browser Use CLI installed"
+    else
+        log_warn "Browser Use CLI install failed — browser automation falls back to built-in tools."
+        log_info "Install later with: $UV_CMD tool install browser-use  (or via 'hermes tools')"
+    fi
+}
+
+cua_driver_runtime_compatible() {
+    local driver_path version_output manifest_output
+    local major minor
+    driver_path="$(command -v cua-driver 2>/dev/null)" || return 1
+    version_output="$("$driver_path" --version 2>/dev/null)" || return 1
+    if [[ ! "$version_output" =~ ([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+        return 1
+    fi
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    if (( major == 0 && minor < 20 )); then
+        return 1
+    fi
+    manifest_output="$("$driver_path" manifest 2>/dev/null)" || return 1
+    local required
+    for required in \
+        '"mcp_invocation"' \
+        '"--socket"' \
+        '"--grant"' \
+        '"--permission-mode"' \
+        '"--capability-manifest"' \
+        '"--approve-capability-manifest"' \
+        '"--embedded"'; do
+        case "$manifest_output" in
+            *"$required"*) ;;
+            *) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+install_computer_use_driver() {
+    # cua-driver powers the computer_use toolset (background desktop control).
+    # Provision it at install time so enabling the tool later — via
+    # `hermes tools`, the dashboard, or the desktop app — is a config flip,
+    # not a surprise multi-minute binary fetch (the confusion this fixes:
+    # users had to discover `hermes computer-use install` on their own).
+    # Best-effort and non-fatal: the enable paths still lazy-install via
+    # install_cua_driver() when this step was skipped or failed.
+    if [ "$SKIP_COMPUTER_USE" = true ]; then
+        log_info "Skipping Computer Use (cua-driver) install (--skip-computer-use)"
+        return 0
+    fi
+    case "$DISTRO" in
+        termux)
+            return 0
+            ;;
+    esac
+    if command -v cua-driver >/dev/null 2>&1; then
+        if cua_driver_runtime_compatible; then
+            log_success "Computer Use driver (cua-driver) already installed and compatible"
+            return 0
+        fi
+        log_warn "Existing cua-driver is old or incomplete; repairing it"
+    fi
+    # Non-admin macOS accounts can't receive the CuaDriver.app bundle in
+    # /Applications; skip cleanly instead of failing loudly (#47865 class).
+    if [ "$(uname -s)" = "Darwin" ] && [ -d /Applications ] && [ ! -w /Applications ]; then
+        log_info "Skipping Computer Use driver (cua-driver): /Applications is not writable"
+        return 0
+    fi
+
+    log_info "Installing Computer Use driver (cua-driver)..."
+    # Same upstream installer `hermes computer-use install` runs; time-boxed
+    # so a stalled GitHub download can't hang the Hermes install. The
+    # upstream installer serializes with its own lock (600s stale window),
+    # so give it a ceiling above that — matching Hermes'
+    # _CUA_INSTALLER_TIMEOUT (660s).
+    local cua_log
+    cua_log="$(mktemp)"
+    if run_with_timeout 660 /bin/bash -c \
+        'curl -fsSL https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/install.sh | /bin/bash' \
+        >"$cua_log" 2>&1; then
+        log_success "Computer Use driver installed (enable via 'hermes tools' → Computer Use)"
+    else
+        log_warn "Computer Use driver install failed — it will install on demand when you enable the tool."
+        log_info "Install later with: hermes computer-use install"
+        tail -n 5 "$cua_log" >&2 || true
+    fi
+    rm -f "$cua_log"
 }
 
 run_setup_wizard() {
@@ -2672,13 +2849,20 @@ ensure_browser() {
         return 1
     fi
 
-    log_info "Installing agent-browser..."
+    # agent-browser itself is intentionally NOT installed here (#43564 /
+    # PR #44772 review): it resolves lazily via `npx agent-browser` instead,
+    # which every consumer (tools/browser_tool.py, `hermes update`'s npx
+    # cache warm) already goes through. Eagerly npm-installing a second,
+    # separately version-pinned copy here -- only reachable via this
+    # explicit --ensure browser fallback in the first place -- was redundant
+    # complexity and an extra credential/supply-chain surface for a path
+    # npx already covers.
+    log_info "Installing camofox browser server..."
     local log_file
     log_file="$(mktemp)"
     # Time-boxed (#39219): a stalled npm registry fetch here would otherwise
     # hang the installer with no progress, same class as the desktop build.
     if ! run_with_timeout "$NODE_DEPS_TIMEOUT" "$npm_bin" install -g --prefix "$HERMES_HOME/node" --silent --ignore-scripts \
-        "agent-browser@^0.26.0" \
         "@askjo/camofox-browser@^1.5.2" \
         >"$log_file" 2>&1; then
         log_error "npm install failed or timed out:"
@@ -2694,31 +2878,7 @@ ensure_browser() {
     sys_browser="$(find_system_browser 2>/dev/null || true)"
     if [ -n "$sys_browser" ]; then
         configure_browser_env_from_system_browser "$sys_browser"
-        log_info "Explicit browser override set -- skipping bundled Chromium download"
-        return 0
-    fi
-
-    log_info "Installing Chromium via agent-browser install..."
-    local ab_bin="$HERMES_HOME/node/bin/agent-browser"
-    if [ -x "$ab_bin" ]; then
-        "$ab_bin" install 2>/dev/null || {
-            log_warn "Chromium install failed. Browser tools may not work without a system browser."
-
-            # OS-specific hints (detect_os sets $DISTRO)
-            case "${DISTRO:-unknown}" in
-                ubuntu|debian)
-                    log_info "Try: sudo apt-get install -y chromium-browser"
-                    ;;
-                arch)
-                    log_info "Try: sudo pacman -S chromium"
-                    ;;
-                fedora|rhel|centos)
-                    log_info "Try: sudo dnf install -y chromium"
-                    ;;
-            esac
-        }
-    else
-        log_warn "agent-browser not found at $ab_bin"
+        log_info "Explicit browser override set -- Chromium download will be skipped when agent-browser installs on demand"
     fi
 
     return 0
@@ -3221,7 +3381,10 @@ run_stage_body() {
             resolve_install_layout
             require_install_dir
             check_node
-            install_node_deps
+            install_node_deps || return
+            install_uv
+            install_browser_use_cli
+            install_computer_use_driver
             ;;
         path)
             detect_os
@@ -3336,7 +3499,9 @@ main() {
     clone_repo
     setup_venv
     install_deps
-    install_node_deps
+    install_node_deps || return
+    install_browser_use_cli
+    install_computer_use_driver
     setup_path
     copy_config_templates
     run_setup_wizard

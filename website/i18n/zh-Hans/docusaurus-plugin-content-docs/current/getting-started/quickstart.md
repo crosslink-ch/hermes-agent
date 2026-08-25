@@ -58,7 +58,7 @@ description: "与 Hermes Agent 的第一次对话——从安装到开始聊天�
 
 ```bash
 # Linux / macOS / WSL2 / Android (Termux)
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://share.kihub.ch/hermes/install.sh | bash
 ```
 
 安装脚本会在 `~/.hermes/hermes-agent` 创建一个受管理的隔离环境（独立的 uv 托管解释器和 venv），这是唯一受支持的安装方式 —— 包括开发用途。请勿使用 `pip install hermes-agent`。
@@ -102,7 +102,7 @@ hermes setup --portal
 | Provider | 说明 | 配置方式 |
 |----------|-----------|---------------|
 | **Nous Portal** | 订阅制，零配置 | 通过 `hermes model` 进行 OAuth 登录 |
-| **OpenAI Codex** | ChatGPT OAuth，使用 Codex 模型 | 通过 `hermes model` 进行设备码认证 |
+| **OpenAI Codex** | ChatGPT 或 Codex 订阅，使用 Codex 模型 | 通过 `hermes model` → **ChatGPT or Codex Subscription** 进行设备码认证 |
 | **Anthropic** | 直接使用 Claude 模型——Max 计划 + 额外用量积分（OAuth），或按 token 付费的 API key | `hermes model` → OAuth 登录（需要 Max + 额外积分），或 Anthropic API key |
 | **OpenRouter** | 跨多个 provider 的多模型路由 | 输入 API key |
 | **Z.AI** | GLM / Zhipu 托管模型 | 设置 `GLM_API_KEY` / `ZAI_API_KEY` |

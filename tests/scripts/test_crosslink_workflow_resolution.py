@@ -1,3 +1,5 @@
+import json
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -20,10 +22,89 @@ def _step(job: dict, name: str) -> dict:
 
 
 def test_ci_timing_report_never_receives_the_privileged_autofix_pat():
-    workflow = _load_yaml(".github/workflows/ci.yml")
-    collect = _step(workflow["jobs"]["ci-timings"], "Collect timings and generate report")
+    # Upstream split the old monolithic ci.yml and removed its timing job.
+    # Keep the security invariant architecture-independent: if any timing job
+    # exists in any workflow, it must not receive the privileged autofix PAT.
+    timing_jobs = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job_id, job in (workflow.get("jobs") or {}).items():
+            name = str(job.get("name") or "") if isinstance(job, dict) else ""
+            if "timing" in f"{job_id} {name}".lower():
+                timing_jobs.append((path.name, job_id, job))
 
-    assert collect["env"]["GITHUB_TOKEN"] == "${{ github.token }}"
+    for path_name, job_id, job in timing_jobs:
+        assert "AUTOFIX_BOT_PAT" not in str(job), (path_name, job_id)
+
+
+def test_workflows_do_not_reference_unprovisioned_larger_runner_labels():
+    forbidden = {
+        "ubuntu-latest-32-core",
+        "ubuntu-latest-32-arm-core",
+        "ubuntu-latest-96-core",
+        "windows-latest-32-core",
+    }
+    offenders = []
+    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        text = path.read_text(encoding="utf-8")
+        for label in forbidden:
+            if label in text:
+                offenders.append((path.name, label))
+
+    assert offenders == []
+
+
+def test_release_tag_picker_accepts_crosslink_release_tags(tmp_path):
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Test"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "--allow-empty", "-q", "-m", "init"],
+        check=True,
+    )
+    for tag in (
+        "crosslink-v2026.5.14",
+        "crosslink-v2026.7.1",
+        "crosslink-v2026.8.11",
+        "backup/not-a-release",
+    ):
+        subprocess.run(["git", "-C", str(repo), "tag", tag], check=True)
+
+    result = subprocess.run(
+        [
+            str(ROOT / "scripts/sandbox/pick-release-tags.sh"),
+            "--repo",
+            str(repo),
+            "--count",
+            "2",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert json.loads(result.stdout) == [
+        "crosslink-v2026.5.14",
+        "crosslink-v2026.8.11",
+    ]
+
+    workflow = (ROOT / ".github/workflows/install-e2e.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "crosslink-v[0-9]+.[0-9]+.[0-9]+" in workflow
+
+    harness = (ROOT / "tests/install/install-update-e2e.sh").read_text(
+        encoding="utf-8"
+    )
+    assert '[[ "$script" == *"$flag"* ]]' in harness
+    assert "installer_supports HEAD --migrate-legacy-origin" in harness
+    assert "installer_flags+=(--migrate-legacy-origin)" in harness
 
 
 def test_js_autofix_restores_app_auth_with_crosslink_pat_fallback():

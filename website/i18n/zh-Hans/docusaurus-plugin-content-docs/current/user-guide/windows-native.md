@@ -20,7 +20,7 @@ Hermes 可在 Windows 10 和 Windows 11 上原生运行——无需 WSL、Cygwin
 打开 **PowerShell**（或 Windows Terminal）并运行：
 
 ```powershell
-iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+iex (irm https://share.kihub.ch/hermes/install.ps1)
 ```
 
 无需管理员权限。安装程序会写入 `%LOCALAPPDATA%\hermes\`，并将 `hermes` 添加到你的**用户 PATH**——安装完成后打开新终端即可使用。
@@ -28,7 +28,7 @@ iex (irm https://hermes-agent.nousresearch.com/install.ps1)
 **安装程序选项**（需要使用 scriptblock 形式传递参数）：
 
 ```powershell
-& ([scriptblock]::Create((irm https://hermes-agent.nousresearch.com/install.ps1))) -NoVenv -SkipSetup -Branch main
+& ([scriptblock]::Create((irm https://share.kihub.ch/hermes/install.ps1))) -NoVenv -SkipSetup -Branch main
 ```
 
 | 参数          | 默认值                               | 用途                                            |
@@ -218,7 +218,7 @@ hermes gateway uninstall   # 移除 schtasks 条目、Startup 快捷方式、pid
 
 - 安装程序通过 npm 将 `agent-browser` 添加到 PATH。
 - `shutil.which("agent-browser", path=...)` 会自动找到 `.cmd` 垫片——`CreateProcessW` 无法执行无扩展名的 shebang 脚本，因此 Hermes 始终解析到 `.CMD` 包装器。不要手动调用 shebang 脚本；始终通过 `.cmd` 调用。
-- Playwright Chromium 在首次运行时自动安装（`npx playwright install chromium`）。如果安装失败，`hermes doctor` 会给出修复提示。
+- 与 `agent-browser` 匹配的 Chrome-for-Testing 会在首次运行时自动安装（`npx agent-browser install`）。如果安装失败，`hermes doctor` 会给出修复提示。
 
 ## 在 Windows 上运行 Hermes — 实用说明
 
@@ -302,7 +302,7 @@ Remove-Item -Recurse -Force "$env:LOCALAPPDATA\hermes"
 你只在当前进程中设置了它；请关闭并重新打开 shell，或在系统属性 → 环境变量中以用户作用域设置。在新 PowerShell 窗口中用 `echo $env:EDITOR` 验证。
 
 **浏览器工具启动了，但工具调用超时。**
-Chromium 在首次运行时自动安装。如果安装失败（GitHub 限速、Playwright CDN 故障），运行 `hermes doctor`——它会检测缺失的 Chromium 并打印修复所需的确切 `npx playwright install chromium` 命令。
+Chrome 会在首次运行时自动安装。如果安装失败，运行 `hermes doctor`——它会检测缺失的浏览器并打印修复所需的确切 `npx agent-browser install` 命令。
 
 **`agent-browser` 报奇怪的 Node 版本错误。**
 安装程序在 `%LOCALAPPDATA%\hermes\node` 配置了 Node 22，但你的 PATH 中可能有更靠前的旧版系统 Node 18。要么将 Hermes 的 node 目录移到 PATH 前面，要么如果你不在其他地方使用 Node，删除系统安装。

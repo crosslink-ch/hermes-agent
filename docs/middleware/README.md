@@ -237,8 +237,9 @@ before authorization. The unrelated `search_files.target` field remains its
 `content`/`files` operation selector.
 
 Plugin-specific examples should live with the plugin that owns the behavior.
-For NeMo Relay adaptive execution middleware, see
-[`plugins/observability/nemo_relay/README.md`](../../plugins/observability/nemo_relay/README.md).
+NeMo Relay execution middleware is installed through an explicitly selected
+Relay `plugins.toml`; see
+[Relay shared metrics](../observability/relay-shared-metrics.md).
 
 ## Safety Notes
 

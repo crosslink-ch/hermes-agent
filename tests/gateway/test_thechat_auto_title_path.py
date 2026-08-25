@@ -36,6 +36,16 @@ class _ImmediateAgent:
         task_id=None,
         **_kwargs,
     ):
+        # The real AIAgent fires title generation from its turn prologue. Keep
+        # this lightweight double faithful to that architecture so the test
+        # exercises the callback attached by TurnRunner before the run.
+        title_generator.maybe_auto_title(
+            None,
+            self.session_id,
+            user_message,
+            conversation_history,
+            title_callback=getattr(self, "_on_session_title", None),
+        )
         return {
             "final_response": "The title path completed.",
             "messages": [],

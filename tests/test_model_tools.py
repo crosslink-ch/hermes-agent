@@ -182,8 +182,11 @@ class TestHandleFunctionCall:
             "hermes_cli.plugins.get_plugin_manager", lambda: manager,
         )
         monkeypatch.setattr(
-            "hermes_cli.plugins.resolve_pre_tool_block",
-            lambda _name, args, **_kwargs: policy_checked.append(dict(args)) or None,
+            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+            lambda _name, args, **_kwargs: (
+                policy_checked.append(dict(args)),
+                None,
+            ),
         )
         monkeypatch.setattr(
             "acp_adapter.edit_approval.maybe_require_edit_approval",
@@ -230,8 +233,11 @@ class TestHandleFunctionCall:
             "hermes_cli.plugins.get_plugin_manager", lambda: manager,
         )
         monkeypatch.setattr(
-            "hermes_cli.plugins.resolve_pre_tool_block",
-            lambda _name, args, **_kwargs: policy_checked.append(dict(args)) or None,
+            "hermes_cli.plugins._dispatch_pre_tool_call_hooks",
+            lambda _name, args, **_kwargs: (
+                policy_checked.append(dict(args)),
+                None,
+            ),
         )
         monkeypatch.setattr(
             "acp_adapter.edit_approval.maybe_require_edit_approval",

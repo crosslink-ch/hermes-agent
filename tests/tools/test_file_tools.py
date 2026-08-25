@@ -8,6 +8,8 @@ import json
 import logging
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from tools.file_tools import (
     PATCH_SCHEMA,
 )
@@ -310,8 +312,11 @@ class TestSearchHandler:
 class TestWindowsMsysPathResolution:
     """File tools must translate Git Bash drive paths before Path resolution."""
 
+    @pytest.mark.windows_only
     def test_absolute_msys_path_normalized_before_windows_resolve(self, monkeypatch):
-        import tools.environments.local as local_mod
+        """Windows-only: ``_resolve_path_for_task`` hands the translated path
+        to ``ntpath``/``Path``, and only a real Windows ``Path`` renders
+        ``C:\\Users\\...`` — faking ``sys.platform`` left PosixPath in place."""
         import tools.file_tools as file_tools
 
         monkeypatch.setattr(file_tools.sys, "platform", "win32")
@@ -322,9 +327,13 @@ class TestWindowsMsysPathResolution:
         assert str(resolved) == r"C:\Users\Mark\project\app.py"
 
 
+    @pytest.mark.windows_only
     def test_container_paths_skip_msys_translation(self, monkeypatch):
-        """WSL/docker Linux paths must not be rewritten as Windows drives."""
-        import tools.environments.local as local_mod
+        """WSL/docker Linux paths must not be rewritten as Windows drives.
+
+        Windows-only: the translation this guards against only happens when
+        the host really is Windows, so the negative is only meaningful there.
+        """
         import tools.file_tools as file_tools
 
         monkeypatch.setattr(file_tools.sys, "platform", "win32")
@@ -501,6 +510,7 @@ class TestPatchSchemaShape:
         for name in ("path", "old_string", "new_string"):
             assert "REQUIRED when mode='replace'" in props[name]["description"]
         assert "REQUIRED when mode='patch'" in props["patch"]["description"]
+        assert "must differ from old_string" in props["new_string"]["description"]
 
     def test_no_anyof_required_stays_mode_only(self):
         # anyOf/oneOf at parameters level break Anthropic, Fireworks, and the

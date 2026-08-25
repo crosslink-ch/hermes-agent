@@ -50,6 +50,15 @@ def _completions(completer: SlashCommandCompleter, text: str):
 class TestCommandRegistry:
 
 
+    def test_save_command_supports_formats(self):
+        cmd = resolve_command("save")
+        assert cmd is not None
+        assert cmd.name == "save"
+        # /save is a cross-platform session export: json (default), md, html
+        assert not cmd.cli_only
+        for token in ("json", "md", "html"):
+            assert token in (cmd.args_hint or "")
+
     def test_no_duplicate_canonical_names(self):
         names = [cmd.name for cmd in COMMAND_REGISTRY]
         assert len(names) == len(set(names)), f"Duplicate names: {[n for n in names if names.count(n) > 1]}"
@@ -796,8 +805,8 @@ class TestTheChatMenuCommands:
         assert queue["argsHint"] == "<prompt>"
         assert queue["aliases"] == ["q"]
 
-        # No-arg commands omit optional fields rather than sending nulls.
-        assert "argsHint" not in by_name["help"]
+        # Help now accepts an optional skill/filter query.
+        assert by_name["help"]["argsHint"] == "[skills|<filter>]"
 
     def test_priority_commands_lead_the_menu(self):
         menu, _hidden = thechat_menu_commands()
