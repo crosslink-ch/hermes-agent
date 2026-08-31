@@ -10,6 +10,7 @@ interrupting. The gateway runner must:
   3. When no agent is active → strip the slash prefix and let the normal
      prompt pipeline handle it as a regular user message.
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -33,12 +34,20 @@ def _make_source() -> SessionSource:
     )
 
 
-def _make_event(text: str, channel_context: str | None = None) -> MessageEvent:
+def _make_event(
+    text: str,
+    channel_context: str | None = None,
+    *,
+    media_urls: list[str] | None = None,
+    media_types: list[str] | None = None,
+) -> MessageEvent:
     return MessageEvent(
         text=text,
         source=_make_source(),
         message_id="m1",
         channel_context=channel_context,
+        media_urls=list(media_urls or []),
+        media_types=list(media_types or []),
     )
 
 
@@ -117,6 +126,74 @@ async def test_steer_calls_agent_steer_and_does_not_interrupt():
 
 
 @pytest.mark.asyncio
+async def test_steer_includes_attached_media_paths_in_injected_text():
+    """Explicit /steer attachments must reach the agent with the caption."""
+    runner, adapter = _make_runner(_session_entry())
+    sk = build_session_key(_make_source())
+
+    running_agent = MagicMock()
+    running_agent.steer.return_value = True
+    runner._running_agents[sk] = running_agent
+
+    result = await runner._handle_message(
+        _make_event(
+            "/steer review the current contract",
+            media_urls=["/tmp/contract-page.jpg", "/tmp/contract.pdf"],
+            media_types=["image/jpeg", "application/pdf"],
+        )
+    )
+
+    assert result is not None
+    running_agent.steer.assert_called_once_with(
+        "review the current contract\n\n"
+        "[User sent an image: /tmp/contract-page.jpg]\n"
+        "[User sent a file: /tmp/contract.pdf]"
+    )
+    assert adapter._pending_messages == {}
+
+
+@pytest.mark.asyncio
+async def test_steer_accepts_attachment_without_prompt_text():
+    runner, adapter = _make_runner(_session_entry())
+    sk = build_session_key(_make_source())
+
+    running_agent = MagicMock()
+    running_agent.steer.return_value = True
+    runner._running_agents[sk] = running_agent
+
+    result = await runner._handle_message(
+        _make_event(
+            "/steer",
+            media_urls=["/tmp/contract.pdf"],
+            media_types=["application/pdf"],
+        )
+    )
+
+    assert result is not None
+    assert "usage" not in result.lower()
+    running_agent.steer.assert_called_once_with("[User sent a file: /tmp/contract.pdf]")
+    assert adapter._pending_messages == {}
+
+
+@pytest.mark.asyncio
+async def test_steer_attachment_without_active_agent_becomes_normal_turn():
+    runner, _adapter = _make_runner(_session_entry())
+    runner._handle_message_with_agent = AsyncMock(return_value="processed")
+    event = _make_event(
+        "/steer",
+        media_urls=["/tmp/contract.pdf"],
+        media_types=["application/pdf"],
+    )
+
+    result = await runner._handle_message(event)
+
+    assert result == "processed"
+    assert event.text == ""
+    assert event.media_urls == ["/tmp/contract.pdf"]
+    runner._handle_message_with_agent.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_steer_agent_without_steer_method_falls_back():
     """If the running agent somehow lacks the steer() method (older build,
     test stub), the handler must not explode — fall back to /queue."""
@@ -129,7 +206,10 @@ async def test_steer_agent_without_steer_method_falls_back():
     runner._running_agents[sk] = running_agent
 
     result = await runner._handle_message(
-        _make_event("/steer fallback", channel_context="[Thread context]\nAlice: earlier request")
+        _make_event(
+            "/steer fallback",
+            channel_context="[Thread context]\nAlice: earlier request",
+        )
     )
 
     assert result is not None
@@ -141,6 +221,27 @@ async def test_steer_agent_without_steer_method_falls_back():
         adapter._pending_messages[sk].channel_context
         == "[Thread context]\nAlice: earlier request"
     )
+
+
+@pytest.mark.asyncio
+async def test_steer_fallback_queue_preserves_attachments():
+    runner, adapter = _make_runner(_session_entry())
+    sk = build_session_key(_make_source())
+    runner._running_agents[sk] = MagicMock(spec=[])
+
+    result = await runner._handle_message(
+        _make_event(
+            "/steer fallback",
+            media_urls=["/tmp/contract.pdf"],
+            media_types=["application/pdf"],
+        )
+    )
+
+    assert result is not None
+    queued = adapter._pending_messages[sk]
+    assert queued.text == "fallback"
+    assert queued.media_urls == ["/tmp/contract.pdf"]
+    assert queued.media_types == ["application/pdf"]
 
 
 if __name__ == "__main__":  # pragma: no cover

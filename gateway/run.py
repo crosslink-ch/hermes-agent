@@ -17124,22 +17124,30 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # iterations inside the same agent run, by appending to the
         # last tool result's content. No interrupt, no new user turn,
         # no role-alternation violation.
-        steer_text = event.get_command_args().strip()
-        if not steer_text:
+        steer_prompt = event.get_command_args().strip()
+        has_media = bool(event.media_urls)
+        # A running agent can only be steered with text. Surface cached media
+        # paths using the same placeholders as a normal inbound turn so the
+        # agent can inspect every attachment instead of silently losing them.
+        media_context = _build_media_placeholder(event)
+        if not steer_prompt and not media_context:
             return "Usage: /steer <prompt>"
+        steer_text = "\n\n".join(
+            part for part in (steer_prompt, media_context) if part
+        )
+        preview_text = steer_prompt or f"{len(event.media_urls)} attachment(s)"
         _steer_state = self._peek_session_state(quick_key)
         running_agent = _steer_state.turn.agent if _steer_state else None
         if running_agent is _AGENT_PENDING_SENTINEL:
             # Agent hasn't started yet — queue as turn-boundary fallback.
             adapter = self._adapter_for_source(source)
             if adapter:
-                queued_event = MessageEvent(
-                    text=steer_text,
-                    message_type=MessageType.TEXT,
-                    source=event.source,
-                    message_id=event.message_id,
-                    channel_prompt=event.channel_prompt,
-                    channel_context=event.channel_context,
+                queued_event = dataclasses.replace(
+                    event,
+                    text=steer_prompt,
+                    message_type=(
+                        event.message_type if has_media else MessageType.TEXT
+                    ),
                 )
                 self._enqueue_fifo(quick_key, queued_event, adapter)
             return "Agent still starting — /steer queued for the next turn."
@@ -17150,19 +17158,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.warning("Steer failed for session %s: %s", quick_key, exc)
                 return f"⚠️ Steer failed: {exc}"
             if accepted:
-                preview = steer_text[:60] + ("..." if len(steer_text) > 60 else "")
+                preview = preview_text[:60] + ("..." if len(preview_text) > 60 else "")
                 return f"⏩ Steer queued — arrives after the next tool call: '{preview}'"
             return "Steer rejected (empty payload)."
         # Running agent is missing or lacks steer() — fall back to queue.
         adapter = self._adapter_for_source(source)
         if adapter:
-            queued_event = MessageEvent(
-                text=steer_text,
-                message_type=MessageType.TEXT,
-                source=event.source,
-                message_id=event.message_id,
-                channel_prompt=event.channel_prompt,
-                channel_context=event.channel_context,
+            queued_event = dataclasses.replace(
+                event,
+                text=steer_prompt,
+                message_type=(
+                    event.message_type if has_media else MessageType.TEXT
+                ),
             )
             self._enqueue_fifo(quick_key, queued_event, adapter)
         return "No active agent — /steer queued for the next turn."
@@ -18400,9 +18407,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if canonical == "steer":
             # No active agent — /steer has no tool call to inject into.
             # Strip the prefix so downstream treats it as a normal user
-            # message. If the payload is empty, surface the usage hint.
+            # message. If both payload and attachments are empty, surface the
+            # usage hint.
             steer_payload = event.get_command_args().strip()
-            if not steer_payload:
+            if not steer_payload and not event.media_urls:
                 return "Usage: /steer <prompt>  (no agent is running; sending as a normal message)"
             try:
                 event.text = steer_payload
