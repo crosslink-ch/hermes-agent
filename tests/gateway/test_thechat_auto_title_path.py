@@ -124,7 +124,8 @@ def _configure_runtime(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     monkeypatch.setattr(gateway_run, "_env_path", tmp_path / ".env")
-    monkeypatch.setattr(gateway_run, "load_dotenv", lambda *args, **kwargs: None)
+    import dotenv
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: None)
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
     monkeypatch.setattr(
         gateway_run,

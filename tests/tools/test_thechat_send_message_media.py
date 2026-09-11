@@ -114,3 +114,27 @@ async def test_proactive_thechat_audio_sends_body_then_attachment():
         ("voice", CONVERSATION_ID, "/safe/sample.wav", None, None),
         ("disconnect",),
     ]
+
+
+@pytest.mark.asyncio
+async def test_proactive_media_never_borrows_default_profile_bot(monkeypatch):
+    primary = _FakeTheChatAdapter(None)
+    secondary = _FakeTheChatAdapter(None)
+    selected = []
+
+    def resolve(platform, profile):
+        selected.append((platform, profile))
+        return secondary if profile == "secondary" else primary
+
+    runner = SimpleNamespace(adapters={Platform.THECHAT: primary}, _authorization_adapter=resolve)
+    monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: runner)
+    monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name", lambda: "secondary")
+    result = await _send_to_platform(
+        Platform.THECHAT,
+        SimpleNamespace(token="secondary-token", extra={"base_url": "https://thechat.test"}),
+        CONVERSATION_ID, "", media_files=[("/safe/report.pdf", False)],
+    )
+    assert result["success"] is True
+    assert selected == [(Platform.THECHAT, "secondary")]
+    assert primary.calls == []
+    assert secondary.calls == [("document", CONVERSATION_ID, "/safe/report.pdf", None, None)]

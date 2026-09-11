@@ -17,7 +17,8 @@ import pytest
 from gateway.config import PlatformConfig
 from gateway.platforms import base as platform_base
 from gateway.platforms import thechat
-from gateway.platforms.base import MessageEvent, MessageType, SendResult
+from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms.base import SendResult
 from gateway.platforms.thechat import TheChatAdapter
 
 

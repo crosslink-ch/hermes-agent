@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, MessageType
+from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.thechat import TheChatAdapter
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource

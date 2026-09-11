@@ -11,7 +11,8 @@ import pytest
 from gateway.config import Platform, PlatformConfig, load_gateway_config
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource, build_session_key
-from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
+from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms.base import ProcessingOutcome
 from gateway.platforms import thechat
 from gateway.platforms.thechat import TheChatAdapter
 
@@ -1460,7 +1461,8 @@ def test_webhook_authorization_rejects_missing_or_stale_signatures():
 async def test_direct_approval_resolves_exact_waiter_without_message_dispatch(
     tmp_path, monkeypatch
 ):
-    from tools.approval import _ApprovalEntry, _gateway_queues
+    from tools.approval_gateway_wait import _ApprovalEntry
+    from tools.approval import _gateway_queues
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     adapter = _make_adapter()
@@ -1516,7 +1518,8 @@ async def test_direct_approval_resolves_exact_waiter_without_message_dispatch(
 
 @pytest.mark.asyncio
 async def test_direct_approval_cannot_jump_fifo_head(tmp_path, monkeypatch):
-    from tools.approval import _ApprovalEntry, _gateway_queues
+    from tools.approval_gateway_wait import _ApprovalEntry
+    from tools.approval import _gateway_queues
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     adapter = _make_adapter()
@@ -1555,7 +1558,8 @@ async def test_direct_approval_cannot_jump_fifo_head(tmp_path, monkeypatch):
 async def test_direct_webhook_acks_before_blocked_resolution_publication(
     tmp_path, monkeypatch
 ):
-    from tools.approval import _ApprovalEntry, _gateway_queues
+    from tools.approval_gateway_wait import _ApprovalEntry
+    from tools.approval import _gateway_queues
 
     class _BlockingResolutionClient(_FakeClient):
         def __init__(self):
@@ -1620,7 +1624,8 @@ async def test_direct_webhook_acks_before_blocked_resolution_publication(
 async def test_direct_webhook_acks_when_ledger_completion_needs_retry(
     tmp_path, monkeypatch
 ):
-    from tools.approval import _ApprovalEntry, _gateway_queues
+    from tools.approval_gateway_wait import _ApprovalEntry
+    from tools.approval import _gateway_queues
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     adapter = _make_adapter()
@@ -1824,7 +1829,8 @@ async def test_typed_clarify_winner_rejects_late_direct_callback_and_clears_card
 async def test_direct_interaction_rejects_cross_context_resolution(
     tmp_path, monkeypatch, mutation
 ):
-    from tools.approval import _ApprovalEntry, _gateway_queues
+    from tools.approval_gateway_wait import _ApprovalEntry
+    from tools.approval import _gateway_queues
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     adapter = _make_adapter()
@@ -1860,7 +1866,8 @@ async def test_direct_interaction_rejects_cross_context_resolution(
 async def test_direct_interaction_returns_stale_when_waiter_is_gone(
     tmp_path, monkeypatch
 ):
-    from tools.approval import _ApprovalEntry, _gateway_queues
+    from tools.approval_gateway_wait import _ApprovalEntry
+    from tools.approval import _gateway_queues
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     adapter = _make_adapter()
@@ -1947,7 +1954,8 @@ async def test_direct_interaction_auth_and_malformed_statuses(tmp_path, monkeypa
 async def test_direct_interaction_duplicate_and_conflicting_reuse(
     tmp_path, monkeypatch
 ):
-    from tools.approval import _ApprovalEntry, _gateway_queues
+    from tools.approval_gateway_wait import _ApprovalEntry
+    from tools.approval import _gateway_queues
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     adapter = _make_adapter()

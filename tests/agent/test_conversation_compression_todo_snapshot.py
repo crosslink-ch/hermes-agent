@@ -1,8 +1,7 @@
 from agent.agent_runtime_helpers import repair_message_sequence
 from agent.context_compressor import COMPRESSION_CONTINUATION_USER_CONTENT
+from agent.compression_todo import _TODO_INTERNAL_NOTE_PREFIX, _inject_todo_snapshot_internal_note
 from agent.conversation_compression import (
-    _TODO_INTERNAL_NOTE_PREFIX,
-    _inject_todo_snapshot_internal_note,
     _is_real_user_message,
     _strip_stale_todo_snapshot,
 )
@@ -155,3 +154,46 @@ def test_multimodal_user_tail_drops_stale_snapshot_part_without_losing_content()
     ]
     assert TODO_INJECTION_HEADER not in str(messages[-1]["content"])
     assert messages[-2]["_todo_snapshot_internal"] is True
+
+
+def test_refresh_keeps_tool_pairs_and_drops_stale_wire_sidecars():
+    tool_call = {"id": "call-1", "type": "function", "function": {"name": "todo", "arguments": "{}"}}
+    messages = [
+        {"role": "system", "content": "unchanged cache prefix"},
+        {"role": "user", "content": "start"},
+        {"role": "assistant", "content": f"{_TODO_INTERNAL_NOTE_PREFIX}\n{SNAPSHOT}",
+         "tool_calls": [tool_call], "api_content": "old assistant wire copy", "_todo_snapshot_internal": True},
+        {"role": "tool", "tool_call_id": "call-1", "content": "saved"},
+        {"role": "user", "content": [{"type": "text", "text": "new request"},
+                                      {"type": "text", "text": SNAPSHOT}],
+         "api_content": "old user wire copy"},
+    ]
+    _inject_todo_snapshot_internal_note(messages, SNAPSHOT)
+    assert messages[0] == {"role": "system", "content": "unchanged cache prefix"}
+    assert messages[2]["tool_calls"] == [tool_call]
+    assert messages[3]["tool_call_id"] == "call-1"
+    assert messages[-1]["content"] == [{"type": "text", "text": "new request"}]
+    assert "api_content" not in messages[2] and "api_content" not in messages[-1]
+    assert sum(_TODO_INTERNAL_NOTE_PREFIX in str(m.get("content")) for m in messages) == 1
+    assert repair_message_sequence(None, messages) == 0
+
+
+def test_unhydrated_snapshot_is_preserved_once_then_completed_authoritatively():
+    from types import SimpleNamespace
+    from agent.compression_todo import fold_todo_snapshot
+    messages = [{"role": "user", "content": [
+        {"type": "text", "text": SNAPSHOT},
+        {"type": "text", "text": "new unrelated request"},
+    ]}]
+    store = SimpleNamespace(format_for_injection=lambda: "", has_items=lambda: False)
+    agent = SimpleNamespace(_todo_store=store)
+    fold_todo_snapshot(agent, messages)
+    note = messages[-2]
+    assert note["role"] == "assistant"
+    assert SNAPSHOT in note["content"] and "new unrelated request" not in note["content"]
+    assert messages[-1]["content"] == [{"type": "text", "text": "new unrelated request"}]
+    fold_todo_snapshot(agent, messages)
+    assert sum(_TODO_INTERNAL_NOTE_PREFIX in str(m.get("content")) for m in messages) == 1
+    store.has_items = lambda: True
+    fold_todo_snapshot(agent, messages)
+    assert messages == [{"role": "user", "content": [{"type": "text", "text": "new unrelated request"}]}]

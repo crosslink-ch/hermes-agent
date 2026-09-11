@@ -74,6 +74,14 @@ mapfile -t tags < <(
     | sort -V
 )
 
+# A downstream merge contains upstream tags too. Do not sample another
+# distribution just because its unprefixed tag sorts after crosslink-v.
+crosslink_tags=()
+for tag in "${tags[@]}"; do
+  [[ "$tag" == crosslink-v* ]] && crosslink_tags+=("$tag")
+done
+if [ "${#crosslink_tags[@]}" -gt 0 ]; then tags=("${crosslink_tags[@]}"); fi
+
 total="${#tags[@]}"
 if [ "$total" -eq 0 ]; then
   echo "error: no release tags found in $REPO" >&2

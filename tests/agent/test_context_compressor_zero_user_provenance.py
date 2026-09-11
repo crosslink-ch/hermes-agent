@@ -16,13 +16,13 @@ from agent.context_compressor import (
     ContextCompressor,
     _NO_USER_TASK_SENTINEL,
 )
+from agent.compression_todo import _TODO_INTERNAL_NOTE_PREFIX
 from agent.conversation_compression import (
-    _TODO_INTERNAL_NOTE_PREFIX,
     _ensure_compressed_has_user_turn,
     compress_context,
 )
 from hermes_state import SessionDB
-from tools.process_registry import format_process_notification
+from tools.process_registry_notifications import format_process_notification
 from tools.todo_tool import TODO_INJECTION_HEADER
 
 

@@ -138,7 +138,7 @@ jobs:
     needs: generate-patch
     # Skip entirely when generate-patch found no fixes — saves a runner,
     # avoids a redundant checkout/download, and keeps the job graph honest.
-    if: needs.generate-patch.outputs.has-fixes == 'true'
+    if: needs.generate-patch.outputs.has-fixes == 'true' && github.ref == 'refs/heads/main' && github.ref_protected == true && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: trusted-automation

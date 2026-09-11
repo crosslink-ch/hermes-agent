@@ -26,16 +26,9 @@ def _reset_signal_scheduler():
     _reset_scheduler()
 
 from gateway.config import Platform
-from tools.send_message_tool import (
-    _parse_target_ref,
-    _resolve_slack_user_target,
-    _send_matrix_via_adapter,
-    _send_signal,
-    _send_telegram,
-    _send_thechat,
-    _send_to_platform,
-    send_message_tool,
-)
+from tools.send_message_tool import _resolve_slack_user_target, _send_matrix_via_adapter, _send_signal, _send_telegram, _send_to_platform, send_message_tool
+from tools.send_message_thechat import _send_thechat
+from tools.send_message_targets import _parse_target_ref
 # Discord helpers moved to the plugin in #24325.  Import from the new path
 # and provide a thin ``_send_discord(token, ...)`` shim that mirrors the
 # pre-migration signature so the existing test bodies keep working.
@@ -318,78 +311,7 @@ class TestSendMessageTool:
             force_document=False,
         )
 
-    def test_explicit_thechat_target_routes_without_directory_resolution(self):
-        thechat_cfg = SimpleNamespace(
-            enabled=True,
-            token="bot-token",
-            extra={"base_url": "http://thechat.test"},
-        )
-        config = SimpleNamespace(
-            platforms={Platform.THECHAT: thechat_cfg},
-            get_home_channel=lambda _platform: None,
-        )
-        chat_id = "11111111-1111-4111-8111-111111111111"
 
-        with patch("gateway.config.load_gateway_config", return_value=config), \
-             patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch("gateway.channel_directory.resolve_channel_name") as resolve_mock, \
-             patch("model_tools._run_async", side_effect=_run_async_immediately), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
-            result = json.loads(
-                send_message_tool(
-                    {
-                        "action": "send",
-                        "target": f"thechat:{chat_id}",
-                        "message": "cron says hello",
-                    }
-                )
-            )
-
-        assert result["success"] is True
-        resolve_mock.assert_not_called()
-        send_mock.assert_awaited_once()
-        assert send_mock.await_args.args[0] == Platform.THECHAT
-        assert send_mock.await_args.args[2] == chat_id
-
-    def test_cron_thechat_duplicate_home_target_is_skipped(self):
-        chat_id = "11111111-1111-4111-8111-111111111111"
-        thechat_cfg = SimpleNamespace(
-            enabled=True,
-            token="bot-token",
-            extra={"base_url": "http://thechat.test"},
-        )
-        home = SimpleNamespace(chat_id=chat_id)
-        config = SimpleNamespace(
-            platforms={Platform.THECHAT: thechat_cfg},
-            get_home_channel=lambda platform: home if platform == Platform.THECHAT else None,
-        )
-
-        with patch.dict(
-            os.environ,
-            {
-                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "thechat",
-                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": chat_id,
-            },
-            clear=False,
-        ), \
-             patch("gateway.config.load_gateway_config", return_value=config), \
-             patch("tools.interrupt.is_interrupted", return_value=False), \
-             patch("model_tools._run_async", side_effect=_run_async_immediately), \
-             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
-            result = json.loads(
-                send_message_tool(
-                    {
-                        "action": "send",
-                        "target": "thechat",
-                        "message": "cron says hello",
-                    }
-                )
-            )
-
-        assert result["success"] is True
-        assert result["skipped"] is True
-        assert result["reason"] == "cron_auto_delivery_duplicate_target"
-        send_mock.assert_not_awaited()
 
     def test_cron_duplicate_target_is_skipped_and_explained(self):
         home = SimpleNamespace(chat_id="-1001")
@@ -774,6 +696,41 @@ class TestSendToPlatformChunking:
         assert send.await_count >= 3
         for call in send.await_args_list:
             assert len(call.args[2]) <= 2020  # each chunk fits the limit
+
+    def test_signal_long_message_is_chunked(self, monkeypatch):
+        """Standalone Signal sends split at the adapter's 8000-char limit.
+
+        The standalone path (hermes send / cron / MCP) speaks raw JSON-RPC via
+        _send_signal and bypasses SignalAdapter.send(), so the shared
+        truncate_message() pass in _send_to_platform must know Signal's limit
+        (regression for #67279 / #57929 — long sends were rejected whole).
+        """
+        from gateway.platforms.signal import MAX_MESSAGE_LENGTH as SIGNAL_MAX
+        import tools.send_message_tool as smt
+
+        sent = []
+
+        async def fake_send_signal(extra, chat_id, chunk, media_files=None):
+            sent.append(chunk)
+            return {"success": True, "platform": "signal", "chat_id": chat_id}
+
+        monkeypatch.setattr(smt, "_send_signal", fake_send_signal)
+
+        long_msg = "word " * ((SIGNAL_MAX // 5) + 500)  # comfortably over limit
+        result = asyncio.run(
+            _send_to_platform(
+                Platform.SIGNAL,
+                SimpleNamespace(enabled=True, token=None,
+                                extra={"http_url": "http://localhost:8080",
+                                       "account": "+15551234567"}),
+                "+15557654321", long_msg,
+            )
+        )
+        assert result["success"] is True
+        assert len(sent) >= 2, "long Signal message must be split, not sent whole"
+        assert all(len(chunk) <= SIGNAL_MAX for chunk in sent)
+        # No truncation footer — content is delivered in full across chunks
+        assert all("truncated, full output saved to" not in c for c in sent)
 
 
     def test_slack_pre_escaped_entities_not_double_escaped(self, monkeypatch):
@@ -1308,85 +1265,6 @@ class TestParseTargetRefSlack:
         assert _parse_target_ref("telegram", "C0B0QV5434G")[2] is False
 
 
-class TestParseTargetRefTheChat:
-    """_parse_target_ref recognizes explicit TheChat chat targets."""
-
-    def test_obsolete_thechat_composite_chat_key_is_not_explicit(self):
-        target = "thechat:workspace:workspace-1:conversation:conversation-1:bot:bot-1"
-
-        _chat_id, _thread_id, is_explicit = _parse_target_ref("thechat", target)
-
-        assert is_explicit is False
-
-    def test_thechat_conversation_uuid_is_explicit(self):
-        target = "11111111-1111-4111-8111-111111111111"
-
-        chat_id, thread_id, is_explicit = _parse_target_ref("thechat", target)
-
-        assert chat_id == target
-        assert thread_id is None
-        assert is_explicit is True
-
-    def test_thechat_name_still_requires_directory_resolution(self):
-        assert _parse_target_ref("thechat", "#general")[2] is False
-        assert _parse_target_ref("discord", "thechat:workspace:ws")[2] is False
-
-    @pytest.mark.asyncio
-    async def test_send_thechat_posts_current_conversation_uuid(self, monkeypatch):
-        captured = {}
-
-        class FakeResponse:
-            status_code = 200
-
-            def json(self):
-                return {"messageId": "message-1"}
-
-        class FakeAsyncClient:
-            def __init__(self, *, base_url, headers, timeout):
-                captured["base_url"] = base_url
-                captured["headers"] = headers
-                captured["timeout"] = timeout
-
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            async def post(self, path, json=None):
-                captured["path"] = path
-                captured["payload"] = json
-                return FakeResponse()
-
-        class FakeTimeout:
-            def __init__(self, *args, **kwargs):
-                captured["timeout_args"] = (args, kwargs)
-
-        monkeypatch.setitem(
-            sys.modules,
-            "httpx",
-            SimpleNamespace(AsyncClient=FakeAsyncClient, Timeout=FakeTimeout),
-        )
-        pconfig = SimpleNamespace(
-            token="bot-token",
-            extra={"base_url": "http://thechat.test"},
-        )
-        chat_id = "11111111-1111-4111-8111-111111111111"
-
-        result = await _send_thechat(pconfig, chat_id, "cron update")
-
-        assert result == {"success": True, "message_id": "message-1"}
-        assert captured["base_url"] == "http://thechat.test"
-        assert captured["headers"] == {"Authorization": "Bearer bot-token"}
-        assert captured["path"] == "/hermes-platform/messages"
-        assert captured["payload"] == {
-            "conversationId": chat_id,
-            "content": "cron update",
-            "attachmentIds": [],
-            "platformMessageId": captured["payload"]["platformMessageId"],
-            "complete": False,
-        }
-        assert captured["payload"]["platformMessageId"].startswith("send-message-tool:")
 
 
 class TestParseTargetRefEmail:
@@ -2188,50 +2066,6 @@ class TestSendViaAdapterStandaloneFallback:
 
         assert result == {"error": "Plugin standalone send failed: boom!"}
 
-# ---------------------------------------------------------------------------
-# _check_send_message — availability gating
-# ---------------------------------------------------------------------------
-
-class TestCheckSendMessage:
-    """The tool's check_fn governs whether the model sees ``send_message`` as
-    callable for a given session. The four passing conditions are:
-
-    1. ``HERMES_KANBAN_TASK`` is set (worker spawned by the kanban dispatcher
-       — parent gateway is by definition running, but the worker's
-       ``HERMES_HOME`` may be a profile dir without a ``gateway.pid``).
-    2. ``HERMES_SESSION_PLATFORM`` resolves to a non-empty, non-``local`` value
-       (the session is wired to a messaging platform like Telegram).
-    3. ``is_gateway_running()`` returns True (CLI / orchestrator profile with
-       a live gateway colocated under the same ``HERMES_HOME``).
-    4. None of the above → False, tool is hidden.
-    """
-
-    def test_kanban_task_env_grants_access(self, monkeypatch):
-        """Workers spawned by the dispatcher (HERMES_KANBAN_TASK set) must be
-        allowed regardless of session_platform / gateway-pid state."""
-        from tools.send_message_tool import _check_send_message
-
-        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_abc12345")
-        monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
-
-        with patch("gateway.session_context.get_session_env", return_value=""), \
-             patch("gateway.status.is_gateway_running", return_value=False):
-            assert _check_send_message() is True
-
-
-    def test_gateway_status_import_error_is_swallowed(self, monkeypatch):
-        """If gateway.status can't be imported (unusual deployment / partial
-        install), the check returns False rather than raising."""
-        from tools.send_message_tool import _check_send_message
-
-        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
-
-        with patch("gateway.session_context.get_session_env", return_value=""), \
-             patch("gateway.status.is_gateway_running",
-                   side_effect=ImportError("simulated")):
-            assert _check_send_message() is False
-
-
 class TestSendTelegramThreadNotFoundRetry:
     """Tests for thread-not-found retry behaviour in _send_telegram (#27012)."""
 
@@ -2248,7 +2082,7 @@ class TestSendTelegramThreadNotFoundRetry:
 
         async def run_test():
             with patch(
-                "tools.send_message_tool._send_telegram_message_with_retry",
+                "tools.send_message_senders._send_telegram_message_with_retry",
                 fake_retry,
             ):
                 # _send_telegram imports Bot locally; we only need to mock

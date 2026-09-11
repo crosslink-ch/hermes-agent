@@ -44,15 +44,8 @@ from gateway.inbound_event_ledger import (
     list_recoverable_inbound_events,
     renew_inbound_event_lease,
 )
-from gateway.platforms.base import (
-    BasePlatformAdapter,
-    MessageEvent,
-    MessageType,
-    ProcessingOutcome,
-    SendResult,
-    cache_media_bytes,
-    get_inbound_media_max_bytes,
-)
+from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome, SendResult, cache_media_bytes, get_inbound_media_max_bytes
+from gateway.platforms.event import MessageEvent, MessageType
 from gateway.otel import start_span
 from tools.url_safety import async_is_safe_url, create_ssrf_safe_async_client
 
@@ -2097,7 +2090,7 @@ class TheChatAdapter(BasePlatformAdapter):
         """
         if not self._client:
             raise RuntimeError("TheChat client is not connected")
-        from hermes_cli.commands import thechat_menu_commands
+        from hermes_cli.commands_platforms import thechat_menu_commands
 
         commands, hidden_count = thechat_menu_commands()
         response = await self._client.post(

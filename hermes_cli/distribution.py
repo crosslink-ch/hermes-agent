@@ -24,6 +24,8 @@ REPOSITORY_URLS = frozenset({
 INSTALLER_BASE_URL = "https://share.kihub.ch/hermes"
 ARCHIVE_BASE_URL = f"https://github.com/{REPOSITORY_SLUG}/archive"
 RELEASE_URL_BASE = f"https://github.com/{REPOSITORY_SLUG}/releases/tag"
+RELEASE_TAG_GLOB = "crosslink-v[0-9]*"
+CONTAINER_IMAGE = "crosslinkch/hermes-agent"
 
 
 def canonical_github_remote(url: str | None) -> str:

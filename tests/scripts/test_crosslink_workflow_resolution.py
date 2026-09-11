@@ -26,7 +26,7 @@ def test_ci_timing_report_never_receives_the_privileged_autofix_pat():
     # Keep the security invariant architecture-independent: if any timing job
     # exists in any workflow, it must not receive the privileged autofix PAT.
     timing_jobs = []
-    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+    for path in sorted((ROOT / ".github/workflows").glob("*.*")):
         workflow = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         for job_id, job in (workflow.get("jobs") or {}).items():
             name = str(job.get("name") or "") if isinstance(job, dict) else ""
@@ -45,7 +45,7 @@ def test_workflows_do_not_reference_unprovisioned_larger_runner_labels():
         "windows-latest-32-core",
     }
     offenders = []
-    for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+    for path in sorted((ROOT / ".github/workflows").glob("*.*")):
         text = path.read_text(encoding="utf-8")
         for label in forbidden:
             if label in text:
@@ -74,6 +74,7 @@ def test_release_tag_picker_accepts_crosslink_release_tags(tmp_path):
         "crosslink-v2026.7.1",
         "crosslink-v2026.8.11",
         "backup/not-a-release",
+        "v2026.9.11",  # inherited upstream tags must not displace fork releases
     ):
         subprocess.run(["git", "-C", str(repo), "tag", tag], check=True)
 
@@ -99,12 +100,12 @@ def test_release_tag_picker_accepts_crosslink_release_tags(tmp_path):
     )
     assert "crosslink-v[0-9]+.[0-9]+.[0-9]+" in workflow
 
-    harness = (ROOT / "tests/install/install-update-e2e.sh").read_text(
+    harness = (ROOT / "tests/install/installer-script-e2e.sh").read_text(
         encoding="utf-8"
     )
-    assert '[[ "$script" == *"$flag"* ]]' in harness
-    assert "installer_supports HEAD --migrate-legacy-origin" in harness
-    assert "installer_flags+=(--migrate-legacy-origin)" in harness
+    assert '[[ "$text" == *"$2"* ]]' in harness
+    assert 'installer_supports "$1" "--migrate-legacy-origin"' in harness
+    assert "flags+=(--migrate-legacy-origin)" in harness
 
 
 def test_js_autofix_restores_app_auth_with_crosslink_pat_fallback():
@@ -112,6 +113,8 @@ def test_js_autofix_restores_app_auth_with_crosslink_pat_fallback():
     job = workflow["jobs"]["apply-patch"]
 
     assert job["environment"] == "trusted-automation"
+    assert "github.ref == 'refs/heads/main'" in job["if"]
+    assert "github.ref_protected == true" in job["if"]
 
     checkout = next(step for step in job["steps"] if "actions/checkout@" in step.get("uses", ""))
     assert checkout["with"]["persist-credentials"] is False
@@ -155,3 +158,15 @@ def test_crosslink_main_and_release_runs_publish_multiarch_images():
 
     assert workflow["jobs"]["publish"]["if"] == expected
     assert workflow["jobs"]["merge"]["if"] == expected
+    assert expected.split(" && ", 1)[0] in workflow["jobs"]["build"]["if"]
+    assert workflow["jobs"]["build"]["needs"] == ["detect"]
+    assert workflow["jobs"]["publish"]["needs"] == ["build"]
+    assert workflow["jobs"]["merge"]["needs"] == ["publish"]
+    assert workflow["jobs"]["publish"]["environment"] == "container-publish"
+    assert workflow["jobs"]["merge"]["environment"] == "container-publish"
+
+
+def test_upstream_site_deployment_is_not_activated_on_crosslink():
+    workflow = _load_yaml(".github/workflows/deploy-site.yml")
+    for job in workflow["jobs"].values():
+        assert "github.repository == 'NousResearch/hermes-agent'" in job["if"]

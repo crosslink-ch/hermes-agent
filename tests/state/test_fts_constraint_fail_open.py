@@ -325,7 +325,7 @@ def test_failed_startup_rebuild_preserves_marker_trigger_invariant(
         def _fail_rebuild(*_args: object, **_kwargs: object) -> None:
             raise sqlite3.DatabaseError("synthetic rebuild failure")
 
-        monkeypatch.setattr(db, "_rebuild_legacy_fts_indexes", _fail_rebuild)
+        monkeypatch.setattr(db, "_rebuild_fts_indexes", _fail_rebuild)
         assert db._recover_stale_fts(db._conn.cursor(), legacy=True) is False
 
         assert db._conn.execute(

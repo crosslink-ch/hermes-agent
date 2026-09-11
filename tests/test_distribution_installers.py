@@ -192,10 +192,10 @@ def test_distribution_critical_sources_use_crosslink_and_hosted_urls() -> None:
     install_ps1 = (REPO_ROOT / "scripts" / "install.ps1").read_text(encoding="ascii")
     install_sh = INSTALL_SH.read_text(encoding="utf-8")
     install_cmd = (REPO_ROOT / "scripts" / "install.cmd").read_text(encoding="utf-8")
-    dev_sandbox = (REPO_ROOT / "scripts" / "dev-sandbox.sh").read_text(
+    dev_sandbox = (REPO_ROOT / "tests" / "install" / "installer-script-e2e.sh").read_text(
         encoding="utf-8"
     )
-    update_cmd = (REPO_ROOT / "hermes_cli" / "update_cmd.py").read_text(
+    update_cmd = (REPO_ROOT / "hermes_cli" / "update_cmd_zip.py").read_text(
         encoding="utf-8"
     )
     desktop_bootstrap = (
@@ -223,7 +223,7 @@ def test_distribution_critical_sources_use_crosslink_and_hosted_urls() -> None:
     assert 'REPO_SLUG="crosslink-ch/hermes-agent"' in install_sh
     assert HOSTED_INSTALLER_BASE in install_cmd
     assert "https://github.com/crosslink-ch/hermes-agent.git" in dev_sandbox
-    assert "https://share.kihub.ch/hermes/install.sh" in dev_sandbox
+    assert "flags+=(--migrate-legacy-origin)" in dev_sandbox
     assert "ARCHIVE_BASE_URL" in update_cmd
     assert "raw.githubusercontent.com/crosslink-ch/hermes-agent" in desktop_bootstrap
     assert "https://github.com/crosslink-ch/hermes-agent/releases" in desktop_about
