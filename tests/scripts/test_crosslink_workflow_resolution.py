@@ -54,6 +54,21 @@ def test_workflows_do_not_reference_unprovisioned_larger_runner_labels():
     assert offenders == []
 
 
+def test_python_suite_budget_preserves_full_standard_runner_coverage():
+    job = _load_yaml(".github/workflows/tests.yml")["jobs"]["test"]
+    run = _step(job, "Run tests")
+
+    # Capacity floor for the expanded suite, not a per-file timeout increase.
+    assert job["timeout-minutes"] >= 90
+    assert job["runs-on"] == "ubuntu-latest"
+    assert run["run"].strip().splitlines()[-1] == "scripts/run_tests.sh"
+    assert run["env"]["HERMES_TEST_WORKERS"] == 4
+    assert not job.get("continue-on-error", False)
+    assert not run.get("continue-on-error", False)
+    env = {**job.get("env", {}), **run.get("env", {})}
+    assert not ({"HERMES_TEST_FILE_TIMEOUT", "HERMES_TEST_PATHS", "HERMES_TEST_SLICE"} & env.keys())
+
+
 def test_release_tag_picker_accepts_crosslink_release_tags(tmp_path):
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
