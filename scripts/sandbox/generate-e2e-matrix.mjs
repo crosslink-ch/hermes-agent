@@ -318,8 +318,8 @@ export function renderMarkdownResults(jobs, tagAnnotations = [], artifactById = 
   // run workflow may have one inner job per driver arm; exactly one runs
   // and the others natively skip), so cells merge by significance: a real
   // outcome always beats a skip, and a bad outcome beats a good one.
-  const RANK = ['skip', 'TODO', 'pre-desktop', '&#x2705;', 'known', 'running', 'cancelled', '&#x274C;'];
-  const SKIPS = ['skip', 'TODO', 'pre-desktop'];
+  const RANK = ['skip', 'TODO', 'pre-desktop', 'prebuilt not run', '&#x2705;', 'known', 'running', 'cancelled', '&#x274C;'];
+  const SKIPS = ['skip', 'TODO', 'pre-desktop', 'prebuilt not run'];
   // Rendered success/failure cells carry artifact links after the glyph;
   // rank by the leading token or every such cell would rank as unknown (-1)
   // and lose to any skip already in the map.
@@ -355,6 +355,9 @@ export function renderMarkdownResults(jobs, tagAnnotations = [], artifactById = 
       : '';
     switch (job.conclusion) {
       case 'success': {
+        // A successful prerequisite probe may mean the asset is absent.
+        // Only a real driver outcome can promote this leg to passed.
+        if (job.name.endsWith('/ Check prebuilt installer prerequisite')) return 'prebuilt not run';
         // Only the classifier's uploaded receipt turns a successful job into
         // a known-failure cell. Tag membership alone never suppresses a red.
         const rule = knownRules.find((/** @type {any} */ r) => artifactById.has(`install-e2e-known-${r.id}--${legId2}`));
@@ -383,7 +386,7 @@ export function renderMarkdownResults(jobs, tagAnnotations = [], artifactById = 
   const lines = [
     '### Install & Update E2E results',
     '',
-    `${passed} passed, ${failed} failed, ${known} known failures, ${skipped} skipped (TODO = declared, no driver arm yet; pre-desktop = the starting release predates apps/desktop), ${cells.length} legs total`,
+    `${passed} passed, ${failed} failed, ${known} known failures, ${skipped} skipped (TODO = declared, no driver arm yet; pre-desktop = the starting release predates apps/desktop; prebuilt not run = prerequisite checked but no installer test ran, see prerequisite job summary), ${cells.length} legs total`,
     '',
     `| combination | ${tags.join(' | ')} |`,
     `|---|${tags.map(() => '---').join('|')}|`,

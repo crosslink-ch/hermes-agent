@@ -1,0 +1,63 @@
+name: Native installer availability
+
+# Read-only prerequisite probe. Never downloads/runs an installer or publishes a release.
+on:
+  workflow_call:
+    inputs:
+      asset-url:
+        description: Exact HTTPS installer URL used by the dependent leg.
+        required: true
+        type: string
+    outputs:
+      available:
+        description: Whether the installer URL exists; false only for HTTP 404/410.
+        value: ${{ jobs.probe.outputs.available }}
+  workflow_dispatch:
+    inputs:
+      asset-url:
+        description: Exact HTTPS installer URL to check without installing it.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Check prebuilt installer prerequisite
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      available: ${{ steps.asset.outputs.available }}
+    steps:
+      - name: Check URL and report unavailable coverage
+        id: asset
+        shell: bash
+        env:
+          ASSET_URL: ${{ inputs.asset-url }}
+        run: |
+          set -euo pipefail
+          status="$(curl --head --location --silent --show-error \
+            --proto '=https' --proto-redir '=https' \
+            --connect-timeout 10 --max-time 30 --retry 2 --retry-max-time 90 \
+            --output /dev/null --write-out '%{http_code}' --url "$ASSET_URL")"
+          case "$status" in
+            200) available=true ;;
+            404|410)
+              available=false
+              echo '::notice::Prebuilt installer unavailable; only dependent prebuilt-installer cases are not run. Source-built Desktop coverage is retained.'
+              ;;
+            *)
+              echo "::error::Installer prerequisite probe returned HTTP $status. This is not evidence of a missing asset."
+              exit 1
+              ;;
+          esac
+          printf 'available=%s\n' "$available" >> "$GITHUB_OUTPUT"
+          {
+            printf '### Prebuilt installer prerequisite\n\nURL: `%s`\n\nHTTP: %s\n\n' "$ASSET_URL" "$status"
+            if [ "$available" = true ]; then
+              echo 'Available. Dependent installer tests remain eligible to run.'
+            else
+              echo '**Unavailable coverage:** dependent prebuilt-installer tests were not run. This is not a passing installer test. Source-built Desktop tests are unaffected. Publish the intended asset or supply an explicit candidate URL to restore these cases.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

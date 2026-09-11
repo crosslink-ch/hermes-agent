@@ -57,6 +57,12 @@ permissions:
   contents: read
 
 jobs:
+  native-installer:
+    if: inputs.install-method == 'desktop-installer@latest' && inputs.tag-has-desktop
+    uses: ./.github/workflows/install-e2e-native-asset.yml
+    with:
+      asset-url: ${{ inputs.dmg-url }}
+
   # ---- arm 1: script installs (the shared OS-agnostic driver) --------------
   e2e:
     name: install & update
@@ -77,11 +83,13 @@ jobs:
 
   # ---- arm 2: the published dmg, then Playwright drives the app ------------
   gui-e2e:
+    needs: native-installer
     # Short static name on purpose: name expressions render UNEXPANDED on
     # skipped jobs.
     name: Hermes-Setup.dmg
     if: >-
-      inputs.install-method == 'desktop-installer@latest' && inputs.tag-has-desktop
+      needs.native-installer.outputs.available == 'true'
+      && inputs.install-method == 'desktop-installer@latest' && inputs.tag-has-desktop
       && contains(fromJSON('["open-app-update", "hermes-desktop-app-update", "hermes-update", "installer-script", "installer-script+desktop"]'), inputs.update-method)
     runs-on: macos-latest
     timeout-minutes: ${{ inputs.timeout-minutes }}

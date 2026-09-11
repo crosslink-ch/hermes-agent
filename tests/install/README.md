@@ -57,10 +57,16 @@ selected ref's installer supports it. Unknown/custom origins are never retargete
 
 The GUI legs default to `Hermes-Setup.exe` / `Hermes-Setup.dmg` in the Crosslink
 repository's latest GitHub release. Those artifacts are prerequisites, not built
-or published by these tests. If unavailable, the leg must fail rather than install
-another distribution silently; use the existing `setup-exe-url` / `dmg-url`
-overrides for an explicitly selected Crosslink candidate. Running a source-sync
-verification does not authorize artifact publication or native installation.
+or published by these tests. The reusable `install-e2e-native-asset.yml` workflow
+checks the exact installer URL. HTTP 404/410 marks only dependent prebuilt-installer
+cases unavailable, with an explicit coverage notice in the job summary. Network,
+authentication, rate-limit and server errors fail the probe rather than masquerade
+as missing assets. Source-built Desktop and non-prebuilt update cases remain enabled.
+
+Use the existing `setup-exe-url` / `dmg-url` overrides for an explicitly selected
+Crosslink candidate; never silently substitute another distribution. The probe
+also supports a read-only manual dispatch. Running source-sync verification does
+not authorize artifact publication or native installation.
 
 ## The install methods
 
@@ -77,10 +83,11 @@ The desktop app has two launch paths, so the matrix has two app-update methods. 
 
 ## Skips
 
-A grey leg is normal. There are two causes:
+A grey leg can have these causes:
 
 - The method pair is declared but cannot run: either no OS entry point exists for it (open-app-update after a plain script install registers nothing to open), or no driver arm exists yet. The gate in the run workflow lists the pairs that run.
 - The starting release predates the surface under test. Example: a release without `apps/desktop` has no window to launch. The tag annotation `tag_has_desktop` from the primary workflow marks these releases.
+- A required prebuilt installer is absent (HTTP 404/410). The prerequisite job explains the unavailable coverage. A successful probe alone never counts as a passed installer test; the chart says `prebuilt not run` until a real driver outcome exists.
 
 The result chart on the run summary shows each leg as passed, failed, or skipped. [Confirmed historical upgrade limitations](KNOWN_FAILURES.md) records failures that cannot be fixed in the update target, with exact release commits and CI evidence. These are not blanket skips: the original paths still run. Exact signature matches are non-red, counted separately as known failures, and linked to footnotes at the bottom of the result chart. An unrelated error on the same tag still fails.
 
