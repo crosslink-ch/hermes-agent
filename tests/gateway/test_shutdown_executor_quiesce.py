@@ -15,6 +15,7 @@ The order is now: quiesce (bounded) -> close.
 
 import asyncio
 import concurrent.futures
+import json
 import threading
 import time
 from collections import OrderedDict
@@ -22,6 +23,7 @@ from collections import OrderedDict
 import pytest
 
 import gateway.run as gw_mod
+from gateway.http_routes import loopback_route, write_route_manifest
 
 
 class _FakeSessionDB:
@@ -37,6 +39,10 @@ class _FakeSessionDB:
 
 class _FakeGateway:
     """Minimal stand-in with just enough state for ``stop()`` to run."""
+
+    # Exercise the actual shutdown manifest write before executor quiescence.
+    _collect_public_http_routes = gw_mod.GatewayRunner._collect_public_http_routes
+    _publish_http_route_manifest = gw_mod.GatewayRunner._publish_http_route_manifest
 
     def __init__(self, events):
         self._events = events
@@ -56,6 +62,7 @@ class _FakeGateway:
         self._agent_cache = OrderedDict()
         self._agent_cache_lock = threading.Lock()
         self.adapters = {}
+        self._http_route_manifest_signature = None
         self._background_tasks = set()
         self._failed_platforms = []
         self._shutdown_event = asyncio.Event()
@@ -126,6 +133,9 @@ async def test_running_executor_work_finishes_before_session_db_close():
     events = []
     gw = _FakeGateway(events)
     started = threading.Event()
+    manifest = write_route_manifest([
+        loopback_route("stale-listener", port=8443, path="/webhook"),
+    ])
 
     def _blocking_db_write():
         started.set()
@@ -140,6 +150,7 @@ async def test_running_executor_work_finishes_before_session_db_close():
     await gw_mod.GatewayRunner.stop(gw)
     future.result(timeout=5)
 
+    assert json.loads(manifest.read_text())["routes"] == []
     assert "worker_write" in events, "worker never ran"
     assert "close:session_db" in events, "SessionDB was never closed"
     assert events.index("worker_write") < events.index("close:session_db"), (

@@ -10,6 +10,7 @@ The fix adds an explicit sweep of ``_agent_cache`` after
 """
 
 import asyncio
+import json
 import threading
 from collections import OrderedDict
 from unittest.mock import MagicMock
@@ -18,6 +19,7 @@ import pytest
 
 # Import the module (not the class) to reach stop() and helpers
 import gateway.run as gw_mod
+from gateway.http_routes import loopback_route, write_route_manifest
 
 
 # ---------------------------------------------------------------------------
@@ -26,6 +28,10 @@ import gateway.run as gw_mod
 
 class _FakeGateway:
     """Minimal stand-in with just enough state for ``stop()`` to run."""
+
+    # Exercise the actual shutdown manifest write, not a no-op collaborator.
+    _collect_public_http_routes = gw_mod.GatewayRunner._collect_public_http_routes
+    _publish_http_route_manifest = gw_mod.GatewayRunner._publish_http_route_manifest
 
     def __init__(self):
         self._running = True
@@ -44,6 +50,7 @@ class _FakeGateway:
         self._agent_cache = OrderedDict()
         self._agent_cache_lock = threading.Lock()
         self.adapters = {}
+        self._http_route_manifest_signature = None
         self._background_tasks = set()
         self._failed_platforms = []
         self._shutdown_event = asyncio.Event()
@@ -140,11 +147,15 @@ class TestCachedAgentCleanupOnShutdown:
         gw = _FakeGateway()
         agent = _make_mock_agent()
         gw._agent_cache["session-1"] = (agent, "sig-123")
+        manifest = write_route_manifest([
+            loopback_route("stale-listener", port=8443, path="/webhook"),
+        ])
 
         # Call the real stop() from GatewayRunner
         await gw_mod.GatewayRunner.stop(gw)
 
         agent.shutdown_memory_provider.assert_called_once()
+        assert json.loads(manifest.read_text())["routes"] == []
 
     @pytest.mark.asyncio
     async def test_cache_cleared_after_shutdown(self):

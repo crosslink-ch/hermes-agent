@@ -24,6 +24,7 @@ import pytest
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
+    SendResult,
 )
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.run import GatewayRunner
@@ -42,8 +43,9 @@ class _StubAdapter(BasePlatformAdapter):
     async def disconnect(self):
         pass
 
-    async def send(self, chat_id, text, **kwargs):
-        pass
+    async def send(self, chat_id, content, reply_to=None, metadata=None):
+        self.sent_responses.append(content)
+        return SendResult(success=True, message_id=str(len(self.sent_responses)))
 
     async def get_chat_info(self, chat_id):
         return {}
@@ -54,11 +56,8 @@ def _make_adapter():
     adapter = _StubAdapter(config, Platform.TELEGRAM)
     adapter._busy_text_mode = ""
     adapter.sent_responses = []
-
-    async def _mock_send_retry(chat_id, content, **kwargs):
-        adapter.sent_responses.append(content)
-
-    adapter._send_with_retry = _mock_send_retry
+    # Stub only transport I/O: inline lifecycle and retries need the real
+    # SendResult contract to complete before the active task is cancelled.
     return adapter
 
 
@@ -154,8 +153,9 @@ class TestAdapterSessionCancellation:
         await adapter.handle_message(
             _make_event("/model xiaomi/mimo-v2-pro --provider nous")
         )
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+        # Delivery can hop through the ledger's worker threads; await the
+        # owning task rather than assuming two event-loop yields finish it.
+        await asyncio.wait_for(adapter._session_tasks[sk], timeout=5.0)
 
         assert any("handled:model" in r for r in adapter.sent_responses), (
             f"follow-up /model stayed blocked after {command_text}"
