@@ -13,12 +13,13 @@ import types
 import pytest
 
 from gateway.run_turn_runner import TurnRunner
+from gateway.turn_context import TurnContext
 
 
 def _wire(user_config):
     """Run `_wire_turn_agent_callbacks` over minimal fakes; return the agent."""
     agent = types.SimpleNamespace()
-    ctx = types.SimpleNamespace(
+    ctx = TurnContext(
         progress_callback=None,
         native_tool_start_callback=None,
         voice_ack_callback=None,
@@ -35,8 +36,6 @@ def _wire(user_config):
         _thinking_enabled=False,
         agent_holder=[None],
         tools_holder=[None],
-        process_task_id=None,
-        process_baseline=None,
         run_generation=0,
     )
     holder = types.SimpleNamespace(
