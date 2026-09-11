@@ -871,6 +871,10 @@ def test_fts_recovery_includes_vtables_that_raise_decode_errors(tmp_path):
                 "SELECT name FROM sqlite_master WHERE name LIKE 'messages_fts%'"
             )
         }
+        assert check.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
+        assert check.execute(
+            "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'needle'"
+        ).fetchone()[0] == 1
     finally:
         check.close()
     assert "messages_fts" in names

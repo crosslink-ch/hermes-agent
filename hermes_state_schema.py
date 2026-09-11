@@ -640,17 +640,23 @@ class SessionSchemaMixin:
                 (FTS_STALE_KEY,),
             ).fetchone()
             if marker is None:
-                # A peer completed recovery after this constructor's initial
-                # read. Observe its committed state without touching triggers.
-                base_status = self._fts_table_probe(cursor, "messages_fts")
-                trigram_status = self._fts_table_probe(
-                    cursor, "messages_fts_trigram"
-                )
-                self._conn.rollback()
-                self._fts_stale = False
-                self._fts_enabled = base_status is True
-                self._trigram_available = trigram_status is True
-                return self._fts_enabled
+                # A peer may have completed recovery after our initial read.
+                # Missing metadata alone does not prove the indexes are healthy.
+                try:
+                    base_status = self._fts_table_probe(cursor, "messages_fts")
+                    trigram_status = self._fts_table_probe(
+                        cursor, "messages_fts_trigram"
+                    )
+                except (sqlite3.DatabaseError, UnicodeDecodeError):
+                    # Keep the admitted write transaction and rebuild the corrupt
+                    # vtable, just as the marked-stale path below does.
+                    pass
+                else:
+                    self._conn.rollback()
+                    self._fts_stale = False
+                    self._fts_enabled = base_status is True
+                    self._trigram_available = trigram_status is True
+                    return self._fts_enabled
 
             try:
                 trigram_status = self._fts_table_probe(
