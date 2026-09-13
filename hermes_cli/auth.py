@@ -6,7 +6,7 @@
   only I/O primitives (cross-process flock, atomic 0o600 writes).
 - ``resolve_provider()`` picks the active provider via the documented priority chain.
 - ``OAUTH_PROVIDER_FLOWS`` maps each OAuth provider to its resolver/status builder; the flows live in
-  ``auth_nous``/``auth_codex``/``auth_xai``/``auth_qwen``/``auth_minimax``/``auth_spotify`` and are
+  ``auth_nous``/``auth_codex``/``auth_xai``/``auth_qwen``/``auth_minimax``/``auth_spotify``/``auth_openrouter`` and are
   re-imported here so ``hermes_cli.auth.<name>`` stays the public/patchable surface."""
 
 from __future__ import annotations
@@ -85,6 +85,7 @@ from hermes_cli.auth_codex import (  # noqa: F401  re-exported
 from hermes_cli.auth_spotify import (  # noqa: F401  re-exported
     _refresh_spotify_oauth_state, get_spotify_auth_status, login_spotify_command,
     resolve_spotify_runtime_credentials)
+from hermes_cli.auth_openrouter import _openrouter_pkce_login  # noqa: F401  re-exported
 from hermes_cli.auth_qwen import (  # noqa: F401  re-exported
     _qwen_access_token_is_expiring, _qwen_cli_auth_path, _read_qwen_cli_tokens,
     _refresh_qwen_cli_tokens, _save_qwen_cli_tokens, get_qwen_auth_status,
@@ -742,6 +743,11 @@ def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = N
     auth_store["version"] = AUTH_STORE_VERSION
     auth_store["updated_at"] = datetime.now(timezone.utc).isoformat()
     _write_private_file_atomic(auth_file, json.dumps(auth_store, indent=2) + "\n", fsync_dir=True)
+    if target_path is not None:
+        # A write-through to the global root must not be masked by the mtime memo: on coarse-mtime
+        # filesystems a read-after-write in the same tick would keep serving the pre-write store.
+        global _global_auth_store_cache
+        _global_auth_store_cache = None
     try:
         auth_file.chmod(stat.S_IRUSR | stat.S_IWUSR)
     except OSError:
