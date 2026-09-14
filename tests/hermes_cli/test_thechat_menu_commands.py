@@ -1,5 +1,6 @@
 """TheChat rich command menu contracts against the platform implementation."""
 import re
+from hermes_cli.commands import COMMAND_REGISTRY
 from hermes_cli.commands_platforms import thechat_menu_commands
 
 
@@ -9,19 +10,21 @@ class TestTheChatMenuCommands:
     def test_returns_rich_entries_with_aliases_and_args_hints(self):
         menu, _hidden = thechat_menu_commands()
         by_name = {entry["command"]: entry for entry in menu}
+        definitions = {command.name: command for command in COMMAND_REGISTRY}
 
         new = by_name["new"]
         assert new["description"]
-        assert new["argsHint"] == "[name]"
+        assert new["argsHint"] == definitions["new"].args_hint[:128]
         assert new["category"] == "Session"
         assert new["aliases"] == ["reset"]
 
         queue = by_name["queue"]
-        assert queue["argsHint"] == "<prompt>"
+        assert queue["argsHint"] == definitions["queue"].args_hint[:128]
         assert queue["aliases"] == ["q"]
 
-        # Help now accepts an optional skill/filter query.
-        assert by_name["help"]["argsHint"] == "[skills|<filter>]"
+        # Argument metadata follows the canonical command registry as it evolves.
+        assert by_name["help"]["argsHint"] == definitions["help"].args_hint[:128]
+        assert all(by_name[name]["argsHint"] for name in ("new", "queue", "help"))
 
     def test_priority_commands_lead_the_menu(self):
         menu, _hidden = thechat_menu_commands()
