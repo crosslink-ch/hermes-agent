@@ -785,6 +785,87 @@ class TestEnvironmentHints:
         assert "Terminal backend: docker" in result
         assert "inside" in result.lower()
 
+    def test_named_targets_use_default_backend_and_are_listed(self, monkeypatch):
+        import agent.prompt_builder as _pb
+        import tools.execution_targets as targets_mod
+
+        probe_calls = []
+
+        def _capture_probe(backend, terminal_config=None, target_name=""):
+            probe_calls.append((backend, terminal_config, target_name))
+            return None
+
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.setattr(_pb, "_probe_remote_backend", _capture_probe)
+        monkeypatch.setattr(
+            targets_mod,
+            "_load_merged_config",
+            lambda: {
+                "terminal": {
+                    "backend": "local",
+                    "default_target": "devbox",
+                    "targets": {
+                        "local": {"backend": "local", "cwd": "."},
+                        "devbox": {
+                            "backend": "ssh",
+                            "cwd": "/srv/project",
+                            "ssh_host": "devbox.example.com",
+                            "ssh_user": "agent",
+                        },
+                    },
+                },
+            },
+        )
+
+        result = _pb.build_environment_hints()
+
+        assert "Terminal backend: ssh" in result
+        assert "Host:" not in result
+        assert "Configured execution targets:" in result
+        assert "omit an execution-target selector" in result
+        assert '"devbox" (ssh, default)' in result
+        assert '"local" (local)' in result
+        assert "select one with `execution_target`" in result
+        assert "`search_files.target` remains" in result
+        assert probe_calls == [(
+            "ssh",
+            {
+                "backend": "ssh",
+                "cwd": "/srv/project",
+                "ssh_host": "devbox.example.com",
+                "ssh_user": "agent",
+            },
+            "devbox",
+        )]
+
+    def test_named_local_default_uses_target_cwd(self, monkeypatch, tmp_path):
+        import agent.prompt_builder as _pb
+        import tools.execution_targets as targets_mod
+
+        target_cwd = tmp_path / "named-target"
+        target_cwd.mkdir()
+        monkeypatch.setattr(_pb, "is_wsl", lambda: False)
+        monkeypatch.setattr(
+            targets_mod,
+            "_load_merged_config",
+            lambda: {
+                "terminal": {
+                    "default_target": "workspace",
+                    "targets": {
+                        "workspace": {
+                            "backend": "local",
+                            "cwd": str(target_cwd),
+                        },
+                    },
+                },
+            },
+        )
+        monkeypatch.chdir(tmp_path)
+
+        result = _pb.build_environment_hints()
+
+        assert f"Current working directory: {target_cwd}" in result
+
     def test_build_environment_hints_uses_terminal_cwd_over_launch_dir(self, monkeypatch, tmp_path):
         """THE BUG: gateway/cron set TERMINAL_CWD but the prompt emitted os.getcwd()
         (the daemon launch dir). Regression for #24882/#24969/#27383/#29265."""

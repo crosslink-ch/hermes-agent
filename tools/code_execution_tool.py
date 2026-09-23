@@ -12,6 +12,7 @@ scrubbing, interpreter/cwd), tools/code_execution_rpc.py (RPC servers).
 """
 
 import base64
+from copy import deepcopy
 import json
 import logging
 import os
@@ -432,7 +433,7 @@ def _get_or_create_env(task_id: str):
             # docker_env, so a sandbox created from this path lost the operator's configured settings.
             container_config = _container_config_from_config(config)
         logger.info("Creating new %s environment for execute_code task %s...",
-                     env_type, effective_task_id[:8])
+                     env_type, str(effective_task_id)[:48])
         env = _create_environment(
             env_type=env_type, image=_select_image(env_type, overrides, config),
             cwd=overrides.get("cwd") or config["cwd"], timeout=config["timeout"],
@@ -446,7 +447,7 @@ def _get_or_create_env(task_id: str):
             _last_activity[effective_task_id] = time.time()
         _start_cleanup_thread()
         logger.info("%s environment ready for execute_code task %s",
-                     env_type, effective_task_id[:8])
+                     env_type, str(effective_task_id)[:48])
         return env, env_type
 
 
@@ -702,7 +703,10 @@ def execute_code(
                 "Run the lifecycle command from a shell outside the gateway."
             )
     from tools.terminal_tool import _get_env_config, _docker_has_host_access
-    _env_config = _get_env_config()
+    _env_config = (
+        _get_env_config(dict(resolution.config))
+        if resolution.named else _get_env_config()
+    )
     env_type = _env_config["env_type"]
     # Arbitrary Python never passes through terminal()/DANGEROUS_PATTERNS, so guard the whole
     # script before either dispatch path spawns it — in this (tool-executor) thread, which holds

@@ -603,6 +603,7 @@ _LEGACY_TOOL_ALIASES = {
     "tour": "gui_tour", "tip": "show_tip",
 }
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
+_TARGET_SELECTOR_TOOLS = {"terminal", "write_file", "patch", "execute_code"}
 
 
 # --- Tool error sanitization --------------------------------------------------
@@ -918,6 +919,19 @@ def handle_function_call(
     original_args = dict(function_args)
     if not skip_tool_request_middleware:
         function_args, original_args, trace = _apply_request_middleware(function_name, function_args, ids, trace)
+
+    # Enforce the canonical execution-routing API before pre-tool hooks,
+    # ACP edit approval, guardrails, progress, checkpoints, or dispatch.
+    try:
+        from tools.execution_targets import (
+            ExecutionTargetError,
+            validate_execution_target_args,
+            validate_execution_target_dispatch_args,
+        )
+
+        validate_execution_target_args(function_name, function_args)
+    except ExecutionTargetError as exc:
+        return tool_error(str(exc))
 
     try:
         if function_name in _AGENT_LOOP_TOOLS:

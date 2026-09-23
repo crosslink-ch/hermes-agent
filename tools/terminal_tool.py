@@ -144,11 +144,19 @@ def _docker_has_host_access(config: Dict[str, Any]) -> bool:
 
 
 def _check_all_guards(command: str, env_type: str,
-                      has_host_access: bool = False) -> dict:
+                      has_host_access: bool = False,
+                      execution_target: str = "default",
+                      execution_backend: Optional[str] = None,
+                      execution_target_named: bool = False,
+                      execution_target_scope: str = "") -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
     return _check_all_guards_impl(command, env_type,
                                   approval_callback=_get_approval_callback(),
-                                  has_host_access=has_host_access)
+                                  has_host_access=has_host_access,
+                                  execution_target=execution_target,
+                                  execution_backend=execution_backend or env_type,
+                                  execution_target_named=execution_target_named,
+                                  execution_target_scope=execution_target_scope)
 
 
 from tools.environments.base import EnvironmentConnectionError
@@ -170,7 +178,9 @@ PTY: pty=true + background=true for interactive CLIs (they hang without a termin
 _active_environments: Dict[str, Any] = {}
 _last_activity: Dict[str, float] = {}
 _env_lock = threading.Lock()
-_creation_locks: Dict[str, threading.Lock] = {}  # Per-task locks for sandbox creation
+_retired_environments: list[tuple[Hashable, Any, float]] = []
+_retired_environments_lock = threading.Lock()
+_creation_locks: Dict[Hashable, threading.Lock] = {}  # Per-target locks for sandbox creation
 _creation_locks_lock = threading.Lock()  # Protects _creation_locks dict itself
 _cleanup_thread = None
 _cleanup_running = False
@@ -253,10 +263,15 @@ def record_session_cwd(session_key: Optional[str], cwd: Optional[str]) -> None:
     to ``"default"``; non-string / empty cwds are ignored."""
     if not isinstance(cwd, str) or not cwd.strip():
         return
-    key = str(session_key or "default")
+    resolution = _resolution or _target_resolution(target)
+    key = resolution.session_key(session_key)
     with _session_cwd_lock:
         if _session_cwd.get(key) != cwd:
             _session_cwd[key] = cwd
+        if resolution.named:
+            _session_cwd_specs[key] = resolution.spec_fingerprint
+        else:
+            _session_cwd_specs.pop(key, None)
 
 
 def get_session_cwd(session_key: Optional[str]) -> Optional[str]:
@@ -266,10 +281,51 @@ def get_session_cwd(session_key: Optional[str]) -> Optional[str]:
         return _session_cwd.get(str(session_key or "default"))
 
 
-def clear_session_cwd(session_key: str) -> None:
-    """Drop a session's cwd record (session teardown)."""
+def inherit_session_cwds(parent_task_id: str, child_task_id: str) -> int:
+    """Seed a child with every cwd scope currently owned by its parent."""
+    if not parent_task_id or not child_task_id:
+        return 0
+    parent_key = _profile_scoped_task_key(parent_task_id)
+    child_key = _profile_scoped_task_key(child_task_id)
+    inherited: Dict[Hashable, str] = {}
+    inherited_specs: Dict[Hashable, str] = {}
     with _session_cwd_lock:
-        _session_cwd.pop(session_key, None)
+        for key, cwd in _session_cwd.items():
+            if key == parent_key:
+                inherited[child_key] = cwd
+                if key in _session_cwd_specs:
+                    inherited_specs[child_key] = _session_cwd_specs[key]
+            elif (
+                isinstance(key, tuple)
+                and len(key) == 2
+                and key[0] == parent_key
+            ):
+                child_target_key = (child_key, key[1])
+                inherited[child_target_key] = cwd
+                if key in _session_cwd_specs:
+                    inherited_specs[child_target_key] = _session_cwd_specs[key]
+        _session_cwd.update(inherited)
+        _session_cwd_specs.update(inherited_specs)
+    return len(inherited)
+
+
+def clear_session_cwd(session_key: str) -> None:
+    """Drop all legacy and named-target cwd records for a raw session."""
+    raw = str(session_key or "default")
+    scoped = _profile_scoped_task_key(raw)
+    with _session_cwd_lock:
+        _session_cwd.pop(raw, None)
+        _session_cwd.pop(scoped, None)
+        _session_cwd_specs.pop(raw, None)
+        _session_cwd_specs.pop(scoped, None)
+        for key in list(_session_cwd):
+            if (
+                isinstance(key, tuple)
+                and len(key) == 2
+                and key[0] in {raw, scoped}
+            ):
+                _session_cwd.pop(key, None)
+                _session_cwd_specs.pop(key, None)
 
 
 def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
@@ -282,7 +338,7 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
     too, so env-side seeding stays consistent (ACP switching project root
     mid-session via ``session/load``).
     """
-    _task_env_overrides[task_id] = overrides
+    _task_env_overrides[_profile_scoped_task_key(task_id)] = overrides
 
     new_cwd = overrides.get("cwd")
     if isinstance(new_cwd, str) and new_cwd.strip():
@@ -292,9 +348,24 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
         # a CWD-only override (which collapses to "default") still finds it.
         container_id = _resolve_container_task_id(task_id)
         with _env_lock:
-            env = _active_environments.get(task_id) or _active_environments.get(container_id)
-        if env is not None and getattr(env, "cwd", None) is not None:
-            env.cwd = new_cwd
+            if (
+                default_resolution is not None
+                and default_resolution.named
+                and default_resolution.backend != "ssh"
+            ):
+                candidate_keys = {
+                    default_resolution.environment_key(task_id),
+                    default_resolution.environment_key(container_id),
+                }
+            else:
+                candidate_keys = {task_id, container_id}
+            envs = [
+                env for key, env in _active_environments.items()
+                if key in candidate_keys
+            ]
+        for env in envs:
+            if getattr(env, "cwd", None) is not None:
+                env.cwd = new_cwd
 
 
 def clear_task_env_overrides(task_id: str):
@@ -337,7 +408,13 @@ def _has_isolation_overrides(task_id: Optional[str]) -> bool:
     container creation so the two can't drift."""
     if not task_id or task_id not in _task_env_overrides:
         return False
-    return bool(set(_task_env_overrides[task_id].keys()) & _ISOLATION_OVERRIDE_KEYS)
+    scoped_task_id = _profile_scoped_task_key(task_id)
+    if scoped_task_id not in _task_env_overrides:
+        return False
+    return bool(
+        set(_task_env_overrides[scoped_task_id].keys())
+        & _ISOLATION_OVERRIDE_KEYS
+    )
 
 
 @dataclass(frozen=True)
@@ -454,9 +531,11 @@ def resolve_task_overrides(task_id: Optional[str]) -> Dict[str, Any]:
     the terminal and file layers can't drift apart.
     """
     raw = task_id or "default"
+    scoped_raw = _profile_scoped_task_key(raw)
+    scoped_collapsed = _profile_scoped_task_key(_resolve_container_task_id(raw))
     return (
-        _task_env_overrides.get(raw)
-        or _task_env_overrides.get(_resolve_container_task_id(raw))
+        _task_env_overrides.get(scoped_raw)
+        or _task_env_overrides.get(scoped_collapsed)
         or {}
     )
 
@@ -647,8 +726,8 @@ def _get_env_config() -> Dict[str, Any]:
         "cwd": cwd,
         "host_cwd": host_cwd,
         "docker_mount_cwd_to_workspace": mount_docker_cwd,
-        "timeout": _parse_env_var("TERMINAL_TIMEOUT", "180"),
-        "lifetime_seconds": _parse_env_var("TERMINAL_LIFETIME_SECONDS", "300"),
+        "timeout": _coerce(_get("timeout", "TERMINAL_TIMEOUT", 180), int, "integer", "timeout"),
+        "lifetime_seconds": _coerce(_get("lifetime_seconds", "TERMINAL_LIFETIME_SECONDS", 300), int, "integer", "lifetime_seconds"),
         # SSH-specific config
         "ssh_host": _tenv("TERMINAL_SSH_HOST", ""),
         "ssh_user": _tenv("TERMINAL_SSH_USER", ""),
@@ -771,6 +850,8 @@ def _resolve_command_cwd(
     workdir: Optional[str],
     default_cwd: str,
     session_key: Optional[str] = None,
+    target: Optional[str] = None,
+    _resolution=None,
     env_type: Optional[str] = None,
 ) -> str:
     """cwd for a command: explicit ``workdir`` > the session's own cwd record >
@@ -1254,8 +1335,8 @@ def terminal_tool(
         return _fatal_error_json(e)
 
 
-def check_terminal_requirements() -> bool:
-    """Check if all requirements for the terminal tool are met."""
+def _check_terminal_config_requirements(config: Dict[str, Any]) -> bool:
+    """Check one already-resolved backend configuration."""
     try:
         config = _get_env_config()
         checker = _REQUIREMENT_CHECKERS.get(config["env_type"], _check_plugin_requirements)
@@ -1290,6 +1371,10 @@ TERMINAL_SCHEMA = {
             "workdir": {
                 "type": "string",
                 "description": "Working directory for this command (absolute path). Defaults to the session working directory."
+            },
+            "execution_target": {
+                "type": "string",
+                "description": "Named execution target from terminal.targets (for example 'local' or 'devbox'). Omit to use terminal.default_target; legacy flat config accepts only 'default'.",
             },
             "pty": {
                 "type": "boolean",

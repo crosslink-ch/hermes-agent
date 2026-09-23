@@ -72,6 +72,23 @@ class FileStateRegistryUnitTests(unittest.TestCase):
         file_state.note_write("B", p)
         warn = file_state.check_stale("A", p)
         self.assertIsNotNone(warn)
+        assert isinstance(warn, str)
+        self.assertIn("B", warn)
+        self.assertIn("sibling", warn.lower())
+
+    def test_remote_write_records_without_host_stat(self):
+        remote_path = "/remote-only/project/file.txt"
+        namespace = "ssh:physical-host"
+        file_state.record_read(
+            "A", remote_path, namespace=namespace, stat_path=False,
+        )
+        time.sleep(0.01)
+        file_state.note_write(
+            "B", remote_path, namespace=namespace, stat_path=False,
+        )
+        warn = file_state.check_stale("A", remote_path, namespace=namespace)
+        self.assertIsNotNone(warn)
+        assert isinstance(warn, str)
         self.assertIn("B", warn)
         self.assertIn("sibling", warn.lower())
 

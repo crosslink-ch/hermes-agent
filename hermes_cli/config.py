@@ -2048,6 +2048,38 @@ def terminal_config_owned_env_vars(terminal_config: Any) -> Set[str]:
         and _terminal_config_value_is_bridgeable(key, terminal_config[key])}
 
 
+def effective_terminal_config(terminal_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the flat settings represented by the configured default target.
+
+    Legacy/runtime-adjacent consumers still use ``TERMINAL_*`` variables to
+    describe the environment selected when a tool call omits ``target``. In
+    named-target mode those variables must mirror ``default_target`` rather
+    than the top-level inheritance defaults.
+
+    Invalid target configuration remains the strict resolver's responsibility;
+    this compatibility bridge stays fail-open so config loading retains its
+    historical behavior.
+    """
+    if not isinstance(terminal_cfg, dict):
+        return {}
+    targets = terminal_cfg.get("targets")
+    default_target = terminal_cfg.get("default_target")
+    flat = {
+        key: value for key, value in terminal_cfg.items()
+        if key not in {"targets", "default_target"}
+    }
+    if not isinstance(targets, dict) or not targets:
+        return dict(terminal_cfg)
+    if not isinstance(default_target, str):
+        return flat
+    selected = targets.get(default_target)
+    if not isinstance(selected, dict):
+        return flat
+    effective = dict(flat)
+    effective.update(selected)
+    return effective
+
+
 def terminal_config_env_var_for_key(key: str) -> Optional[str]:
     """Return the env var mirrored by a ``terminal.*`` config key."""
     return TERMINAL_CONFIG_ENV_MAP.get(key[len("terminal."):]) if key.startswith("terminal.") else None
@@ -2078,6 +2110,10 @@ def apply_terminal_config_to_env(
     terminal_cfg = cfg.get("terminal", {}) if isinstance(cfg, dict) else {}
     if not isinstance(terminal_cfg, dict):
         return target
+    terminal_cfg = effective_terminal_config(terminal_cfg)
+    terminal_backend = str(
+        terminal_cfg.get("backend") or terminal_cfg.get("env_type") or "local"
+    ).strip().lower()
 
     # A caller-supplied config is its own source of explicit keys; otherwise only keys present
     # in raw config.yaml may override existing env values (DEFAULT_CONFIG keys are backfill-only).

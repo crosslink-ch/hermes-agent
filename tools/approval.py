@@ -1070,6 +1070,28 @@ def _tirith_scan(command: str) -> dict:
         }]}
 
 
+def _execution_scoped_pattern_key(
+    pattern_key: str, execution_target: str, named: bool,
+    execution_target_scope: str = "",
+) -> str:
+    """Scope persisted approvals to a named target without key collisions."""
+    if not named:
+        return pattern_key
+    target = str(execution_target or "")
+    if execution_target_scope:
+        return f"target:{execution_target_scope}:{pattern_key}"
+    try:
+        from tools.execution_targets import _active_profile_scope
+
+        profile_scope = _active_profile_scope()
+    except Exception:
+        profile_scope = ""
+    digest = hashlib.sha256(
+        f"{profile_scope}:{target}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"target:{digest}:{pattern_key}"
+
+
 def check_all_command_guards(command: str, env_type: str,
                              approval_callback=None,
                              has_host_access: bool = False) -> dict:

@@ -335,7 +335,8 @@ def _mirror_config_to_env(defaults, _file_has_terminal_config):
     effective_backend = terminal_config.get("env_type", "local")
     if effective_backend == "local":
         terminal_config["cwd"] = os.getcwd()
-        defaults["terminal"]["cwd"] = terminal_config["cwd"]
+        if not named_terminal_mode:
+            defaults["terminal"]["cwd"] = terminal_config["cwd"]
     elif terminal_config.get("cwd") in _CWD_PLACEHOLDERS:
         terminal_config.pop("cwd", None)
 

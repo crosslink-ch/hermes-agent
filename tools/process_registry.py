@@ -550,6 +550,22 @@ class ProcessRegistry(ProcessCheckpointMixin):
         self.on_close = None
 
     @staticmethod
+    def _with_execution_metadata(result: dict, session: ProcessSession) -> dict:
+        """Add stable target/backend identity to a process result."""
+        if session.target:
+            result["target"] = session.target
+        if session.backend:
+            result["backend"] = session.backend
+        runtime_scope = session.runtime_scope or getattr(
+            session.env_ref, "_hermes_target_scope", None
+        )
+        if isinstance(runtime_scope, str) and runtime_scope:
+            result["runtime_scope"] = runtime_scope
+        if session.cwd and "cwd" not in result:
+            result["cwd"] = session.cwd
+        return result
+
+    @staticmethod
     def _clean_shell_noise(text: str) -> str:
         """Strip shell startup warnings from the beginning of output."""
         lines = text.split("\n")
@@ -1360,6 +1376,9 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 # Stable producer identity across checkpoint recovery (unlike a
                 # consumer-observed completion timestamp).
                 "started_at": session.started_at,
+                **({"target": session.target} if session.target else {}),
+                **({"backend": session.backend} if session.backend else {}),
+                **({"cwd": session.cwd} if session.cwd else {}),
             }
             _redact_process_result(notification)
             self.completion_queue.put(notification)
@@ -1734,6 +1753,10 @@ class ProcessRegistry(ProcessCheckpointMixin):
         with status exited|timeout|interrupted|not_found|error and an output snapshot."""
         from tools.interrupt import consume_yield as _consume_yield, is_interrupted as _is_interrupted
 
+        session = self.get(session_id)
+        if session is None:
+            return {"status": "not_found", "error": f"No process with ID {session_id}"}
+
         try:
             max_timeout = int(os.getenv("TERMINAL_TIMEOUT", "180"))
         except (ValueError, TypeError):
@@ -1924,7 +1947,9 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 pipe_op(session.process.stdin)
             return ok
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            return self._with_execution_metadata(
+                {"status": "error", "error": str(e)}, session,
+            )
 
     def write_stdin(self, session_id: str, data: str) -> dict:
         """Send raw data to a running process's stdin (no newline appended)."""

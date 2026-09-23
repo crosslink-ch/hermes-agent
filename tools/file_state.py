@@ -15,7 +15,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Hashable, Iterable, List, Optional, Tuple
 
 # (mtime, read_ts, partial). partial=True when read_file returned a windowed
 # view (offset > 1 or limit < total_lines) — a later write should still warn
@@ -61,8 +61,8 @@ class FileStateRegistry:
     """Process-wide coordinator for cross-agent file edits."""
 
     def __init__(self) -> None:
-        self._reads: Dict[str, Dict[str, ReadStamp]] = defaultdict(dict)
-        self._last_writer: Dict[str, Tuple[str, float]] = {}
+        self._reads: Dict[TaskKey, Dict[str, ReadStamp]] = defaultdict(dict)
+        self._last_writer: Dict[str, Tuple[TaskKey, float]] = {}
         self._path_locks: Dict[str, threading.Lock] = {}
         self._path_lock_users: Dict[str, int] = {}
         self._meta_lock = threading.Lock()  # guards _path_locks
@@ -113,6 +113,7 @@ class FileStateRegistry:
         if mtime is None:
             return
         now = time.time()
+        state_path = self._state_path(resolved, namespace)
         with self._state_lock:
             self._last_writer[resolved] = (task_id, now)
             _evict_oldest(self._last_writer, _MAX_GLOBAL_WRITERS)
@@ -123,9 +124,10 @@ class FileStateRegistry:
         order: sibling wrote after our read > mtime drift / partial read > never read."""
         if _disabled():
             return None
+        state_path = self._state_path(resolved, namespace)
         with self._state_lock:
-            stamp = self._reads.get(task_id, {}).get(resolved)
-            last_writer = self._last_writer.get(resolved)
+            stamp = self._reads.get(task_id, {}).get(state_path)
+            last_writer = self._last_writer.get(state_path)
 
         if stamp is None and last_writer is None:  # net-new file / first touch
             return None
@@ -176,6 +178,7 @@ class FileStateRegistry:
         if _disabled():
             return {}
         paths_set = set(paths)
+        exclude_raw = _raw_task_id(exclude_task_id)
         out: Dict[str, List[str]] = defaultdict(list)
         with self._state_lock:
             for p, (writer_tid, ts) in self._last_writer.items():
@@ -188,7 +191,20 @@ class FileStateRegistry:
         if _disabled():
             return []
         with self._state_lock:
-            return list(self._reads.get(task_id, {}).keys())
+            reads: list[str] = []
+            seen: set[str] = set()
+            for key, paths in self._reads.items():
+                if key != task_id and _raw_task_id(key) != task_id:
+                    continue
+                for path in paths:
+                    # Preserve the internal target namespace for delegate
+                    # coordination; writes_since strips it before user-facing
+                    # output but uses it to avoid cross-host false conflicts.
+                    read_path = path if "\0" in path else self._display_path(path)
+                    if read_path not in seen:
+                        reads.append(read_path)
+                        seen.add(read_path)
+            return reads
 
     def forget_task(self, task_id: str) -> None:
         """Release read stamps owned by a task after its lifecycle ends."""
@@ -217,24 +233,43 @@ def record_read(task_id: str, resolved_or_path: str | Path, *, partial: bool = F
     _registry.record_read(task_id, str(resolved_or_path), partial=partial)
 
 
-def note_write(task_id: str, resolved_or_path: str | Path) -> None:
-    _registry.note_write(task_id, str(resolved_or_path))
+def note_write(task_id: TaskKey, resolved_or_path: str | Path, *,
+               namespace: Optional[str] = None,
+               stat_path: bool = True) -> None:
+    _registry.note_write(
+        task_id, str(resolved_or_path), namespace=namespace,
+        stat_path=stat_path,
+    )
 
 
-def check_stale(task_id: str, resolved_or_path: str | Path) -> Optional[str]:
-    return _registry.check_stale(task_id, str(resolved_or_path))
+def check_stale(task_id: TaskKey, resolved_or_path: str | Path, *,
+                namespace: Optional[str] = None) -> Optional[str]:
+    return _registry.check_stale(
+        task_id, str(resolved_or_path), namespace=namespace,
+    )
 
 
-def lock_path(resolved_or_path: str | Path):
-    return _registry.lock_path(str(resolved_or_path))
+def lock_path(resolved_or_path: str | Path, *, namespace: Optional[str] = None):
+    return _registry.lock_path(str(resolved_or_path), namespace=namespace)
 
 
 def writes_since(exclude_task_id: str, since_ts: float, paths: Iterable[str | Path]) -> Dict[str, List[str]]:
     return _registry.writes_since(exclude_task_id, since_ts, [str(p) for p in paths])
 
 
-def known_reads(task_id: str) -> List[str]:
-    return _registry.known_reads(task_id)
+def known_reads(task_id: TaskKey) -> List[str]:
+    reads = _registry.known_reads(task_id)
+    try:
+        from tools.execution_targets import resolve_execution_target
+
+        scoped = resolve_execution_target().scope_task_key(task_id)
+    except Exception:
+        scoped = task_id
+    if scoped != task_id:
+        for path in _registry.known_reads(scoped):
+            if path not in reads:
+                reads.append(path)
+    return reads
 
 
 __all__ = [
