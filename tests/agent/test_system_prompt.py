@@ -144,13 +144,12 @@ def test_environment_hints_receive_agent_profile_home(tmp_path):
     calls = []
 
     with (
-        patch("run_agent.load_soul_md", return_value=""),
-        patch("run_agent.build_nous_subscription_prompt", return_value=""),
+        patch("agent.prompt_builder.load_soul_md", return_value=""),
         patch(
-            "run_agent.build_environment_hints",
+            "agent.prompt_builder.build_environment_hints",
             side_effect=lambda **kwargs: calls.append(dict(kwargs)) or "",
         ),
-        patch("run_agent.build_context_files_prompt", return_value=""),
+        patch("agent.prompt_builder.build_context_files_prompt", return_value=""),
     ):
         build_system_prompt_parts(agent)
 
@@ -164,13 +163,12 @@ def test_environment_hints_ignore_non_path_session_db():
     calls = []
 
     with (
-        patch("run_agent.load_soul_md", return_value=""),
-        patch("run_agent.build_nous_subscription_prompt", return_value=""),
+        patch("agent.prompt_builder.load_soul_md", return_value=""),
         patch(
-            "run_agent.build_environment_hints",
+            "agent.prompt_builder.build_environment_hints",
             side_effect=lambda **kwargs: calls.append(dict(kwargs)) or "",
         ),
-        patch("run_agent.build_context_files_prompt", return_value=""),
+        patch("agent.prompt_builder.build_context_files_prompt", return_value=""),
     ):
         build_system_prompt_parts(agent)
 

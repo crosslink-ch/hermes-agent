@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from agent.tool_executor import _begin_tool_execution, _ensure_file_checkpoint
+from agent.tool_executor import _ToolCallRef, _begin_tool_execution, _ensure_file_checkpoint
 from tools.checkpoint_manager import CheckpointManager
 
 
@@ -89,6 +89,7 @@ def test_remote_target_skips_host_checkpoint(monkeypatch):
                     "devbox": {
                         "backend": "ssh",
                         "ssh_host": "example.invalid",
+                        "ssh_user": "agent",
                         "cwd": "/workspace/project",
                     },
                 },
@@ -151,14 +152,15 @@ def test_destructive_terminal_checkpoint_prefers_explicit_workdir(
 
     _begin_tool_execution(
         agent,
-        function_name="terminal",
-        function_args={
-            "command": "rm -f marker",
-            "workdir": str(actual),
-            "execution_target": "local",
-        },
-        effective_task_id="gateway-session",
-        tool_call_id="call-1",
+        _ToolCallRef(
+            "terminal",
+            {
+                "command": "rm -f marker",
+                "workdir": str(actual),
+                "execution_target": "local",
+            },
+            "gateway-session", "call-1", [],
+        ),
         display_index=None,
     )
 

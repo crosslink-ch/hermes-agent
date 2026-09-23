@@ -935,21 +935,27 @@ def _contains_unsafe_gateway_action(
         if not budget.charge_path():
             return _budget_exhausted("paths", depth)
         visited.add(resolved)
-        # Never read more than the walk can still afford to tokenize; a file larger than the
-        # remainder fails closed exactly like an oversized one.
-        script_text, unsafe = _read_referenced_script(script_path, max_bytes=budget.bytes_remaining)
-        if unsafe:
-            return True
-        if script_text is None and read_remote_script is not None:
-            # Local path missing; the remote backend's output crosses the same trust boundary as a
-            # local read — sanitize identically (binary skip + size fail-closed).
+        # A selected remote reader is authoritative. A matching host path
+        # must never shadow the script executed in the target environment.
+        if read_remote_script is not None:
             if not budget.charge_remote_read():
                 return _budget_exhausted("remote reads", depth)
+            remote_result = read_remote_script(str(script_path))
+            if isinstance(remote_result, tuple):
+                remote_text, remote_unsafe = remote_result
+                if remote_unsafe:
+                    return True
+            else:
+                remote_text = remote_result
             script_text, unsafe = _sanitize_remote_script_text(
-                read_remote_script(str(script_path)), max_bytes=budget.bytes_remaining
+                remote_text, max_bytes=budget.bytes_remaining,
             )
-            if unsafe:
-                return True
+        else:
+            script_text, unsafe = _read_referenced_script(
+                script_path, max_bytes=budget.bytes_remaining,
+            )
+        if unsafe:
+            return True
         if not script_text:
             continue
         # Relative references inside a script resolve against that script's directory, not the cwd.

@@ -700,9 +700,36 @@ _ACTION_GATE = _GateSpec(
 )
 
 
+def _target_smart_verdict(command, description, pattern_key, pattern_keys,
+                          session_key, execution_target, execution_backend):
+    """Run the fork's smart gate with target metadata in its single observer pair."""
+    from tools.approval_smart import _smart_approve
+    try:
+        from agent.redact import redact_sensitive_text
+        payload = {
+            "command": redact_sensitive_text(command, force=True),
+            "description": redact_sensitive_text(description, force=True),
+            "pattern_key": pattern_key, "pattern_keys": list(pattern_keys),
+            "session_key": session_key, "surface": "smart",
+            "target": execution_target, "backend": execution_backend,
+        }
+    except Exception:
+        payload = None  # No unredacted hook payload on redaction failure.
+    if payload is not None:
+        approval_context._fire_approval_hook("pre_approval_request", **payload)
+    verdict = _smart_approve(command, description)
+    if payload is not None and verdict in {"approve", "deny"}:
+        approval_context._fire_approval_hook(
+            "post_approval_response", **payload,
+            choice=f"smart_{verdict}", decided_by="aux_llm",
+        )
+    return verdict
+
+
 def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: str,
                 pattern_keys: list[str], session_key: str, *,
-                human_present: bool) -> tuple[dict | None, bool]:
+                human_present: bool, execution_target: str = "",
+                 execution_backend: str = "") -> tuple[dict | None, bool]:
     """Guardian-LLM step -> ``(result, smart_denied_for_owner)``: a result ends the gate;
     ``smart_denied_for_owner`` means an interactive owner may still override the DENY for this
     one operation (once/deny only, nothing persists).
@@ -712,7 +739,12 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
     counts toward the denial breaker even when an owner may override it. ESCALATE follows the
     normal, potentially persistent manual behavior.
     """
-    verdict = _smart_verdict(command, description, pattern_key, pattern_keys, session_key)
+    verdict = (
+        _target_smart_verdict(command, description, pattern_key, pattern_keys,
+                              session_key, execution_target, execution_backend)
+        if execution_target else
+        _smart_verdict(command, description, pattern_key, pattern_keys, session_key)
+    )
     if verdict == "approve":
         _reset_denials(session_key)
         logger.debug(spec.smart_log.format(command=command[:60], description=description, session_key=session_key))
@@ -736,7 +768,8 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
                     pattern_key: str, pattern_keys: list[str], warnings: list[tuple],
                     session_key: str, approval_callback, is_cli: bool, is_gateway: bool,
                     is_ask: bool, smart: bool = False,
-                    permanent_capable: bool = True, pending_body=None) -> dict:
+                    permanent_capable: bool = True, pending_body=None,
+                     execution_target: str = "", execution_backend: str = "") -> dict:
     """Ask a human (after the optional guardian-LLM step) and turn the answer into the gate result.
 
     ``warnings`` are the ``(key, _, is_tirith)`` tuples :func:`_persist_choice` stores on
@@ -750,7 +783,8 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     smart_denied = False
     if smart:
         result, smart_denied = _smart_gate(spec, command, description, pattern_key, pattern_keys,
-                                           session_key, human_present=is_cli or is_gateway or is_ask)
+                                           session_key, human_present=is_cli or is_gateway or is_ask,
+                                            execution_target=execution_target, execution_backend=execution_backend)
         if result is not None:
             return result
     pending_body = pending_body() if pending_body else None
@@ -806,6 +840,7 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
                 "pattern_keys": pattern_keys, "description": display_description,
                 "allow_permanent": permanent_capable and not smart_denied,
                 "allow_session": not smart_denied,
+                "target": execution_target, "backend": execution_backend,
             }
             if smart_denied:
                 data["smart_denied"] = True
@@ -1094,7 +1129,10 @@ def _execution_scoped_pattern_key(
 
 def check_all_command_guards(command: str, env_type: str,
                              approval_callback=None,
-                             has_host_access: bool = False) -> dict:
+                             has_host_access: bool = False, execution_target: str = "default",
+                             execution_backend: Optional[str] = None,
+                             execution_target_named: bool = False,
+                             execution_target_scope: str = "") -> dict:
     """Run all pre-exec security checks and return a single approval decision. Tirith and
     dangerous-command findings are presented as ONE combined approval request, so a gateway
     force=True replay cannot bypass one check when only the other was shown to the user.
@@ -1131,15 +1169,23 @@ def check_all_command_guards(command: str, env_type: str,
     if tirith_result["action"] in {"block", "warn"}:
         findings = tirith_result.get("findings") or []
         rule_id = findings[0].get("rule_id", "unknown") if findings else "unknown"
-        tirith_key = f"tirith:{rule_id}"
+        tirith_key = _execution_scoped_pattern_key(
+            f"tirith:{rule_id}", execution_target, execution_target_named, execution_target_scope
+        )
         if not is_approved(session_key, tirith_key):
             warnings.append((tirith_key, _format_tirith_description(tirith_result), True))
+    if is_dangerous:
+        pattern_key = _execution_scoped_pattern_key(
+            pattern_key, execution_target, execution_target_named, execution_target_scope
+        )
     if is_dangerous and not is_approved(session_key, pattern_key):
         warnings.append((pattern_key, description, False))
     if not warnings:
         return _approved()
 
+    execution_backend = execution_backend or env_type
     combined_desc = "; ".join(desc for _, desc, _ in warnings)
+    combined_desc += f" [execution target: {execution_target!r}; backend: {execution_backend}]"
     primary_key = warnings[0][0]
     all_keys = [key for key, _, _ in warnings]
 
@@ -1152,6 +1198,7 @@ def check_all_command_guards(command: str, env_type: str,
         session_key=session_key, approval_callback=approval_callback,
         is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask, smart=approval_mode == "smart",
         permanent_capable=any(not is_t for _, _, is_t in warnings),
+        execution_target=execution_target, execution_backend=execution_backend,
     )
 
 
@@ -1161,7 +1208,10 @@ _EXECUTE_CODE_DESCRIPTION = (
 )
 
 
-def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = False) -> dict:
+def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = False,
+                             execution_target: str = "default", execution_backend: str | None = None,
+                             execution_target_named: bool = False,
+                             execution_target_scope: str = "") -> dict:
     """Approve an execute_code script before its child process is spawned.
 
     The script can call ``subprocess``/``os.system``/``ctypes`` directly, none of which pass
@@ -1176,8 +1226,13 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     arbitrary code headlessly without any approval surface is trusted-by-config (set a gateway/ask surface
     or ``approvals.cron_mode`` to require approval). See #30882.
     """
-    pattern_key = "execute_code"
-    description = _EXECUTE_CODE_DESCRIPTION
+    pattern_key = _execution_scoped_pattern_key(
+        "execute_code", execution_target, execution_target_named, execution_target_scope
+    )
+    execution_backend = execution_backend or env_type
+    description = _EXECUTE_CODE_DESCRIPTION + (
+        f" [execution target: {execution_target!r}; backend: {execution_backend}]"
+    )
 
     # Isolated backends already sandbox the child. vercel_sandbox has no host-bind concept so it stays always-skipped.
     if env_type == "vercel_sandbox":
@@ -1227,6 +1282,7 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
         pattern_keys=[pattern_key], warnings=[(pattern_key, None, False)], session_key=session_key,
         approval_callback=approval_callback, is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
         smart=approval_mode == "smart",
+        execution_target=execution_target, execution_backend=execution_backend,
         pending_body=lambda: f"**Code:**\n```python\n{redact_sensitive_text(code)}\n```",
     )
 

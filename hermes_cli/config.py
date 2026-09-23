@@ -2117,9 +2117,10 @@ def apply_terminal_config_to_env(
 
     # A caller-supplied config is its own source of explicit keys; otherwise only keys present
     # in raw config.yaml may override existing env values (DEFAULT_CONFIG keys are backfill-only).
-    explicit_keys = terminal_cfg.keys() if config is not None else raw_terminal_cfg.keys()
+    raw_effective = effective_terminal_config(raw_terminal_cfg)
+    explicit_keys = terminal_cfg.keys() if config is not None else raw_effective.keys()
     backend_sources = (terminal_cfg.get("backend"), target.get("TERMINAL_ENV"))
-    if not (config is not None or "backend" in raw_terminal_cfg):
+    if not (config is not None or "backend" in raw_effective):
         backend_sources = backend_sources[::-1]  # env wins when the file did not set backend
     terminal_backend = str(backend_sources[0] or backend_sources[1] or "")
 

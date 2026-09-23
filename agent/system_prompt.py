@@ -245,7 +245,7 @@ def _agent_home(agent: Any) -> Optional[Path]:
         pass
     try:
         db_path = getattr(getattr(agent, "_session_db", None), "db_path", None)
-        return Path(db_path).parent if db_path else None
+        return Path(db_path).parent if isinstance(db_path, (str, Path)) and db_path else None
     except Exception:
         return None
 
@@ -630,7 +630,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # Coding posture: the operating brief stays in the stable prefix. The
     # environment block contains the current cwd/backend and belongs after
     # project context, not ahead of a large shared AGENTS.md block.
-    environment_hints = _pb.build_environment_hints()
+    environment_hints = _pb.build_environment_hints(home_override=_agent_home(agent))
     coding_prefix_parts, coding_workspace_parts, coding_trailing_parts = _coding_parts(agent)
     stable_parts.extend(coding_prefix_parts)
     post_workspace_parts = _post_workspace_parts(agent)

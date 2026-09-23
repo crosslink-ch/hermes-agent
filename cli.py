@@ -324,7 +324,10 @@ _CWD_PLACEHOLDERS = (".", "auto", "cwd")
 
 def _mirror_config_to_env(defaults, _file_has_terminal_config):
     """Project config.yaml values into the env vars the tool modules read (terminal/browser/auxiliary/security/sessions). Env always wins when already set."""
-    terminal_config = defaults.get("terminal", {})
+    from hermes_cli.config import effective_terminal_config
+    raw_terminal_config = defaults.get("terminal", {})
+    named_terminal_mode = bool(raw_terminal_config.get("targets")) if isinstance(raw_terminal_config, dict) else False
+    terminal_config = effective_terminal_config(raw_terminal_config)
 
     # "backend" (documented) and legacy "env_type" are both accepted; "backend" wins.
     if "backend" in terminal_config:
@@ -496,6 +499,9 @@ def load_cli_config() -> Dict[str, Any]:
 
     defaults = managed_scope.apply_managed_overlay(defaults)
 
+    if os.environ.get("_HERMES_GATEWAY") != "1":
+        from tools.execution_targets import set_execution_target_config_source
+        set_execution_target_config_source(defaults)
     _mirror_config_to_env(defaults, _file_has_terminal_config)
 
     return defaults
