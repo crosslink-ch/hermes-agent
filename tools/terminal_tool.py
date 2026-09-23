@@ -26,7 +26,7 @@ import time
 import threading
 import atexit
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Hashable, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,15 @@ from tools.registry import tool_error
 from tools.terminal_tool_lifecycle import (
     _check_disk_usage_warning, _cleanup_inactive_envs, _create_configured_env,
     _evict_environment_for_task, cleanup_all_environments, ensure_task_env,
+    cleanup_vm, get_active_env, get_environment_for_target_scope, is_persistent_env,
 )
 from tools.terminal_tool_config import (
-    _is_container_backend, _is_host_cwd, _is_unusable_container_cwd, _parse_env_var,
+    _HOST_CWD_PREFIXES, _CONTAINER_BACKENDS, _is_container_backend, _is_host_cwd, _is_unusable_container_cwd, _parse_env_var,
     _plugin_env_flag, _quiet, _safe_getcwd, _tenv, _tenv_bool,
 )
 from tools.terminal_tool_backends import (
     _REQUIREMENT_CHECKERS, _VERCEL_SANDBOX_DEFAULT_CWD, _check_plugin_requirements,
+    _create_environment,
 )
 # display_hermes_home imported lazily at call site (stale-module safety during hermes update)
 from tools.tool_backend_helpers import coerce_modal_mode, managed_nous_tools_enabled
@@ -150,13 +152,13 @@ def _check_all_guards(command: str, env_type: str,
                       execution_target_named: bool = False,
                       execution_target_scope: str = "") -> dict:
     """Delegate to consolidated guard (tirith + dangerous cmd) with CLI callback."""
-    return _check_all_guards_impl(command, env_type,
-                                  approval_callback=_get_approval_callback(),
-                                  has_host_access=has_host_access,
-                                  execution_target=execution_target,
-                                  execution_backend=execution_backend or env_type,
-                                  execution_target_named=execution_target_named,
-                                  execution_target_scope=execution_target_scope)
+    kwargs = dict(approval_callback=_get_approval_callback(), has_host_access=has_host_access)
+    if execution_target_named:
+        kwargs.update(execution_target=execution_target,
+                      execution_backend=execution_backend or env_type,
+                      execution_target_named=True,
+                      execution_target_scope=execution_target_scope)
+    return _check_all_guards_impl(command, env_type, **kwargs)
 
 
 from tools.environments.base import EnvironmentConnectionError
@@ -175,13 +177,27 @@ PTY: pty=true + background=true for interactive CLIs (they hang without a termin
 """
 
 # Environment lifecycle state.
-_active_environments: Dict[str, Any] = {}
-_last_activity: Dict[str, float] = {}
+_active_environments: Dict[Hashable, Any] = {}
+_last_activity: Dict[Hashable, float] = {}
 _env_lock = threading.Lock()
 _retired_environments: list[tuple[Hashable, Any, float]] = []
 _retired_environments_lock = threading.Lock()
 _creation_locks: Dict[Hashable, threading.Lock] = {}  # Per-target locks for sandbox creation
 _creation_locks_lock = threading.Lock()  # Protects _creation_locks dict itself
+from tools.terminal_tool_target_lifecycle import (
+    _active_turn_counts, _active_turn_counts_lock, _deferred_environment_cleanups,
+    _active_turns_for_environment_key, _build_environment_constructor_configs,
+    _cleanup_environment_resource, _cleanup_retired_environments,
+    _current_owned_environment_turns, _environment_has_stable_storage,
+    _environment_matches_target, _environment_replacement_is_busy,
+    _EnvironmentReplacementError, _prepare_environment_replacement,
+    _record_environment_lifetime, _record_environment_target,
+    _retire_replaced_environment, active_environment_turns,
+    defer_environment_turn_cleanup, environment_turn_usage,
+    execution_environment_turn_key, logical_environment_turn,
+    register_environment_turn, release_environment_turn,
+    release_logical_environment_turn, release_logical_environment_turn_for_cleanup,
+)
 _cleanup_thread = None
 _cleanup_running = False
 
@@ -246,18 +262,41 @@ _task_env_overrides: Dict[str, Dict[str, Any]] = {}
 # it is a global mutable timeshared between sessions (the wrong-worktree bug
 # class). Written after every completed command and on cwd-override
 # registration; readers resolve against it before any env-side cwd.
-_session_cwd: Dict[str, str] = {}
+_session_cwd: Dict[Hashable, str] = {}
+_session_cwd_specs: Dict[Hashable, str] = {}
 _session_cwd_lock = threading.Lock()
 
 # Subagent → parent container aliasing. delegate_task children have their own
 # task_id but must share the PARENT's container; under per-session isolation
 # the collapse-to-"default" shortcut no longer provides that, so the spawn
 # site registers an explicit alias.
-_container_aliases: Dict[str, str] = {}
+_container_aliases: Dict[tuple[str, str], str] = {}
 _container_alias_lock = threading.Lock()
 
+def _target_resolution(target=None):
+    from tools.execution_targets import resolve_execution_target
+    return resolve_execution_target(target)
 
-def record_session_cwd(session_key: Optional[str], cwd: Optional[str]) -> None:
+def _environment_scope_key(task_key: Hashable, resolution) -> Hashable:
+    return resolution.environment_key(task_key)
+
+def _profile_scoped_task_key(task_key: Hashable) -> Hashable:
+    try:
+        return _target_resolution(None).scope_task_key(task_key)
+    except Exception:
+        return task_key
+
+def _container_alias_profile_scope() -> str:
+    try:
+        return str(_target_resolution(None).profile_scope or "")
+    except Exception:
+        return ""
+
+def _container_alias_key(task_id: str) -> tuple[str, str]:
+    return (_container_alias_profile_scope(), str(task_id))
+
+
+def record_session_cwd(session_key: Optional[str], cwd: Optional[str], target: Optional[str] = None, *, _resolution=None) -> None:
     """Record *cwd* as *session_key*'s working directory (after a completed
     command, or on workspace-override registration). None/empty keys collapse
     to ``"default"``; non-string / empty cwds are ignored."""
@@ -274,11 +313,16 @@ def record_session_cwd(session_key: Optional[str], cwd: Optional[str]) -> None:
             _session_cwd_specs.pop(key, None)
 
 
-def get_session_cwd(session_key: Optional[str]) -> Optional[str]:
+def get_session_cwd(session_key: Optional[str], target: Optional[str] = None, *, _resolution=None) -> Optional[str]:
     """Recorded cwd for *session_key*, or None. No fallback chain on purpose:
     callers decide what an absent record means. None/empty keys read ``"default"``."""
+    resolution = _resolution or _target_resolution(target)
+    key = resolution.session_key(session_key)
     with _session_cwd_lock:
-        return _session_cwd.get(str(session_key or "default"))
+        spec = _session_cwd_specs.get(key)
+        if resolution.named and spec is not None and spec != resolution.spec_fingerprint:
+            return None
+        return _session_cwd.get(key)
 
 
 def inherit_session_cwds(parent_task_id: str, child_task_id: str) -> int:
@@ -339,14 +383,19 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
     mid-session via ``session/load``).
     """
     _task_env_overrides[_profile_scoped_task_key(task_id)] = overrides
+    try:
+        default_resolution = _target_resolution(None)
+    except Exception:
+        default_resolution = None
 
     new_cwd = overrides.get("cwd")
     if isinstance(new_cwd, str) and new_cwd.strip():
-        record_session_cwd(task_id, new_cwd)
+        if default_resolution is not None and not (default_resolution.named and default_resolution.backend == "ssh"):
+            record_session_cwd(task_id, new_cwd, _resolution=default_resolution)
         # Live env may be cached under the raw task_id (per-session surfaces)
         # or the collapsed container id (isolation-keyed rollouts); try both so
         # a CWD-only override (which collapses to "default") still finds it.
-        container_id = _resolve_container_task_id(task_id)
+        container_id = _resolve_container_task_id(task_id, config=default_resolution.config if default_resolution else None)
         with _env_lock:
             if (
                 default_resolution is not None
@@ -370,7 +419,7 @@ def register_task_env_overrides(task_id: str, overrides: Dict[str, Any]):
 
 def clear_task_env_overrides(task_id: str):
     """Drop a task's overrides, cwd record and container alias (rollout cleanup)."""
-    _task_env_overrides.pop(task_id, None)
+    _task_env_overrides.pop(_profile_scoped_task_key(task_id), None)
     clear_session_cwd(task_id)
     alias_key = _container_alias_key(task_id)
     with _container_alias_lock:
@@ -411,7 +460,7 @@ def _has_isolation_overrides(task_id: Optional[str]) -> bool:
     """True when *task_id* registered image/env_type overrides — the single
     "isolated RL/benchmark rollout" predicate shared by key resolution and
     container creation so the two can't drift."""
-    if not task_id or task_id not in _task_env_overrides:
+    if not task_id:
         return False
     scoped_task_id = _profile_scoped_task_key(task_id)
     if scoped_task_id not in _task_env_overrides:
@@ -473,12 +522,18 @@ def _session_scope() -> _SessionScope:
     )
 
 
-def _docker_session_isolation_enabled() -> bool:
+def _docker_session_isolation_enabled(config: Optional[Mapping[str, Any]] = None) -> bool:
     """See :attr:`_SessionScope.docker_session_isolated` (used by the docker builder)."""
+    if config is not None:
+        backend = config.get("env_type") or config.get("backend")
+        persistent = config.get("container_persistent", True)
+        if not isinstance(persistent, bool):
+            persistent = str(persistent).lower() in {"true", "1", "yes", "on"}
+        return backend == "docker" and not persistent
     return _session_scope().docker_session_isolated
 
 
-def _resolve_container_task_id(task_id: Optional[str]) -> str:
+def _resolve_container_task_id(task_id: Optional[str], *, config: Optional[Mapping[str, Any]] = None) -> str:
     """Map a tool-call ``task_id`` to the ``_active_environments`` key. Order matters —
     earlier branches are authoritative where they apply:
 
@@ -499,7 +554,10 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     """
     if task_id and _has_isolation_overrides(task_id):
         return task_id
-    scope = _session_scope()
+    scope = _session_scope() if config is None else _SessionScope(
+        str(config.get("env_type") or config.get("backend") or "local"),
+        bool(config.get("container_persistent", True)),
+    )
     if task_id and scope.session_isolated:
         return _resolve_container_alias(task_id)
     # Per-session isolation: when a session key is present (the WebUI streaming layer sets it per-session,
@@ -512,7 +570,7 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     # stay authoritative where they apply and this only covers the cases that would otherwise collapse to
     # the shared "default" key (notably SSH).
     session_key = _current_session_key()
-    shared = _tenv("TERMINAL_DOCKER_SHARED_CONTAINER_KEY", "").strip() if scope.docker_profile_scoped else ""
+    shared = (str(config.get("docker_shared_container_key", "")) if config is not None else _tenv("TERMINAL_DOCKER_SHARED_CONTAINER_KEY", "")).strip() if scope.docker_profile_scoped else ""
     if shared:
         # Explicit opt-in: trusted profiles configuring the same terminal.docker_shared_container_key share
         # ONE container/cache slot (and sandbox dir) regardless of profile name (#84671).
@@ -554,7 +612,8 @@ def resolve_task_overrides(
     raw = task_id or "default"
     scoped_raw = _profile_scoped_task_key(raw)
     scoped_collapsed = _profile_scoped_task_key(
-        _resolve_container_task_id(raw, config=config)
+        _resolve_container_task_id(raw, config=config) if config is not None and _target_resolution(None).named
+        else _resolve_container_task_id(raw)
     )
     return (
         _task_env_overrides.get(scoped_raw)
@@ -610,9 +669,9 @@ def _resolve_task_host_cwd(config: Dict[str, Any], task_id: Optional[str]) -> Op
     if config.get("env_type") != "docker" or not config.get("docker_mount_cwd_to_workspace"):
         return None
     # Top-level CLI parent ("default") is a single-session process — legacy behavior.
-    if not _docker_session_isolation_enabled() or _resolve_container_task_id(task_id) == "default":
+    if not _docker_session_isolation_enabled(config) or _resolve_container_task_id(task_id, config=config) == "default":
         return config.get("host_cwd")
-    overrides = resolve_task_overrides(task_id)
+    overrides = resolve_task_overrides(task_id, config=config)
     candidate = overrides.get("cwd")
     if overrides.get("cwd_source") == "process" or not isinstance(candidate, str) or not candidate.strip():
         return None
@@ -709,76 +768,253 @@ def _resolve_config_cwd(env_type: str, mount_docker_cwd: bool) -> tuple:
     return cwd, host_cwd
 
 
-def _get_env_config() -> Dict[str, Any]:
-    """Resolve the terminal configuration dict from TERMINAL_* env vars."""
+def _apply_task_cwd_override(
+    config: Dict[str, Any], cwd: str, cwd_override: Optional[str],
+) -> str:
+    """Apply a task workspace cwd without leaking host paths into containers.
+
+    Docker's explicit mount-cwd mode is the exception: a registered host
+    workspace should become the bind source and commands should run in
+    ``/workspace``. Other container backends fall back to the target's already
+    sanitized configured cwd.
+    """
+    env_type = config.get("env_type")
+    if (
+        env_type == "docker"
+        and config.get("docker_mount_cwd_to_workspace")
+        and isinstance(cwd_override, str)
+        and cwd_override.strip()
+    ):
+        candidate = os.path.abspath(os.path.expanduser(cwd_override))
+        is_host_path = (
+            any(candidate.startswith(prefix) for prefix in _HOST_CWD_PREFIXES)
+            or (
+                os.path.isabs(candidate)
+                and os.path.isdir(candidate)
+            )
+        )
+        if is_host_path:
+            config["host_cwd"] = candidate
+            return "/workspace"
+    if env_type in _CONTAINER_BACKENDS and _is_unusable_container_cwd(cwd):
+        return config["cwd"]
+    return cwd
+
+
+def _get_env_config(terminal_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Return canonical terminal config for legacy env vars or a target mapping.
+
+    ``terminal_config is None`` is the historical flat/env-driven path.  A
+    selected named target passes its inherited mapping here directly; values
+    are parsed without mutating ``os.environ`` so concurrent target calls
+    cannot affect each other.
+    """
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
-    _ensure_terminal_env_bridged()
-    env_type = _tenv("TERMINAL_ENV", "local")
-    mount_docker_cwd = _tenv_bool("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false")
+    if terminal_config is None:
+        _ensure_terminal_env_bridged()
 
-    # Container/docker-only payloads are parsed only when such a backend is
-    # selected: a stale or invalid Docker value bridged from config.yaml must
-    # not make local terminal/execute_code unusable.
-    if _is_container_backend(env_type):
-        container_cpu = _parse_env_var("TERMINAL_CONTAINER_CPU", "1", float, "number")
-        container_memory = _parse_env_var("TERMINAL_CONTAINER_MEMORY", "5120")
-        container_disk = _parse_env_var("TERMINAL_CONTAINER_DISK", "51200")
+    def _get(key: str, env_name: str, default: Any) -> Any:
+        if terminal_config is None:
+            return _tenv(env_name, str(default) if not isinstance(default, (list, dict)) else json.dumps(default))
+        return terminal_config.get(key, default)
+
+    def _coerce(value: Any, converter: Any, label: str, key: str) -> Any:
+        if converter is json.loads and isinstance(value, (list, dict)):
+            return value
+        try:
+            return converter(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            source = (
+                f"terminal target setting {key}"
+                if terminal_config is not None
+                else f"TERMINAL_{key.upper()}"
+            )
+            raise ValueError(f"Invalid value for {source}: {value!r} (expected {label}).")
+
+    def _bool(key: str, env_name: str, default: bool) -> bool:
+        value = _get(key, env_name, default)
+        if isinstance(value, bool):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+        if terminal_config is not None:
+            raise ValueError(
+                f"Invalid value for terminal target setting {key}: {value!r} "
+                "(expected boolean)."
+            )
+        # Preserve the legacy env-var behavior for unknown strings.
+        return False
+
+    def _json_shape(
+        key: str,
+        env_name: str,
+        default: Any,
+        expected_type: type,
+        label: str,
+    ) -> Any:
+        value = _coerce(_get(key, env_name, default), json.loads, "valid JSON", key)
+        if not isinstance(value, expected_type):
+            source = (
+                f"terminal target setting {key}"
+                if terminal_config is not None
+                else env_name
+            )
+            raise ValueError(
+                f"Invalid value for {source}: {value!r} (expected {label})."
+            )
+        return value
+
+    env_type = str(
+        _get(
+            "backend", "TERMINAL_ENV",
+            terminal_config.get("env_type", "local") if terminal_config else "local",
+        )
+    ).strip().lower() or "local"
+
+    mount_docker_cwd = _bool(
+        "docker_mount_cwd_to_workspace", "TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", False,
+    )
+    container_backend = env_type in {"docker", "singularity", "modal", "daytona", "vercel_sandbox"}
+    docker_backend = env_type == "docker"
+
+    # Docker/container-only env vars may be bridged from config.yaml even when
+    # the active backend is local/ssh.  Do not parse their JSON/numeric payloads
+    # until a backend that can consume them is selected; a stale or invalid
+    # Docker value should not make local terminal/execute_code unusable.
+    if container_backend:
+        container_cpu = _coerce(_get("container_cpu", "TERMINAL_CONTAINER_CPU", 1), float, "number", "container_cpu")
+        container_memory = _coerce(_get("container_memory", "TERMINAL_CONTAINER_MEMORY", 5120), int, "integer", "container_memory")
+        container_disk = _coerce(_get("container_disk", "TERMINAL_CONTAINER_DISK", 51200), int, "integer", "container_disk")
     else:
-        container_cpu, container_memory, container_disk = 1.0, 5120, 51200
+        container_cpu = 1.0
+        container_memory = 5120
+        container_disk = 51200
 
-    if env_type == "docker":
-        docker_forward_env = _parse_env_var("TERMINAL_DOCKER_FORWARD_ENV", "[]", json.loads, "valid JSON")
-        docker_volumes = _parse_env_var("TERMINAL_DOCKER_VOLUMES", "[]", json.loads, "valid JSON")
-        docker_env = _parse_env_var("TERMINAL_DOCKER_ENV", "{}", json.loads, "valid JSON")
-        docker_extra_args = _parse_env_var("TERMINAL_DOCKER_EXTRA_ARGS", "[]", json.loads, "valid JSON")
-        docker_shm_size = _tenv("TERMINAL_DOCKER_SHM_SIZE", "1g")
+    if docker_backend:
+        docker_forward_env = _json_shape(
+            "docker_forward_env", "TERMINAL_DOCKER_FORWARD_ENV", [], list, "list",
+        )
+        docker_volumes = _json_shape(
+            "docker_volumes", "TERMINAL_DOCKER_VOLUMES", [], list, "list",
+        )
+        docker_env = _json_shape(
+            "docker_env", "TERMINAL_DOCKER_ENV", {}, dict, "mapping",
+        )
+        docker_extra_args = _json_shape(
+            "docker_extra_args", "TERMINAL_DOCKER_EXTRA_ARGS", [], list, "list",
+        )
+        docker_shm_size = str(_get("docker_shm_size", "TERMINAL_DOCKER_SHM_SIZE", "1g") or "")
     else:
-        docker_forward_env, docker_volumes, docker_env, docker_extra_args, docker_shm_size = [], [], {}, [], "1g"
+        docker_forward_env = []
+        docker_volumes = []
+        docker_env = {}
+        docker_extra_args = []
+        docker_shm_size = "1g"
 
-    cwd, host_cwd = _resolve_config_cwd(env_type, mount_docker_cwd)
+    # Default cwd: local uses the host's current directory, ssh uses the
+    # remote home, Vercel uses its documented workspace root, and everything
+    # else starts in the backend's default root-like cwd.
+    if env_type == "local":
+        default_cwd = _safe_getcwd()
+    elif env_type == "ssh":
+        default_cwd = "~"
+    elif env_type == "vercel_sandbox":
+        default_cwd = _VERCEL_SANDBOX_DEFAULT_CWD
+    else:
+        default_cwd = "/root"
+
+    # Read TERMINAL_CWD but sanity-check it for container backends.
+    # If Docker cwd passthrough is explicitly enabled, remap the host path to
+    # /workspace and track the original host path separately. Otherwise keep the
+    # normal sandbox behavior and discard host paths.
+    cwd = str(_get("cwd", "TERMINAL_CWD", default_cwd) or default_cwd)
+    if env_type == "local" and cwd in {".", "./", "auto", "cwd"}:
+        cwd = _safe_getcwd()
+    from hermes_cli.config import _is_ssh_remote_tilde_cwd
+    if cwd and not _is_ssh_remote_tilde_cwd(env_type, cwd):
+        cwd = os.path.expanduser(cwd)
+    host_cwd = None
+    if env_type == "docker" and mount_docker_cwd:
+        docker_cwd_source = (
+            (_tenv("TERMINAL_CWD") or _safe_getcwd())
+            if terminal_config is None
+            else (cwd or _safe_getcwd())
+        )
+        candidate = os.path.abspath(os.path.expanduser(docker_cwd_source))
+        if (
+            any(candidate.startswith(p) for p in _HOST_CWD_PREFIXES)
+            or (os.path.isabs(candidate) and os.path.isdir(candidate) and not candidate.startswith(("/workspace", "/root")))
+        ):
+            host_cwd = candidate
+            cwd = "/workspace"
+    elif _is_container_backend(env_type) and cwd:
+        # Host paths and relative paths that won't work inside containers
+        if _is_unusable_container_cwd(cwd) and cwd != default_cwd:
+            logger.info("Ignoring TERMINAL_CWD=%r for %s backend "
+                        "(host/relative path won't work in sandbox). Using %r instead.",
+                        cwd, env_type, default_cwd)
+            cwd = default_cwd
 
     return {
         "env_type": env_type,
-        "modal_mode": coerce_modal_mode(_tenv("TERMINAL_MODAL_MODE", "auto")),
-        "docker_image": _tenv("TERMINAL_DOCKER_IMAGE", default_image),
+        "modal_mode": coerce_modal_mode(_get("modal_mode", "TERMINAL_MODAL_MODE", "auto")),
+        "docker_image": str(_get("docker_image", "TERMINAL_DOCKER_IMAGE", default_image)),
         "docker_forward_env": docker_forward_env,
-        "singularity_image": _tenv("TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}"),
-        "modal_image": _tenv("TERMINAL_MODAL_IMAGE", default_image),
-        "daytona_image": _tenv("TERMINAL_DAYTONA_IMAGE", default_image),
-        "vercel_runtime": _tenv("TERMINAL_VERCEL_RUNTIME", "").strip(),
+        "singularity_image": str(_get("singularity_image", "TERMINAL_SINGULARITY_IMAGE", f"docker://{default_image}")),
+        "modal_image": str(_get("modal_image", "TERMINAL_MODAL_IMAGE", default_image)),
+        "daytona_image": str(_get("daytona_image", "TERMINAL_DAYTONA_IMAGE", default_image)),
+        "vercel_runtime": str(_get("vercel_runtime", "TERMINAL_VERCEL_RUNTIME", "")).strip(),
         "cwd": cwd,
         "host_cwd": host_cwd,
         "docker_mount_cwd_to_workspace": mount_docker_cwd,
         "timeout": _coerce(_get("timeout", "TERMINAL_TIMEOUT", 180), int, "integer", "timeout"),
         "lifetime_seconds": _coerce(_get("lifetime_seconds", "TERMINAL_LIFETIME_SECONDS", 300), int, "integer", "lifetime_seconds"),
         # SSH-specific config
-        "ssh_host": _tenv("TERMINAL_SSH_HOST", ""),
-        "ssh_user": _tenv("TERMINAL_SSH_USER", ""),
-        "ssh_port": _parse_env_var("TERMINAL_SSH_PORT", "22"),
-        "ssh_key": _tenv("TERMINAL_SSH_KEY", ""),
+        "ssh_host": str(_get("ssh_host", "TERMINAL_SSH_HOST", "")),
+        "ssh_user": str(_get("ssh_user", "TERMINAL_SSH_USER", "")),
+        "ssh_port": _coerce(_get("ssh_port", "TERMINAL_SSH_PORT", 22), int, "integer", "ssh_port"),
+        "ssh_key": str(_get("ssh_key", "TERMINAL_SSH_KEY", "")),
         # Persistent shell: SSH defaults to the config-level persistent_shell
-        # setting; local is always opt-in. Per-backend env vars override.
-        "ssh_persistent": _tenv_bool(
-            "TERMINAL_SSH_PERSISTENT", _tenv("TERMINAL_PERSISTENT_SHELL", "true"),
+        # setting (true by default for non-local backends); local is always opt-in.
+        # Per-backend env vars override if explicitly set.
+        "ssh_persistent": _bool(
+            "ssh_persistent", "TERMINAL_SSH_PERSISTENT",
+            _bool("persistent_shell", "TERMINAL_PERSISTENT_SHELL", True),
         ),
-        "local_persistent": _tenv_bool("TERMINAL_LOCAL_PERSISTENT", "false"),
-        # Container resources (MB); ignored for local/ssh.
+        "local_persistent": _bool("local_persistent", "TERMINAL_LOCAL_PERSISTENT", False),
+        # Container resource config (applies to docker, singularity, modal,
+        # daytona, and vercel_sandbox -- ignored for local/ssh)
         "container_cpu": container_cpu,
-        "container_memory": container_memory,
-        "container_disk": container_disk,
-        "container_persistent": _tenv_bool("TERMINAL_CONTAINER_PERSISTENT", "true"),
+        "container_memory": container_memory,     # MB (default 5GB)
+        "container_disk": container_disk,        # MB (default 50GB)
+        "container_persistent": _bool("container_persistent", "TERMINAL_CONTAINER_PERSISTENT", True),
         "docker_volumes": docker_volumes,
         "docker_env": docker_env,
-        "docker_run_as_host_user": _tenv_bool("TERMINAL_DOCKER_RUN_AS_HOST_USER", "false"),
-        "docker_snap_compat": _tenv_bool("TERMINAL_DOCKER_SNAP_COMPAT", "false"),
-        "docker_network": _tenv_bool("TERMINAL_DOCKER_NETWORK", "true"),
+        "docker_run_as_host_user": _bool("docker_run_as_host_user", "TERMINAL_DOCKER_RUN_AS_HOST_USER", False),
+        "docker_snap_compat": _bool("docker_snap_compat", "TERMINAL_DOCKER_SNAP_COMPAT", False),
+        "docker_network": _bool("docker_network", "TERMINAL_DOCKER_NETWORK", True),
         "docker_extra_args": docker_extra_args,
         "docker_shm_size": docker_shm_size,
-        # Cross-process reuse: attach to a labeled container at startup
-        # instead of starting fresh; false = per-process isolation.
-        "docker_persist_across_processes": _tenv_bool("TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES", "true"),
-        "docker_shared_container_key": _tenv("TERMINAL_DOCKER_SHARED_CONTAINER_KEY", "").strip(),
-        "docker_orphan_reaper": _tenv_bool("TERMINAL_DOCKER_ORPHAN_REAPER", "true"),
+        # Cross-process container reuse (issue #20561).  The docs claim
+        # "ONE long-lived container shared across sessions" — this toggle
+        # makes that real by probing for a labeled container at startup and
+        # attaching to it instead of always starting a fresh one.  Set to
+        # ``false`` for hard per-process isolation (no reuse, container is
+        # removed on exit).
+        "docker_persist_across_processes": _bool(
+            "docker_persist_across_processes", "TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES", True,
+        ),
+        "docker_shared_container_key": str(_get("docker_shared_container_key", "TERMINAL_DOCKER_SHARED_CONTAINER_KEY", "")).strip(),
+        # Startup orphan reaper for hermes-tagged containers left behind by
+        # crashed / SIGKILL'd previous processes that bypassed atexit.
+        # Conservative: only sweeps Exited containers older than 2× the
+        # idle-reap window AND scoped to the current profile. Issue #20561.
+        "docker_orphan_reaper": _bool(
+            "docker_orphan_reaper", "TERMINAL_DOCKER_ORPHAN_REAPER", True,
+        ),
     }
 
 
@@ -852,6 +1088,7 @@ from tools.terminal_tool_guards import (
     gateway_lifecycle_block, self_repo_block,
 )
 from tools.terminal_tool_background import _YIELDED_NOTE, spawn_background_process, yield_to_background_handler
+from tools.terminal_tool_sudo import _scoped_sudo_execution
 from tools.terminal_tool_result import finalize_foreground_result
 
 
@@ -890,7 +1127,7 @@ def _resolve_command_cwd(
     """
     if workdir:
         return workdir
-    recorded = get_session_cwd(session_key)
+    recorded = get_session_cwd(session_key, target, _resolution=_resolution)
     if recorded and _is_container_backend(env_type) and _is_unusable_container_cwd(recorded):
         logger.info(
             "Ignoring recorded session cwd %r for %s backend "
@@ -951,13 +1188,16 @@ class _ApprovalVerdict:
     approved_run: bool = False
 
 
-def _run_approval_guards(command: str, env_type: str, config: Dict[str, Any], *, force: bool) -> _ApprovalVerdict:
+def _run_approval_guards(command: str, env_type: str, config: Dict[str, Any], *, force: bool, resolution=None) -> _ApprovalVerdict:
     """Run tirith + dangerous-command guards; ``force`` skips them entirely.
     Raises :class:`_Rejected` when the command may not run (denied, or pending
     gateway approval)."""
     if force:
         return _ApprovalVerdict(approved_run=True)
-    approval = _check_all_guards(command, env_type, has_host_access=_docker_has_host_access(config))
+    approval = _check_all_guards(command, env_type, has_host_access=_docker_has_host_access(config),
+        execution_target=resolution.target if resolution is not None else "default",
+        execution_backend=env_type, execution_target_named=bool(resolution and resolution.named),
+        execution_target_scope=resolution.security_scope if resolution and resolution.named else "")
     if not approval["approved"]:
         if approval.get("status") == "pending_approval":  # gateway ask mode
             raise _Rejected(_error_json(
@@ -996,6 +1236,9 @@ class _ExecPlan:
     cwd: str
     host_cwd: Optional[str]
     effective_timeout: int
+    resolution: Any = None
+    base_task_id: str = "default"
+    backend_task_id: str = "default"
     # Set when a foreground call asked for more than FOREGROUND_MAX_TIMEOUT and was promoted to a
     # tracked background process instead of being refused (the requested seconds, for the note).
     promoted_from_foreground_timeout: Optional[int] = None
@@ -1011,7 +1254,7 @@ _PROMOTED_NOTE = (
 
 def _plan_execution(
     command: Any, *, task_id: Optional[str], timeout: Optional[int],
-    background: bool, _host_local: bool,
+    background: bool, _host_local: bool, execution_target: Optional[str] = None,
 ) -> _ExecPlan:
     """Resolve backend, env-cache key, image, cwd and timeout for one call.
 
@@ -1025,7 +1268,8 @@ def _plan_execution(
             f"Invalid command: expected string, got {type(command).__name__}", status="error",
         ))
 
-    config = _get_env_config()
+    resolution = _target_resolution(execution_target)
+    config = _get_env_config(dict(resolution.config)) if resolution.named else _get_env_config()
     env_type = "local" if _host_local else config["env_type"]
 
     # Fail closed under a refusal scope: the routed profile's terminal
@@ -1037,19 +1281,24 @@ def _plan_execution(
 
         enforce_no_refusal()
 
-    effective_task_id = _resolve_container_task_id(task_id)
+    base_task_id = (_resolve_container_task_id(task_id, config=config) if resolution.named
+                    else _resolve_container_task_id(task_id))
+    effective_task_id = resolution.environment_key(base_task_id)
+    backend_task_id = resolution.backend_task_id(base_task_id)
     if _host_local:
         # Control-plane children run beside this interpreter, never inside
         # the configured Docker/SSH backend; keep their env cache separate.
         effective_task_id = f"host-local-{effective_task_id}"
+        backend_task_id = f"host-local-{backend_task_id}"
 
     # Per-task overrides (RL/benchmark envs, ACP workspace cwd) win over
     # the global env-var config; ``resolve_task_overrides`` reads the raw
     # task id first, then the collapsed container id.
-    overrides = resolve_task_overrides(task_id)
+    overrides = resolve_task_overrides(task_id, config=config)
     image = _select_image(env_type, overrides, config)
 
-    cwd = overrides.get("cwd") or get_session_cwd(task_id) or config["cwd"]
+    cwd_override = overrides.get("cwd") if (not resolution.named or (resolution.is_default and resolution.backend != "ssh")) else None
+    cwd = cwd_override or get_session_cwd(task_id, _resolution=resolution) or config["cwd"]
     host_cwd = _resolve_task_host_cwd(config, task_id)
     # config["cwd"] was sanitized for container backends in _get_env_config
     # but an override / session record is raw: a host path would reach
@@ -1088,6 +1337,7 @@ def _plan_execution(
     return _ExecPlan(
         config=config, env_type=env_type, effective_task_id=effective_task_id,
         image=image, cwd=cwd, host_cwd=host_cwd, effective_timeout=timeout or config["timeout"],
+        resolution=resolution, base_task_id=base_task_id, backend_task_id=backend_task_id,
         promoted_from_foreground_timeout=promoted,
     )
 
@@ -1124,9 +1374,12 @@ def _acquire_env(plan: _ExecPlan, task_id: Optional[str]) -> Any:
     """
     _start_cleanup_thread()
     env_type, eff = plan.env_type, plan.effective_task_id
+    raw_key = plan.resolution.environment_key(task_id) if task_id else None
 
     with _env_lock:
-        env: Any = _lookup_active_env(eff, task_id)
+        env: Any = _lookup_active_env(eff, raw_key)
+        if env is not None and not _environment_matches_target(env, plan.resolution):
+            env = None
     if env is not None:
         return env
 
@@ -1135,31 +1388,65 @@ def _acquire_env(plan: _ExecPlan, task_id: Optional[str]) -> Any:
 
     with task_lock:
         with _env_lock:
-            env = _lookup_active_env(eff, task_id)
+            env = _lookup_active_env(eff, raw_key)
+            if env is not None and not _environment_matches_target(env, plan.resolution):
+                env = None
         if env is not None:
             return env
+
+        with _env_lock:
+            stale_key = eff if eff in _active_environments else raw_key
+            stale = _active_environments.get(stale_key)
+        try:
+            _prepare_environment_replacement(stale, stale_key, target_name=plan.resolution.target)
+        except _EnvironmentReplacementError as exc:
+            raise _Rejected(_error_json(str(exc), status="error")) from exc
 
         if env_type == "singularity":
             _check_disk_usage_warning()
         logger.info("Creating new %s environment for task %s...", env_type, eff[:8])
         try:
+            container_config, ssh_config, local_config = _build_environment_constructor_configs(
+                plan.config, plan.resolution, plan.base_task_id,
+            )
             new_env = _create_configured_env(
                 plan.config, env_type, image=plan.image, cwd=plan.cwd,
-                timeout=plan.effective_timeout, task_id=eff, host_cwd=plan.host_cwd,
-                local_config=(
-                    {"persistent": plan.config.get("local_persistent", False)}
-                    if env_type == "local" else None
-                ),
+                timeout=plan.effective_timeout, task_id=plan.backend_task_id, host_cwd=plan.host_cwd,
+                local_config=local_config, container_config=container_config, ssh_config=ssh_config,
+                session_scoped=_docker_environment_is_session_scoped(plan.config, task_id, plan.base_task_id),
             )
+            _record_environment_lifetime(new_env, plan.config)
+            _record_environment_target(new_env, plan.resolution)
         except ImportError as e:
             raise _Rejected(_error_json(
                 _redact_terminal_error_text(f"Terminal tool disabled: environment creation failed ({e})"),
                 status="disabled",
             ))
 
+        # A hot config edit during a slow SSH/Docker handshake must never
+        # publish an environment for a now-repointed target alias.
+        try:
+            from tools.execution_targets import execution_target_config_is_frozen, resolve_live_execution_target
+            if plan.resolution.named and not execution_target_config_is_frozen():
+                live = resolve_live_execution_target(plan.resolution.target)
+                if live.security_scope != plan.resolution.security_scope:
+                    raise RuntimeError(f"Execution target {plan.resolution.target!r} changed while its environment was being created.")
+        except Exception as exc:
+            _cleanup_environment_resource(new_env, force_remove=True,
+                preserve_storage=_environment_has_stable_storage(new_env))
+            raise _Rejected(_error_json(str(exc), status="error")) from exc
+        replaced = []
         with _env_lock:
+            for key in (eff, raw_key):
+                prior = _active_environments.get(key) if key is not None else None
+                if prior is not None and prior is not new_env and not _environment_matches_target(prior, plan.resolution):
+                    _active_environments.pop(key, None)
+                    _last_activity.pop(key, None)
+                    replaced.append((key, prior))
             _active_environments[eff] = new_env
             _last_activity[eff] = time.time()
+        for key, old_env in replaced:
+            _retire_replaced_environment(old_env, key)
         logger.info("%s environment ready for task %s", env_type, eff[:8])
         return new_env
 
@@ -1191,7 +1478,8 @@ def _run_foreground(
     for retry_count in range(max_retries + 1):
         try:
             command_cwd = _resolve_command_cwd(
-                workdir=workdir, default_cwd=plan.cwd, session_key=session_key, env_type=env_type,
+                workdir=workdir, default_cwd=plan.cwd, session_key=session_key,
+                env_type=env_type, _resolution=plan.resolution,
             )
             # bounded_capture: model-facing output keeps a head/tail window
             # while streaming so a verbose command can't OOM the gateway;
@@ -1199,7 +1487,8 @@ def _run_foreground(
             result = env.execute(
                 command, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True,
                 **_yield_kwargs(command, env_type=env_type, cwd=command_cwd, effective_task_id=eff,
-                                task_id=task_id, session_key=session_key),
+                                task_id=task_id, session_key=session_key,
+                                resolution=plan.resolution),
             )
             break
         except Exception as e:
@@ -1225,13 +1514,13 @@ def _run_foreground(
     return finalize_foreground_result(
         command=command, result=result, env=env, env_type=env_type, effective_task_id=eff,
         task_id=task_id, session_id=session_id, session_key=session_key, workdir=workdir,
-        command_cwd=command_cwd, approval_note=approval_note,
+        command_cwd=command_cwd, approval_note=approval_note, resolution=plan.resolution,
     )
 
 
 def _pre_exec_block(
     command: str, *, env: Any, env_type: str, cwd: str,
-    workdir: Optional[str], session_key: str,
+    workdir: Optional[str], session_key: str, resolution=None,
 ) -> None:
     """Raise :class:`_Rejected` with the blocked-result JSON when the command must not run.
 
@@ -1239,7 +1528,8 @@ def _pre_exec_block(
     then the dangerous-workdir check, then the self-repo guard (local only).
     """
     blocked = gateway_lifecycle_block(
-        command=command, env=env, env_type=env_type, cwd=cwd, workdir=workdir, session_key=session_key,
+        command=command, env=env, env_type=env_type, cwd=cwd, workdir=workdir,
+        session_key=session_key, resolution=resolution,
     )
     if blocked:
         raise _Rejected(blocked)
@@ -1263,7 +1553,8 @@ _PTY_DISABLED_REASON = (
 )
 
 
-def _degraded_result(e: EnvironmentConnectionError, task_id: Optional[str]) -> str:
+def _degraded_result(e: EnvironmentConnectionError, task_id: Optional[str],
+                     execution_target: Optional[str] = None) -> str:
     """Infrastructure failure (SSH host down, Docker daemon unreachable), distinct
     from a nonzero exit. ``terminal.degraded_mode``: warn (default) returns a
     structured degraded result with a retry hint; fail preserves the historical
@@ -1273,7 +1564,7 @@ def _degraded_result(e: EnvironmentConnectionError, task_id: Optional[str]) -> s
     logger.warning("terminal backend degraded: %s", e.reason)
     # Evict the possibly-broken backend so the next call re-creates it.
     with _quiet("degraded-env eviction failed"):
-        _evict_environment_for_task(task_id)
+        _evict_environment_for_task(task_id, execution_target)
     return json.dumps({
         "output": "",
         "exit_code": -1,
@@ -1295,6 +1586,7 @@ def terminal_tool(
     pty: bool = False,
     notify_on_complete: bool = False,
     watch_patterns: Optional[List[str]] = None,
+    execution_target: Optional[str] = None,
     _host_local: bool = False,
 ) -> str:
     """Execute *command* in the configured terminal environment; returns a JSON string.
@@ -1313,6 +1605,7 @@ def terminal_tool(
     try:
         plan = _plan_execution(
             command, task_id=task_id, timeout=timeout, background=background, _host_local=_host_local,
+            execution_target=execution_target,
         )
         env = _acquire_env(plan, task_id)
         env_type, cwd, effective_task_id = plan.env_type, plan.cwd, plan.effective_task_id
@@ -1324,10 +1617,11 @@ def terminal_tool(
 
         session_key = get_current_session_key(default="") or (task_id or "")
 
-        _pre_exec_block(command, env=env, env_type=env_type, cwd=cwd, workdir=workdir, session_key=session_key)
+        _pre_exec_block(command, env=env, env_type=env_type, cwd=cwd, workdir=workdir,
+                        session_key=session_key, resolution=plan.resolution)
         # Pre-exec security checks (tirith + dangerous command detection);
         # force=True means the user already confirmed.
-        verdict = _run_approval_guards(command, env_type, plan.config, force=force)
+        verdict = _run_approval_guards(command, env_type, plan.config, force=force, resolution=plan.resolution)
 
         pty_disabled = pty and _command_requires_pipe_stdin(command)
         if plan.promoted_from_foreground_timeout is not None:
@@ -1335,37 +1629,64 @@ def terminal_tool(
             # caller could not have meant for a foreground call, and the two are exclusive anyway.
             background, notify_on_complete, watch_patterns = True, True, None
         if background:
-            result = spawn_background_process(
-                command=command, env=env, env_type=env_type, effective_task_id=effective_task_id,
-                task_id=task_id, session_key=session_key, workdir=workdir, cwd=cwd,
-                effective_pty=pty and not pty_disabled, notify_on_complete=notify_on_complete,
-                watch_patterns=watch_patterns, approval_note=verdict.note,
-                pty_disabled_reason=_PTY_DISABLED_REASON if pty_disabled else None,
-            )
+            with _scoped_sudo_execution(
+                plan.resolution.target, env_type, named=plan.resolution.named,
+                sudo_password=plan.resolution.config.get("sudo_password") if plan.resolution.named else None,
+                target_scope=plan.resolution.security_scope if plan.resolution.named else "",
+            ):
+                result = spawn_background_process(
+                    command=command, env=env, env_type=env_type, effective_task_id=effective_task_id,
+                    task_id=task_id, session_key=session_key, workdir=workdir, cwd=cwd,
+                    effective_pty=pty and not pty_disabled, notify_on_complete=notify_on_complete,
+                    watch_patterns=watch_patterns, approval_note=verdict.note,
+                    pty_disabled_reason=_PTY_DISABLED_REASON if pty_disabled else None,
+                    resolution=plan.resolution, effective_timeout=plan.effective_timeout,
+                )
             if plan.promoted_from_foreground_timeout is not None:
                 result = _with_promoted_note(result, plan.promoted_from_foreground_timeout)
             return result
-        return _run_foreground(
-            command, env, plan,
-            task_id=task_id, session_id=session_id, session_key=session_key,
-            workdir=workdir, approval_note=verdict.note, clear_interrupt=verdict.approved_run,
-        )
+        with _scoped_sudo_execution(
+            plan.resolution.target, env_type, named=plan.resolution.named,
+            sudo_password=plan.resolution.config.get("sudo_password") if plan.resolution.named else None,
+            target_scope=plan.resolution.security_scope if plan.resolution.named else "",
+        ):
+            return _run_foreground(
+                command, env, plan,
+                task_id=task_id, session_id=session_id, session_key=session_key,
+                workdir=workdir, approval_note=verdict.note, clear_interrupt=verdict.approved_run,
+            )
     except _Rejected as r:
         return r.result_json
-    except EnvironmentConnectionError as e:
-        return _degraded_result(e, task_id)
     except Exception as e:
+        from tools.execution_targets import ExecutionTargetError
+        if isinstance(e, ExecutionTargetError):
+            return _error_json(str(e), status="error")
+        if isinstance(e, EnvironmentConnectionError):
+            return _degraded_result(e, task_id, execution_target)
         return _fatal_error_json(e)
 
 
 def _check_terminal_config_requirements(config: Dict[str, Any]) -> bool:
     """Check one already-resolved backend configuration."""
     try:
-        config = _get_env_config()
         checker = _REQUIREMENT_CHECKERS.get(config["env_type"], _check_plugin_requirements)
         return checker(config)
     except Exception as e:
         logger.error("Terminal requirements check failed: %s", e, exc_info=True)
+        return False
+
+
+def check_terminal_requirements() -> bool:
+    """Keep the tool available when at least one configured target is usable."""
+    try:
+        from tools.execution_targets import list_execution_targets
+        inventory = list_execution_targets()
+        if inventory and inventory[0].named:
+            ordered = sorted(inventory, key=lambda item: (item.backend != "local", not item.is_default, item.target))
+            return any(_check_terminal_config_requirements(_get_env_config(dict(item.config))) for item in ordered)
+        return _check_terminal_config_requirements(_get_env_config())
+    except Exception as exc:
+        logger.error("Invalid execution target config: %s", exc)
         return False
 
 
@@ -1429,6 +1750,11 @@ def _handle_terminal(args, **kw):
             "command in 'command'. Use execute_code(code=...) for Python; "
             "for shell, retry as terminal(command=...)."
         )
+    try:
+        from tools.execution_targets import validate_execution_target_args
+        validate_execution_target_args("terminal", args)
+    except Exception as exc:
+        return tool_error(str(exc))
     # `notify` is the advertised interface (true → notify_on_complete,
     # [...] → watch_patterns); the legacy args stay accepted, explicit
     # `notify` wins. Background-only modifiers on a foreground call fail
@@ -1472,6 +1798,7 @@ def _handle_terminal(args, **kw):
         pty=args.get("pty", False),
         notify_on_complete=notify_on_complete,
         watch_patterns=watch_patterns,
+        execution_target=args.get("execution_target"),
     )
 
 

@@ -6,6 +6,10 @@ import threading
 import time
 
 import pytest
+import subprocess
+from tools import terminal_tool_lifecycle as terminal_lifecycle
+from tools import file_tools_read_tracking as read_tracking
+from tools import approval_context
 
 
 def _named_config(cwds: dict[str, str], default: str = "alpha") -> dict:
@@ -854,15 +858,15 @@ def test_cleanup_without_target_removes_all_task_scopes_and_explicit_removes_one
     # Unregistered delegate ids collapse to the parent's "default" scope for
     # execution, but closing a delegate must preserve legacy cleanup semantics
     # and must not tear down the parent's shared environments.
-    terminal_mod.cleanup_vm("child-a")
-    terminal_mod.cleanup_vm("child-a", target="alpha")
+    terminal_lifecycle.cleanup_vm("child-a")
+    terminal_lifecycle.cleanup_vm("child-a", target="alpha")
     assert alpha.cleaned == beta.cleaned == 0
 
-    terminal_mod.cleanup_vm("default", target="alpha")
+    terminal_lifecycle.cleanup_vm("default", target="alpha")
     assert alpha.cleaned == 1 and beta.cleaned == 0
     assert set(terminal_mod._active_environments) == {("default", "beta")}
 
-    terminal_mod.cleanup_vm("default")
+    terminal_lifecycle.cleanup_vm("default")
     assert beta.cleaned == 1
     assert terminal_mod._active_environments == {}
 
@@ -906,13 +910,13 @@ def test_per_turn_cleanup_preserves_only_persistent_named_siblings(
     terminal_mod.register_environment_turn("turn-a")
     terminal_mod.register_environment_turn("turn-b")
     assert terminal_mod.release_environment_turn("turn-a") == 1
-    terminal_mod.cleanup_vm(
+    terminal_lifecycle.cleanup_vm(
         "turn-a", preserve_persistent=True, include_collapsed=False,
     )
     assert key_b in terminal_mod._active_environments
 
     assert terminal_mod.release_environment_turn("turn-b") == 0
-    terminal_mod.cleanup_vm(
+    terminal_lifecycle.cleanup_vm(
         "turn-b", preserve_persistent=True, include_collapsed=True,
     )
 
@@ -930,7 +934,7 @@ def test_per_turn_cleanup_preserves_only_persistent_named_siblings(
     monkeypatch.setattr(
         process_registry, "has_active_processes", lambda key: key == key_b,
     )
-    terminal_mod.cleanup_vm(
+    terminal_lifecycle.cleanup_vm(
         "turn-c", preserve_persistent=True, include_collapsed=True,
     )
     assert terminal_mod._active_environments[key_b] is active_env
@@ -1560,7 +1564,7 @@ def test_targetless_intervening_tool_resets_all_target_read_trackers(
             "dedup_hits": {"same": 2},
         }
 
-    file_mod.notify_other_tool_call("session")
+    read_tracking.notify_other_tool_call("session")
 
     for data in file_mod._read_tracker.values():
         assert data["last_key"] is None
@@ -1573,7 +1577,7 @@ def test_targetless_intervening_tool_resets_all_target_read_trackers(
         "dedup": {"region": (1.0, 2, "hash")},
         "dedup_hits": {"region": 3},
     }
-    file_mod.reset_file_dedup("session")
+    read_tracking.reset_file_dedup("session")
     assert file_mod._read_tracker[profile_key]["dedup"] == {}
     assert file_mod._read_tracker[profile_key]["dedup_hits"] == {}
 
@@ -1594,7 +1598,7 @@ def test_sudo_cache_and_nopasswd_probe_are_target_scoped(
         returncode = 0
 
     monkeypatch.setattr(
-        terminal_mod.subprocess,
+        subprocess,
         "run",
         lambda *args, **kwargs: calls.append((args, kwargs)) or Probe(),
     )
@@ -2046,7 +2050,7 @@ def test_command_approval_payload_and_observer_include_target_metadata(monkeypat
         "action": "allow", "findings": [], "summary": "",
     })
     session_key = "approval-target-session"
-    token = approval_mod.set_current_session_key(session_key)
+    token = approval_context.set_current_session_key(session_key)
     seen = {}
     hooks = []
 
@@ -2065,7 +2069,7 @@ def test_command_approval_payload_and_observer_include_target_metadata(monkeypat
         )
     finally:
         approval_mod.unregister_gateway_notify(session_key)
-        approval_mod.reset_current_session_key(token)
+        approval_context.reset_current_session_key(token)
 
     assert seen["target"] == "alpha"
     assert seen["backend"] == "local"
@@ -2092,7 +2096,7 @@ def test_execute_code_approval_payload_includes_target_metadata(monkeypatch):
             seen.update(approval_data) or {"resolved": True, "choice": "once"}
         ),
     )
-    session_token = approval_mod.set_current_session_key("target-approval")
+    session_token = approval_context.set_current_session_key("target-approval")
     try:
         with approval_mod._lock:
             approval_mod._gateway_notify_cbs["target-approval"] = lambda data: None
@@ -2101,7 +2105,7 @@ def test_execute_code_approval_payload_includes_target_metadata(monkeypatch):
             execution_backend="ssh",
         )
     finally:
-        approval_mod.reset_current_session_key(session_token)
+        approval_context.reset_current_session_key(session_token)
         with approval_mod._lock:
             approval_mod._gateway_notify_cbs.pop("target-approval", None)
 
@@ -2429,7 +2433,7 @@ def test_idle_reaper_and_deferred_cleanup_wait_for_file_only_tool_lease(
     terminal_mod._active_environments[environment_key] = Environment()
     terminal_mod._last_activity[environment_key] = 0.0
     monkeypatch.setattr(
-        terminal_mod,
+        terminal_lifecycle,
         "cleanup_vm",
         lambda task_id, **kw: deferred.append((task_id, kw)),
     )

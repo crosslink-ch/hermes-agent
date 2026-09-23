@@ -76,7 +76,7 @@ def test_named_default_creates_in_target_scope_and_reuses(monkeypatch):
     try:
         with patch.object(tt, "_create_environment", return_value=fake) as create:
             assert tt.ensure_task_env(task_id) is fake
-            assert tt.get_active_env(task_id, "devbox") is fake
+            assert get_active_env(task_id, "devbox") is fake
             assert tt.ensure_task_env(task_id) is fake
             create.assert_called_once()
         assert fake._hermes_target_name == "devbox"

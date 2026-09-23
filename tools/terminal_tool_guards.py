@@ -141,7 +141,8 @@ def _foreground_background_guidance(command: str) -> str | None:
     return next((msg for hit, msg in _FOREGROUND_GUIDANCE if hit(unquoted)), None)
 
 
-def _read_script_for_guard(env: Any, guard_cwd: str, script_path: str, max_bytes: int) -> Optional[str]:
+def _read_script_for_guard(env: Any, guard_cwd: str, script_path: str, max_bytes: int,
+                           *, remote: bool = False) -> Optional[str]:
     """Best-effort script read: host filesystem first, then a bounded
     ``env.execute('head -c ... < path')`` for remote backends. Binary content
     (NUL byte) is not a script: feeding it to the guard tokenizes machine code
@@ -149,6 +150,8 @@ def _read_script_for_guard(env: Any, guard_cwd: str, script_path: str, max_bytes
     if env is None:
         return None
     try:
+        if remote:
+            raise FileNotFoundError("remote target: never consult host filesystem")
         local_path = Path(script_path).expanduser()
         if not local_path.is_absolute():
             local_path = Path(guard_cwd) / local_path
@@ -183,6 +186,7 @@ def gateway_lifecycle_block(
     cwd: str,
     workdir: Optional[str],
     session_key: str,
+    resolution=None,
 ) -> Optional[str]:
     """Refuse gateway lifecycle commands issued from inside the supervised gateway.
 
@@ -221,16 +225,18 @@ def gateway_lifecycle_block(
             "not by switching launchctl verbs to bypass this rejection.",
             "error",
         )
-    guard_cwd_base = get_session_cwd(session_key)
+    guard_cwd_base = get_session_cwd(session_key, _resolution=resolution)
     if guard_cwd_base is None:
         guard_cwd_base = getattr(env, "cwd", None) or cwd
     guard_cwd = _resolve_command_cwd(
         workdir=workdir, default_cwd=guard_cwd_base, session_key=session_key, env_type=env_type,
+        _resolution=resolution,
     )
     if contains_gateway_lifecycle_command_or_referenced_script(
         command,
         cwd=guard_cwd,
-        read_remote_script=lambda p: _read_script_for_guard(env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES),
+        read_remote_script=lambda p: _read_script_for_guard(env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES,
+                                                            remote=env_type == "ssh"),
     ):
         return _blocked_json(
             "Blocked: command or referenced script cannot restart, stop, or "

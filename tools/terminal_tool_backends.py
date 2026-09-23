@@ -100,22 +100,30 @@ def _modal_unavailable_reason(modal_state: Dict[str, Any]) -> tuple[str, str]:
 
 
 # --- Environment builders. Signature: (*, env_type, image, cwd, timeout, cc, task_id, ssh_config, host_cwd)
-def _build_local_env(*, cwd, timeout, **_):
-    return _LocalEnvironment(cwd=cwd, timeout=timeout)
+def _build_local_env(*, cwd, timeout, local_config=None, **_):
+    env = _LocalEnvironment(cwd=cwd, timeout=timeout)
+    if local_config and local_config.get("persistent"):
+        env._persistent = True
+    return env
 
 
-def _build_docker_env(*, image, cwd, timeout, cc, task_id, host_cwd, **_):
-    from tools.terminal_tool import (_docker_session_isolation_enabled, _has_isolation_overrides,
-                                     _maybe_reap_docker_orphans)
+def _build_docker_env(*, image, cwd, timeout, cc, task_id, host_cwd, session_scoped=False, **_):
+    from tools.terminal_tool import _maybe_reap_docker_orphans
     # One-shot reaper for labeled containers orphaned by prior Hermes processes that died before
     # atexit (SIGKILL / OOM / closed terminal); ``terminal.docker_orphan_reaper: false`` disables it.
     _maybe_reap_docker_orphans(cc)
     # A session-keyed container must not outlive its session, so cross-process reuse/persist is
     # disabled for it (cleanup_vm()/idle reaper stop+rm it). The shared "default" container and
     # RL/benchmark override sandboxes keep their existing lifecycle.
-    session_scoped = (_docker_session_isolation_enabled() and task_id != "default"
-                      and not _has_isolation_overrides(task_id))
+
     kwargs = {out: cc.get(key, default) for out, key, default in _DOCKER_KWARGS}
+    # Stable storage belongs to the profile/alias, while runtime task IDs
+    # include the current spec generation. Forward to backends with the
+    # storage-aware constructor without breaking older plugin/test doubles.
+    constructor_params = inspect.signature(_DockerEnvironment).parameters
+    for key in ("storage_task_id", "legacy_storage_task_id"):
+        if key in constructor_params and cc.get(key):
+            kwargs[key] = cc[key]
     if session_scoped:
         kwargs["persist_across_processes"] = False
     docker_env_obj = _DockerEnvironment(image=image, cwd=cwd, timeout=timeout, task_id=task_id, host_cwd=host_cwd,
@@ -210,14 +218,16 @@ _ENV_BUILDERS = {"local": _build_local_env, "docker": _build_docker_env, "singul
 def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
                         ssh_config: dict = None, container_config: dict = None,
                         local_config: dict = None, task_id: str = "default",
-                        host_cwd: Optional[str] = None, probe_only: bool = False):
+                        host_cwd: Optional[str] = None, probe_only: bool = False,
+                        session_scoped: bool = False):
     """Create an execution environment (instance with ``execute()``) for *env_type*. ``image`` is ignored
     for local/ssh/vercel; ``container_config`` carries the container_*/docker_* resource keys; ``host_cwd`` is
     the host dir bound into Docker when cwd mounting is enabled. ``probe_only`` asks ssh for a throwaway
     connection with no remote setup/sync (the prompt-time probe). Unknown types fall through to plugin backends."""
     builder = _ENV_BUILDERS.get(env_type, _build_plugin_env)
     return builder(env_type=env_type, image=image, cwd=cwd, timeout=timeout, cc=container_config or {},
-                   task_id=task_id, ssh_config=ssh_config, host_cwd=host_cwd, probe_only=probe_only)
+                   task_id=task_id, ssh_config=ssh_config, host_cwd=host_cwd, probe_only=probe_only,
+                   local_config=local_config, session_scoped=session_scoped)
 
 
 # --- Requirement checkers: one generic path driven by _BACKEND_SPECS; optional fields, checked in order:

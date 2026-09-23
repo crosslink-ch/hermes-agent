@@ -13,6 +13,8 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from collections.abc import Callable, Iterator
 
 from utils import env_var_enabled
@@ -25,34 +27,62 @@ logger = logging.getLogger("tools.terminal_tool")
 # cached password in a long-lived process.
 _sudo_password_cache: dict[str, str] = {}
 _sudo_password_cache_lock = threading.Lock()
+_sudo_execution_context: ContextVar[tuple[str, str, bool, str | None, str] | None] = ContextVar(
+    "hermes_sudo_execution_context", default=None,
+)
+
+@contextmanager
+def _scoped_sudo_execution(target: str, backend: str, *, named: bool = False,
+                           sudo_password: str | None = None, target_scope: str = ""):
+    token = _sudo_execution_context.set((target, backend, named, sudo_password, target_scope))
+    try:
+        yield
+    finally:
+        _sudo_execution_context.reset(token)
 
 
-def _get_sudo_password_cache_scope() -> str:
+def _get_sudo_password_cache_scope(execution_target: str | None = None,
+                                   execution_backend: str | None = None,
+                                   execution_target_scope: str | None = None) -> str:
     """Return the cache scope for interactive sudo passwords."""
     from tools.terminal_tool import _current_session_key, _get_sudo_password_callback
     session_key = _current_session_key()
     if session_key:
-        return f"session:{session_key}"
-    callback = _get_sudo_password_callback()
-    if callback is None:
-        return f"thread:{threading.get_ident()}"
-    owner = getattr(callback, "__self__", None)
-    func = getattr(callback, "__func__", None)
-    if owner is not None and func is not None:
-        return f"callback-owner:{id(owner)}:{id(func)}"
-    return f"callback:{id(callback)}"
+        base_scope = f"session:{session_key}"
+    else:
+        callback = _get_sudo_password_callback()
+        if callback is None:
+            base_scope = f"thread:{threading.get_ident()}"
+        else:
+            owner = getattr(callback, "__self__", None)
+            func = getattr(callback, "__func__", None)
+            base_scope = (f"callback-owner:{id(owner)}:{id(func)}" if owner is not None and func is not None
+                          else f"callback:{id(callback)}")
+    context = _sudo_execution_context.get()
+    if context is not None:
+        execution_target = execution_target if execution_target is not None else context[0]
+        execution_backend = execution_backend if execution_backend is not None else context[1]
+    if execution_target is not None or execution_backend is not None:
+        scope = (execution_target_scope if execution_target_scope is not None else
+                 context[4] if context is not None and (execution_target, execution_backend) == context[:2] else "")
+        return f"{base_scope}|target:{execution_target!r}|backend:{str(execution_backend or '').lower()}|scope:{scope}"
+    return base_scope
 
 
-def _get_cached_sudo_password() -> str:
+def _get_cached_sudo_password(execution_target: str | None = None,
+                              execution_backend: str | None = None,
+                              execution_target_scope: str | None = None) -> str:
     """Return the cached sudo password for the current scope."""
-    scope = _get_sudo_password_cache_scope()
+    scope = _get_sudo_password_cache_scope(execution_target, execution_backend, execution_target_scope)
     with _sudo_password_cache_lock:
         return _sudo_password_cache.get(scope, "")
 
 
-def _set_cached_sudo_password(password: str) -> None:
+def _set_cached_sudo_password(password: str, execution_target: str | None = None,
+                              execution_backend: str | None = None,
+                              execution_target_scope: str | None = None) -> None:
     """Persist a sudo password for the current scope ("" drops the entry)."""
-    scope = _get_sudo_password_cache_scope()
+    scope = _get_sudo_password_cache_scope(execution_target, execution_backend, execution_target_scope)
     with _sudo_password_cache_lock:
         if password:
             _sudo_password_cache[scope] = password
@@ -114,17 +144,22 @@ def _sudo_wrong_password_failure(output: str) -> bool:
     return any(marker in lowered for marker in _SUDO_WRONG_PASSWORD_MARKERS)
 
 
-def _invalidate_cached_sudo_on_auth_failure(command: str | None, output: str) -> bool:
+def _invalidate_cached_sudo_on_auth_failure(
+    command: str | None, output: str, execution_target: str | None = None,
+    execution_backend: str | None = None, execution_target_scope: str | None = None,
+) -> bool:
     """Drop a session-cached sudo password after sudo rejects it. Env-configured
     ``SUDO_PASSWORD`` is left alone — an explicit operator choice, not a cache entry."""
+    context = _sudo_execution_context.get()
     if (
-        "SUDO_PASSWORD" in os.environ
+        (context is None and "SUDO_PASSWORD" in os.environ)
+        or (context is not None and context[2] and context[3] is not None)
         or not _sudo_wrong_password_failure(output)
         or _count_real_sudo_invocations(command or "") == 0
-        or not _get_cached_sudo_password()
+        or not _get_cached_sudo_password(execution_target, execution_backend, execution_target_scope)
     ):
         return False
-    _set_cached_sudo_password("")
+    _set_cached_sudo_password("", execution_target, execution_backend, execution_target_scope)
     return True
 
 
@@ -441,11 +476,15 @@ def _transform_sudo_command(
 
     # Scope-aware read: under multiplex the process env may hold another profile's SUDO_PASSWORD;
     # unscoped callers (UnscopedSecretError) keep the os.environ read.
-    try:
-        from agent.secret_scope import get_secret
-        _configured_password = get_secret("SUDO_PASSWORD")
-    except Exception:
-        _configured_password = os.environ.get("SUDO_PASSWORD")
+    context = _sudo_execution_context.get()
+    if context is not None and context[2]:
+        _configured_password = context[3]
+    else:
+        try:
+            from agent.secret_scope import get_secret
+            _configured_password = get_secret("SUDO_PASSWORD")
+        except Exception:
+            _configured_password = os.environ.get("SUDO_PASSWORD")
     has_configured_password = _configured_password is not None
     sudo_password = _configured_password if has_configured_password else _get_cached_sudo_password()
 
