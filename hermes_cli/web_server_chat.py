@@ -327,12 +327,15 @@ def _resolve_chat_argv(
         env["HERMES_HOME"] = str(profile_dir)
     try:
         from hermes_cli.config import (
-            apply_terminal_config_to_env, read_raw_config, terminal_config_owned_env_vars)
+            apply_terminal_config_to_env, effective_terminal_config, read_raw_config,
+            terminal_config_owned_env_vars)
 
         if profile_dir is not None:
-            # Drop only the terminal keys the launch profile owns before applying
-            # the selected profile; operator exports for other keys stay valid.
-            raw_launch_terminal = read_raw_config().get("terminal")
+            # Only values owned by the launching profile's explicit terminal
+            # config can have been bridged from that profile. Clear those before
+            # applying the selected profile, but retain independent operator
+            # exports (including SSH user and CWD) for unset/placeholder keys.
+            raw_launch_terminal = effective_terminal_config(read_raw_config().get("terminal"))
             for env_var in terminal_config_owned_env_vars(raw_launch_terminal):
                 env.pop(env_var, None)
             with _config_profile_scope(requested):

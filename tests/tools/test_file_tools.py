@@ -335,7 +335,7 @@ class TestWindowsMsysPathResolution:
         ``C:\\Users\\...`` — faking ``sys.platform`` left PosixPath in place."""
         import tools.file_tools_paths as file_tools
 
-        monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default": False)
+        monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default", execution_target=None, _resolution=None: False)
 
         resolved = file_tools._resolve_path_for_task("/c/Users/Mark/project/app.py")
         assert str(resolved) == r"C:\Users\Mark\project\app.py"
@@ -350,11 +350,11 @@ class TestWindowsMsysPathResolution:
         """
         import tools.file_tools_paths as file_tools
 
-        monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default": True)
+        monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default", execution_target=None, _resolution=None: True)
         monkeypatch.setattr(
             file_tools,
             "_authoritative_workspace_root",
-            lambda task_id="default": "/home/don/project",
+            lambda task_id="default", execution_target=None, _resolution=None: "/home/don/project",
         )
 
         resolved = file_tools._resolve_path_for_task("/home/don/.env")
@@ -565,7 +565,7 @@ class TestSessionCwdSurvivesEnvRecreation:
     @patch("tools.terminal_tool._active_environments", new_callable=dict)
     @patch("tools.file_tools._file_ops_cache", new_callable=dict)
     @patch("tools.terminal_tool._get_env_config")
-    @patch("tools.terminal_tool_backends._create_environment")
+    @patch("tools.terminal_tool._create_environment")
     def test_recorded_cwd_used_for_recreated_env(
         self, mock_create_env, mock_config, mock_cache, mock_active
     ):
@@ -606,7 +606,7 @@ class TestSessionCwdSurvivesEnvRecreation:
     @patch("tools.terminal_tool._active_environments", new_callable=dict)
     @patch("tools.file_tools._file_ops_cache", new_callable=dict)
     @patch("tools.terminal_tool._get_env_config")
-    @patch("tools.terminal_tool_backends._create_environment")
+    @patch("tools.terminal_tool._create_environment")
     def test_stale_cache_cwd_rescued_into_record_on_cleanup_detection(
         self, mock_create_env, mock_config, mock_cache, mock_active
     ):

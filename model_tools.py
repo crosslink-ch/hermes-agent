@@ -10,7 +10,7 @@ import os
 import json
 import re
 import asyncio
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from contextvars import ContextVar
 import logging
@@ -603,6 +603,10 @@ _LEGACY_TOOL_ALIASES = {
     "tour": "gui_tour", "tip": "show_tip",
 }
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
+_TARGET_SELECTOR_TOOLS = {
+    "terminal", "read_file", "write_file", "patch", "search_files", "execute_code",
+}
+_TARGET_RESULT_TOOLS = _TARGET_SELECTOR_TOOLS | {"process"}
 
 
 # --- Tool error sanitization --------------------------------------------------
@@ -765,7 +769,12 @@ def _pre_dispatch_guards(function_name: str, function_args: Dict[str, Any], skip
                 function_name, function_args, middleware_trace=list(middleware_trace), **ids.hook_kwargs(),
             )
             if modified_args is not None:
-                function_args = modified_args
+                from tools.execution_targets import ExecutionTargetError, validate_execution_target_args
+                try:
+                    validate_execution_target_args(function_name, modified_args)
+                except ExecutionTargetError as exc:
+                    return function_args, (tool_error(str(exc)), "execution_target_validation", str(exc))
+                function_args = dict(modified_args)
         except Exception as _hook_err:
             logger.debug("pre_tool_call hook error: %s", _hook_err)
         if block_message is not None:
@@ -808,6 +817,7 @@ def _execute_tool(function_name: str, function_args: Dict[str, Any], original_ar
                   *, user_task: Optional[str], enabled_tools: Optional[List[str]], skip_tool_execution_middleware: bool) -> Any:
     """Run the registry handler (through tool-execution middleware unless skipped)
     with the approval observability context bound for the duration."""
+    from tools.execution_targets import validate_execution_target_dispatch_args
     dispatch_kwargs: Dict[str, Any] = {"task_id": ids.task_id, "session_id": ids.session_id}
     if function_name == "execute_code":
         # Prefer the caller's list so subagents can't overwrite the parent's
@@ -821,6 +831,16 @@ def _execute_tool(function_name: str, function_args: Dict[str, Any], original_ar
         if is_connector_name(function_name):
             from model_tools_connectors import dispatch_connector_call
             return dispatch_connector_call(function_name, next_args, ids.tool_call_id)
+        validate_execution_target_dispatch_args(function_name, function_args, next_args)
+        if function_name in _TARGET_RESULT_TOOLS:
+            from tools.terminal_tool import environment_turn_usage, execution_environment_turn_key
+            with environment_turn_usage(
+                ids.task_id or "default",
+                environment_key=execution_environment_turn_key(
+                    function_name, next_args, task_id=ids.task_id or "default"
+                ),
+            ):
+                return registry.dispatch(function_name, next_args, **dispatch_kwargs)
         return registry.dispatch(function_name, next_args, **dispatch_kwargs)
 
     with _approval_observability(ids):
@@ -919,7 +939,19 @@ def handle_function_call(
     if not skip_tool_request_middleware:
         function_args, original_args, trace = _apply_request_middleware(function_name, function_args, ids, trace)
 
+    from tools.execution_targets import (
+        ExecutionTargetError, frozen_execution_target_config,
+        validate_execution_target_args, validate_execution_target_dispatch_args,
+    )
+    target_config_stack = ExitStack()
+    if function_name in _TARGET_RESULT_TOOLS:
+        target_config_stack.enter_context(frozen_execution_target_config())
+
     try:
+        try:
+            validate_execution_target_args(function_name, function_args)
+        except ExecutionTargetError as exc:
+            return tool_error(str(exc))
         if function_name in _AGENT_LOOP_TOOLS:
             return tool_error(f"{function_name} must be handled by the agent loop")
 
@@ -928,11 +960,17 @@ def handle_function_call(
             result, error_type, error_message = blocked
             return _emit(result, status="blocked", error_type=error_type, error_message=error_message)
 
+        # Hooks may rewrite arguments; validate the final selector before side effects.
+        try:
+            validate_execution_target_args(function_name, function_args)
+        except ExecutionTargetError as exc:
+            return tool_error(str(exc))
         # Any non-read/search tool resets the consecutive-read-loop counter.
         if function_name not in _READ_SEARCH_TOOLS:
             try:
                 from tools.file_tools_read_tracking import notify_other_tool_call
-                notify_other_tool_call(task_id or "default")
+                notify_other_tool_call(task_id or "default",
+                    function_args.get("execution_target") if function_name in _TARGET_SELECTOR_TOOLS else None)
             except Exception:
                 pass  # file_tools may not be loaded yet
 
@@ -949,6 +987,8 @@ def handle_function_call(
         logger.exception(error_msg)
         return _emit(tool_error(_sanitize_tool_error(error_msg)), duration_ms=_elapsed_ms(start),
                      status="error", error_type=type(e).__name__, error_message=str(e))
+    finally:
+        target_config_stack.close()
 
 
 # =============================================================================

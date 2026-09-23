@@ -45,6 +45,23 @@ class TestOverrideCwdSanitizedAtCallSite:
     the (sanitized) config["cwd"] and flowed raw into `docker run -w`.
     """
 
+    def test_explicit_docker_mount_mode_uses_registered_host_workspace(
+        self, tmp_path,
+    ):
+        config = {
+            "env_type": "docker",
+            "cwd": "/workspace",
+            "host_cwd": None,
+            "docker_mount_cwd_to_workspace": True,
+        }
+
+        cwd = tt._apply_task_cwd_override(
+            config, str(tmp_path), str(tmp_path),
+        )
+
+        assert cwd == "/workspace"
+        assert config["host_cwd"] == str(tmp_path)
+
     def _run_and_capture_cwd(self, monkeypatch, override_cwd, config_cwd="/root"):
         """Drive terminal_tool() on the docker backend with a host-path cwd
         override registered, and return the cwd that reached _create_environment
@@ -85,7 +102,7 @@ class TestOverrideCwdSanitizedAtCallSite:
         monkeypatch.setattr(tt, "_get_env_config", lambda: config)
         monkeypatch.setattr(tt, "_start_cleanup_thread", lambda: None)
         monkeypatch.setattr(tt, "_check_all_guards", lambda *a, **k: {"approved": True})
-        monkeypatch.setattr("tools.terminal_tool_backends._create_environment", fake_create_environment)
+        monkeypatch.setattr(tt, "_create_environment", fake_create_environment)
         # Force a fresh environment build so _create_environment is invoked.
         monkeypatch.setattr(tt, "_active_environments", {})
         monkeypatch.setattr(tt, "_last_activity", {})
@@ -175,7 +192,7 @@ class TestFileOpsCwdSanitizedAtCallSite:
 
         monkeypatch.setattr(tt, "_get_env_config", lambda: config)
         monkeypatch.setattr(tt, "_start_cleanup_thread", lambda: None)
-        monkeypatch.setattr("tools.terminal_tool_backends._create_environment", fake_create_environment)
+        monkeypatch.setattr(tt, "_create_environment", fake_create_environment)
         # Force a fresh environment build.
         monkeypatch.setattr(tt, "_active_environments", {})
         monkeypatch.setattr(tt, "_last_activity", {})

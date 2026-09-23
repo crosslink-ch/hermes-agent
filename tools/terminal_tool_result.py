@@ -203,6 +203,7 @@ def finalize_foreground_result(
     *, command: str, result: dict, env: Any, env_type: str, effective_task_id: str,
     task_id: Optional[str], session_id: Optional[str], session_key: str,
     workdir: Optional[str], command_cwd: Optional[str], approval_note: Optional[str],
+    resolution=None,
 ) -> str:
     """Turn a raw ``env.execute`` result into the tool's JSON result string."""
     from tools.terminal_tool import record_session_cwd
@@ -217,7 +218,7 @@ def finalize_foreground_result(
     if (result or {}).get("cwd_observed"):
         observed_cwd = (result or {}).get("cwd") or getattr(env, "cwd", None)
     if not workdir and observed_cwd:
-        record_session_cwd(session_key, observed_cwd)
+        record_session_cwd(session_key, observed_cwd, _resolution=resolution)
 
     output = result.get("output", "")
     returncode = result.get("returncode", 0)
@@ -255,7 +256,8 @@ def finalize_foreground_result(
     # Optional fields in observable JSON key order; None means "omit". Spill
     # metadata is present only when output overflowed the capture window.
     optional_fields: list[tuple[str, Any]] = [
-        ("cwd", changed_cwd),
+        # Named target results include effective cwd; legacy results only echo changes.
+        ("cwd", (observed_cwd or command_cwd) if resolution is not None and resolution.named else changed_cwd),
         ("environment_recreated", _ENV_RECREATED_NOTE if result.get("environment_recreated") else None),
         *_redact_spill_file(result.get("full_output_path"), result.get("output_total_chars"), command),
         ("verification_evidence", _verification_evidence(
@@ -270,4 +272,6 @@ def finalize_foreground_result(
     for key, value in optional_fields:
         if value is not None:
             result_dict[key] = value
+    if resolution is not None:
+        result_dict.update(resolution.metadata())
     return json.dumps(result_dict, ensure_ascii=False)

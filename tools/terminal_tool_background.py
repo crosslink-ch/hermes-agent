@@ -86,13 +86,20 @@ def _stamp_gateway_routing(proc_session, get_session_env) -> None:
 
 
 def _spawn(process_registry, *, env, env_type, command, cwd, effective_task_id, task_id,
-           session_key, effective_pty):
+           session_key, effective_pty, effective_timeout=None, resolution=None):
     common = dict(command=command, cwd=cwd, task_id=effective_task_id,
                   owner_task_id=task_id or effective_task_id, session_key=session_key)
+    if resolution is not None and resolution.named:
+        common.update(target=resolution.target, backend=env_type,
+                      runtime_scope=resolution.security_scope if resolution.named else "",
+                      environment_task_key=effective_task_id,
+                      timeout_seconds=effective_timeout or 0)
     if env_type == "local":
+        if resolution is not None and resolution.named:
+            common["env_ref"] = env
         return process_registry.spawn_local(
             env_vars=env.env if hasattr(env, 'env') else None, use_pty=effective_pty, **common)
-    return process_registry.spawn_via_env(env=env, **common)
+    return process_registry.spawn_via_env(env=env, timeout=effective_timeout or 10, **common)
 
 
 def _apply_async_support(proc_session, result_data, notify_on_complete, watch_patterns):
@@ -130,7 +137,7 @@ def spawn_background_process(
     *, command: str, env: Any, env_type: str, effective_task_id: str, task_id: Optional[str],
     session_key: str, workdir: Optional[str], cwd: str, effective_pty: bool,
     notify_on_complete: bool, watch_patterns: Optional[List[str]], approval_note: Optional[str],
-    pty_disabled_reason: Optional[str],
+    pty_disabled_reason: Optional[str], resolution=None, effective_timeout=None,
 ) -> str:
     """Spawn *command* as a tracked background process and return the JSON result.
 
@@ -144,15 +151,25 @@ def spawn_background_process(
 
     effective_cwd = _resolve_command_cwd(
         workdir=workdir, default_cwd=cwd, session_key=session_key, env_type=env_type,
+        _resolution=resolution,
     )
     try:
         proc_session = _spawn(
             process_registry, env=env, env_type=env_type, command=command, cwd=effective_cwd,
             effective_task_id=effective_task_id, task_id=task_id, session_key=session_key,
-            effective_pty=effective_pty,
+            effective_pty=effective_pty, effective_timeout=effective_timeout,
+            resolution=resolution,
         )
+        if resolution is not None:
+            proc_session.target = resolution.target
+            proc_session.backend = env_type
+            proc_session.runtime_scope = resolution.security_scope if resolution.named else ""
+            proc_session.environment_task_key = effective_task_id
+            proc_session.timeout_seconds = effective_timeout
         result_data = {"output": "Background process started", "session_id": proc_session.id,
                        "pid": proc_session.pid, "exit_code": 0, "error": None}
+        if resolution is not None:
+            result_data.update(resolution.metadata(cwd=effective_cwd))
         if approval_note:
             result_data["approval"] = approval_note
         if pty_disabled_reason:
@@ -209,7 +226,7 @@ _YIELDED_NOTE = (
 
 def yield_to_background_handler(
     *, command: str, env_type: str, cwd: Optional[str], effective_task_id: str,
-    task_id: Optional[str], session_key: str,
+    task_id: Optional[str], session_key: str, resolution=None, env=None,
 ):
     """Build the ``yield_handler`` a foreground ``env.execute`` calls when the tool thread is
     asked to yield (a user message arrived mid-command). Local backend only: the live Popen
@@ -224,7 +241,16 @@ def yield_to_background_handler(
         session = process_registry.adopt_local(
             proc, command=command, cwd=cwd, task_id=effective_task_id,
             owner_task_id=task_id or effective_task_id, session_key=session_key,
-            output_so_far=output_so_far)
+            output_so_far=output_so_far,
+            **(dict(target=resolution.target, backend=env_type,
+                    runtime_scope=resolution.security_scope if resolution.named else "",
+                    environment_task_key=effective_task_id, env_ref=env)
+               if resolution is not None and resolution.named else {}))
+        if resolution is not None:
+            session.target = resolution.target
+            session.backend = env_type
+            session.runtime_scope = resolution.security_scope if resolution.named else ""
+            session.environment_task_key = effective_task_id
         _stamp_routing_if_gateway(process_registry, session, session_key)
         logger.info("foreground command yielded to background as %s (pid %s)", session.id, session.pid)
         return {

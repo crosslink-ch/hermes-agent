@@ -12,6 +12,8 @@ scrubbing, interpreter/cwd), tools/code_execution_rpc.py (RPC servers).
 """
 
 import base64
+from copy import deepcopy
+from contextvars import ContextVar
 import json
 import logging
 import os
@@ -125,22 +127,25 @@ _TOOL_STUBS = {
     "web_extract": ("urls: list, char_limit: int = None",
         '"""Extract content from URLs (no LLM summarization). Returns dict with results list of {url, title, content, error}. Pages over char_limit (default 15000) are head+tail truncated with the full text stored on disk; the content footer gives the path. content is markdown."""',
         '{"urls": urls, "char_limit": char_limit}'),
-    "read_file": ("path: str, offset: int = 1, limit: int = 2000",
+    "read_file": ("path: str, offset: int = 1, limit: int = 2000, execution_target: str = None, runtime_scope: str = None",
         '"""Read a file (1-indexed lines). Returns dict with "content" and "total_lines"."""',
-        '{"path": path, "offset": offset, "limit": limit}'),
-    "write_file": ("path: str, content: str, cross_profile: bool = False",
+        '{"path": path, "offset": offset, "limit": limit, "execution_target": execution_target, "runtime_scope": runtime_scope}'),
+    "write_file": ("path: str, content: str, cross_profile: bool = False, execution_target: str = None",
         '"""Write content to a file (always overwrites). Returns dict with status."""',
-        '{"path": path, "content": content, "cross_profile": cross_profile}'),
-    "search_files": ('pattern: str, target: str = "content", path: str = ".", file_glob: str = None, limit: int = 50, offset: int = 0, output_mode: str = "content", context: int = 0, order: str = "discovery"',
+        '{"path": path, "content": content, "cross_profile": cross_profile, "execution_target": execution_target}'),
+    "search_files": ('pattern: str, target: str = "content", path: str = ".", file_glob: str = None, limit: int = 50, offset: int = 0, output_mode: str = "content", context: int = 0, order: str = "discovery", execution_target: str = None',
         '"""Search file contents (target="content") or find files by name (target="files"). Returns dict with "matches"."""',
-        '{"pattern": pattern, "target": target, "path": path, "file_glob": file_glob, "limit": limit, "offset": offset, "output_mode": output_mode, "context": context, "order": order}'),
-    "patch": ('path: str = None, old_string: str = None, new_string: str = None, replace_all: bool = False, mode: str = "replace", patch: str = None, cross_profile: bool = False',
+        '{"pattern": pattern, "target": target, "path": path, "file_glob": file_glob, "limit": limit, "offset": offset, "output_mode": output_mode, "context": context, "order": order, "execution_target": execution_target}'),
+    "patch": ('path: str = None, old_string: str = None, new_string: str = None, replace_all: bool = False, mode: str = "replace", patch: str = None, cross_profile: bool = False, execution_target: str = None',
         '"""Targeted find-and-replace (mode="replace") or V4A multi-file patches (mode="patch"). Returns dict with status."""',
-        '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile}'),
-    "terminal": ("command: str, timeout: int = None, workdir: str = None",
+        '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile, "execution_target": execution_target}'),
+    "terminal": ("command: str, timeout: int = None, workdir: str = None, execution_target: str = None",
         '"""Run a shell command (foreground only). Returns dict with "output" and "exit_code"."""',
-        '{"command": command, "timeout": timeout, "workdir": workdir}'),
+        '{"command": command, "timeout": timeout, "workdir": workdir, "execution_target": execution_target}'),
 }
+
+
+_bound_code_target: ContextVar[str | None] = ContextVar("bound_code_target", default=None)
 
 
 def _missing_hermes_tools_import_hint(m, enabled_tools) -> str:
@@ -195,8 +200,10 @@ def generate_hermes_tools_module(enabled_tools: List[str],
     """Source of the hermes_tools.py stub module for SANDBOX_ALLOWED_TOOLS ∩ *enabled_tools*.
     ``transport``: ``"uds"`` (local socket client) or ``"file"`` (file RPC, remote backends)."""
     header = _FILE_TRANSPORT_HEADER if transport == "file" else _UDS_TRANSPORT_HEADER
+    selected = _bound_code_target.get()
     return header + "\n".join(
-        f"def {name}({sig}):\n    {doc}\n    return _call({name!r}, {args_expr})\n"
+        f"def {name}({sig.replace('execution_target: str = None', 'execution_target: str = ' + repr(selected)) if selected else sig}):\n"
+        f"    {doc}\n    return _call({name!r}, {args_expr})\n"
         for name, (sig, doc, args_expr) in sorted(_TOOL_STUBS.items()) if name in set(enabled_tools)
     )
 
@@ -398,9 +405,20 @@ def _call(tool_name, args):
 
 # ---- Remote execution support (file-based RPC via terminal backend) ----
 
-def _get_or_create_env(task_id: str):
-    """``(env, env_type)`` — the environment the terminal/file tools share for *task_id*, created on
-    first use (same double-checked per-task lock pattern as file_tools._get_file_ops)."""
+def _get_or_create_env(task_id: str, target=None, expected_target_scope=None):
+    """Reuse the selected terminal/file environment instead of duplicating sandboxes."""
+    if target:
+        from tools.execution_targets import resolve_execution_target
+        resolution = resolve_execution_target(target)
+        if expected_target_scope and resolution.security_scope != expected_target_scope:
+            raise ValueError(f"Execution target {target!r} changed while execute_code was running")
+        if resolution.named:
+            from tools.file_tools import _file_ops_for_resolution
+            try:
+                ops = _file_ops_for_resolution(task_id, resolution)
+            except RuntimeError as exc:
+                raise ValueError(str(exc)) from exc
+            return ops.env, resolution.backend
     from tools.terminal_tool_backends import _container_config_from_config, _create_environment, _ssh_config_from_config
     from tools.terminal_tool import (
         _active_environments, _env_lock, _get_env_config, _last_activity,
@@ -432,7 +450,7 @@ def _get_or_create_env(task_id: str):
             # docker_env, so a sandbox created from this path lost the operator's configured settings.
             container_config = _container_config_from_config(config)
         logger.info("Creating new %s environment for execute_code task %s...",
-                     env_type, effective_task_id[:8])
+                     env_type, str(effective_task_id)[:48])
         env = _create_environment(
             env_type=env_type, image=_select_image(env_type, overrides, config),
             cwd=overrides.get("cwd") or config["cwd"], timeout=config["timeout"],
@@ -446,8 +464,66 @@ def _get_or_create_env(task_id: str):
             _last_activity[effective_task_id] = time.time()
         _start_cleanup_thread()
         logger.info("%s environment ready for execute_code task %s",
-                     env_type, effective_task_id[:8])
+                     env_type, str(effective_task_id)[:48])
         return env, env_type
+
+
+def _inherit_execution_target(tool_name, tool_args, execution_target,
+                              execution_target_scope=None):
+    """Bind authenticated nested RPC to the approved execute_code target."""
+    if not execution_target or tool_name not in {
+        "terminal", "read_file", "write_file", "patch", "search_files"
+    }:
+        return tool_args
+    from tools.execution_targets import (resolve_live_execution_target,
+                                         validate_execution_target_args)
+    if execution_target_scope:
+        live = resolve_live_execution_target(execution_target)
+        if live.security_scope != execution_target_scope:
+            raise ValueError(f"Execution target {execution_target!r} changed while execute_code was running")
+    if type(tool_args) is not dict:
+        raise ValueError("Nested target-aware RPC arguments must be a plain JSON object")
+    validate_execution_target_args(tool_name, tool_args)
+    requested = tool_args.get("execution_target")
+    if requested is not None and requested != execution_target:
+        raise ValueError(f"execute_code RPC is bound to target {execution_target!r}; "
+                         f"nested {tool_name} cannot select {requested!r}.")
+    if tool_name == "read_file" and execution_target_scope:
+        scope = tool_args.get("runtime_scope")
+        if scope is not None and scope != execution_target_scope:
+            raise ValueError("Nested read_file runtime_scope does not match the outer execute_code runtime")
+    return {**tool_args, "execution_target": execution_target}
+
+
+def _dispatch_rpc_tool(handler, tool_name, tool_args, task_id, execution_target_config=None):
+    """Dispatch a nested RPC using the snapshot approved for the outer script."""
+    if execution_target_config is None:
+        return handler(tool_name, tool_args, task_id=task_id)
+    from tools.execution_targets import execution_target_config_scope
+    with execution_target_config_scope(execution_target_config):
+        return handler(tool_name, tool_args, task_id=task_id)
+
+
+def _frozen_target_config(resolution):
+    """Restrict nested resolution to the selected target without altering its fingerprint."""
+    target = deepcopy(dict(resolution.config))
+    targets = {resolution.target: target}
+    default = resolution.target
+    if not resolution.is_default:
+        # Preserve is_default=False in the resolver's spec fingerprint. The
+        # placeholder cannot execute; it is NOT a valid local fallback.
+        default = "__hermes_original_default__"
+        while default in targets:
+            default += "_"
+        targets[default] = {"backend": "__blocked__"}
+    frozen = {"terminal": {"targets": targets, "default_target": default}}
+    if resolution.provider is not None:
+        from tools.execution_target_lifecycle import REGISTRY_METADATA_KEY, runtime_record_metadata_entry
+        frozen[REGISTRY_METADATA_KEY] = {"records": [runtime_record_metadata_entry(
+            execution_target=resolution.target, provider=resolution.provider,
+            owner_id=resolution.owner_id, generation=resolution.generation,
+            state="ready", status="active")], "diagnostics": []}
+    return frozen
 
 
 def _ship_file_to_remote(env, remote_path: str, content: str) -> None:
@@ -556,8 +632,10 @@ def _sandbox_tools_for(enabled_tools: Optional[List[str]]) -> frozenset:
 
 
 def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
-                         sandbox_tools: frozenset, *, timeout: int, max_tool_calls: int,
-                         exec_start: float) -> str:
+                          sandbox_tools: frozenset, *, timeout: int, max_tool_calls: int,
+                          exec_start: float, operation_cwd: str = None,
+                          execution_target=None, execution_target_scope=None,
+                          execution_target_config=None) -> str:
     """Per-call script ship: stage hermes_tools.py + script.py in a fresh remote sandbox dir,
     serve file-RPC from a polling thread, run, clean up."""
     sandbox_dir = f"{_env_temp_dir(env)}/hermes_exec_{uuid.uuid4().hex[:12]}"
@@ -576,7 +654,8 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         rpc_thread = threading.Thread(
             target=propagate_context_to_thread(_rpc_poll_loop), daemon=True,
             args=(env, f"{sandbox_dir}/rpc", effective_task_id, [], tool_call_counter,
-                  max_tool_calls, sandbox_tools, stop_event, rpc_token))
+                  max_tool_calls, sandbox_tools, stop_event, rpc_token,
+                  execution_target, execution_target_scope, execution_target_config))
         rpc_thread.start()
         env_prefix = (f"HERMES_RPC_DIR={quoted_rpc_dir} HERMES_RPC_TOKEN={shlex.quote(rpc_token)} "
                       "PYTHONDONTWRITEBYTECODE=1")
@@ -584,8 +663,14 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         if tz:
             env_prefix += f" TZ={shlex.quote(tz)}"
         logger.info("Executing code on %s backend (task %s)...", env_type, effective_task_id[:8])
-        script_result = env.execute(f"cd {quoted_sandbox_dir} && {env_prefix} python3 script.py",
-                                    timeout=timeout)
+        if operation_cwd:
+            script_command = (
+                f"{env_prefix} PYTHONPATH={quoted_sandbox_dir}:$PYTHONPATH "
+                f"python3 {quoted_sandbox_dir}/script.py")
+            script_result = env.execute(script_command, cwd=operation_cwd, timeout=timeout)
+        else:
+            script_result = env.execute(
+                f"cd {quoted_sandbox_dir} && {env_prefix} python3 script.py", timeout=timeout)
         stdout_text = script_result.get("output", "") or ""
         exit_code = script_result.get("returncode", -1)
         # Backend exit codes: 124 = timeout wrapper, 130 = SIGINT.
@@ -601,7 +686,8 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         except Exception:
             logger.debug("Failed to clean up remote sandbox %s", sandbox_dir)
     result = _remote_result(status, stdout_text, exec_start,
-                            {"exit_code": exit_code, "tool_calls_made": tool_call_counter[0]})
+                            {"exit_code": exit_code, "tool_calls_made": tool_call_counter[0],
+                             **({"cwd": operation_cwd} if operation_cwd else {})})
     if status == "timeout":
         _apply_timeout(result, f"Script timed out after {timeout}s and was killed.")
         logger.warning("execute_code (remote) timed out after %ss (limit %ss) with %d tool calls",
@@ -615,14 +701,26 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
 
 
 def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[List[str]],
-                    reset: bool = False) -> str:
+                    reset: bool = False, *, target: str = None, mode: str = "strict",
+                    expected_target_scope: str = None,
+                    expected_target_config: dict = None) -> str:
     """Run code on the remote terminal backend: the owner's persistent remote session kernel
     (tools/code_kernel_remote.py) first, else the per-call script ship — the fail-open route when
     a kernel cannot be spawned and the only route for hosts that cannot sustain a background process."""
     _cfg = _load_config()
     timeout, max_tool_calls = _cfg.get("timeout", DEFAULT_TIMEOUT), _cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
     sandbox_tools, effective_task_id = _sandbox_tools_for(enabled_tools), task_id or "default"
-    env, env_type = _get_or_create_env(effective_task_id)
+    from tools.execution_targets import resolve_execution_target
+    resolution = resolve_execution_target(target)
+    if expected_target_scope and resolution.security_scope != expected_target_scope:
+        return _error_result(f"Execution target {target!r} changed while execute_code was running")
+    operation_cwd = None
+    if target and mode == "project":
+        from tools.file_tools import _authoritative_workspace_root
+        operation_cwd = _authoritative_workspace_root(
+            effective_task_id, target, _resolution=resolution)
+    env, env_type = (_get_or_create_env(effective_task_id, target, expected_target_scope)
+                     if target else _get_or_create_env(effective_task_id))
     exec_start = time.monotonic()
     try:
         py_check = env.execute("command -v python3 >/dev/null 2>&1 && echo OK", cwd="/", timeout=15)
@@ -632,27 +730,31 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
         # Session-kernel path: one persistent kernel per owner on the
         # run-to-completion transport. Spawn failure falls OPEN to the per-call
         # path below so a degraded remote host never blocks execution.
-        try:
-            # --- Session-kernel path (hermes-agent#96873) ------------------- Same always-on model as
-            # local: one persistent kernel per owner, rebuilt on the run-to-completion transport (detached
-            # runner + file cell protocol).
-            from tools.code_kernel_remote import execute_in_remote_kernel
-            kernel_result = execute_in_remote_kernel(
-                code, env=env, env_type=env_type, task_env_id=effective_task_id,
-                sandbox_tools=frozenset(sandbox_tools), timeout=timeout,
-                max_tool_calls=max_tool_calls, reset=bool(reset),
-                idle_exit=int(_cfg.get("kernel_idle_timeout", 1800)),
-            )
-        except Exception:
-            logger.warning("remote session-kernel path failed; falling back to per-call", exc_info=True)
-            kernel_result = None
-        if kernel_result is not None:
-            return _finish_remote_kernel_result(kernel_result, timeout=timeout, exec_start=exec_start)
+        # A named project cell must execute from its own session cwd. The
+        # remote kernel currently stages cells in its private directory, so
+        # use the per-call transport until it supports a per-cell cwd.
+        if not (target and mode == "project"):
+            try:
+                from tools.code_kernel_remote import execute_in_remote_kernel
+                kernel_result = execute_in_remote_kernel(
+                    code, env=env, env_type=env_type, task_env_id=effective_task_id,
+                    sandbox_tools=frozenset(sandbox_tools), timeout=timeout,
+                    max_tool_calls=max_tool_calls, reset=bool(reset),
+                    idle_exit=int(_cfg.get("kernel_idle_timeout", 1800)),
+                )
+            except Exception:
+                logger.warning("remote session-kernel path failed; falling back to per-call", exc_info=True)
+                kernel_result = None
+            if kernel_result is not None:
+                return _finish_remote_kernel_result(kernel_result, timeout=timeout, exec_start=exec_start)
         logger.info("remote session kernel unavailable on %s; using per-call path", env_type)
     except Exception as exc:
         return _remote_failure(exc, exec_start, 0)
     return _run_remote_per_call(env, env_type, code, effective_task_id, sandbox_tools,
-                                timeout=timeout, max_tool_calls=max_tool_calls, exec_start=exec_start)
+                                timeout=timeout, max_tool_calls=max_tool_calls, exec_start=exec_start,
+                                operation_cwd=operation_cwd, execution_target=target,
+                                execution_target_scope=expected_target_scope,
+                                execution_target_config=expected_target_config)
 
 
 # ---- Main entry point ----
@@ -663,6 +765,7 @@ def execute_code(
     task_id: Optional[str] = None,
     enabled_tools: Optional[List[str]] = None,
     reset: bool = False,
+    execution_target: Optional[str] = None,
 ) -> str:
     """Run Python in the session's persistent kernel (local) or on the remote terminal backend,
     with RPC access to a subset of Hermes tools; returns the JSON result string. "Sandbox" means
@@ -701,15 +804,31 @@ def execute_code(
                 "it could complete (SIGTERM propagates to child processes). "
                 "Run the lifecycle command from a shell outside the gateway."
             )
+    from tools.execution_targets import resolve_execution_target
+    try:
+        resolution = resolve_execution_target(execution_target)
+    except Exception as exc:
+        return tool_error(str(exc))
     from tools.terminal_tool import _get_env_config, _docker_has_host_access
-    _env_config = _get_env_config()
+    _env_config = (
+        _get_env_config(dict(resolution.config))
+        if resolution.named else _get_env_config()
+    )
     env_type = _env_config["env_type"]
     # Arbitrary Python never passes through terminal()/DANGEROUS_PATTERNS, so guard the whole
     # script before either dispatch path spawns it — in this (tool-executor) thread, which holds
     # the session context. A Docker sandbox with host bind mounts gets no container fast-path.
     # See #30882.
     from tools.approval import check_execute_code_guard
-    _guard = check_execute_code_guard(code, env_type, has_host_access=_docker_has_host_access(_env_config))
+    _guard_kwargs = {"has_host_access": _docker_has_host_access(_env_config)}
+    if resolution.named:
+        _guard_kwargs.update(
+            execution_target=resolution.target,
+            execution_backend=resolution.backend,
+            execution_target_named=True,
+            execution_target_scope=resolution.security_scope,
+        )
+    _guard = check_execute_code_guard(code, env_type, **_guard_kwargs)
     if not _guard.get("approved", False):
         return _error_result(_guard.get("message") or "execute_code blocked by approval guard.")
     # Clear a stale interrupt bit that landed during the blocking approval-wait so it can't
@@ -717,17 +836,52 @@ def execute_code(
     if _guard.get("user_approved"):
         from tools.interrupt import clear_current_thread_interrupt
         clear_current_thread_interrupt()
-    if env_type != "local":
-        return _execute_remote(code, task_id, enabled_tools, reset=bool(reset))
+    from contextlib import nullcontext
+    from tools.execution_targets import execution_target_config_scope
+    scope = (execution_target_config_scope(_frozen_target_config(resolution))
+             if resolution.named else nullcontext())
+    with scope:
+        token = _bound_code_target.set(resolution.target if resolution.named else None)
+        try:
+            if env_type != "local":
+                result = _execute_remote(
+                    code, task_id, enabled_tools,
+                    target=resolution.target if resolution.named else None,
+                    mode=_get_execution_mode(),
+                    expected_target_scope=(resolution.security_scope if resolution.named else None),
+                    expected_target_config=(_frozen_target_config(resolution) if resolution.named else None),
+                )
+            else:
+                result = _execute_local(code, task_id, enabled_tools, reset, resolution)
+        finally:
+            _bound_code_target.reset(token)
+    if resolution.named:
+        try:
+            payload = json.loads(result)
+            payload.update(resolution.metadata(cwd=_env_config.get("cwd")))
+            return json.dumps(payload, ensure_ascii=False)
+        except (TypeError, ValueError):
+            pass
+    return result
+
+
+def _execute_local(code, task_id, enabled_tools, reset, resolution):
     from tools.interrupt import is_interrupted as _is_interrupted
     # Session kernels are always on locally (one interpreter per conversation); the guards above
     # already ran for this cell, and the kernel path shares env builder, RPC server and redaction.
     from tools.code_kernel import execute_in_session_kernel
     _cfg = _load_config()
     _mode = _get_execution_mode()
+    child_cwd = _resolve_child_cwd(_mode, "", task_id=task_id or "")
+    if resolution.named and _mode == "project":
+        from tools.file_tools import _authoritative_workspace_root
+        child_cwd = _authoritative_workspace_root(
+            task_id or "default", resolution.target, _resolution=resolution) or child_cwd
+    # The mode is part of the kernel's identity, not an execution toggle there.
+    kernel_mode = f"{_mode}@target:{resolution.security_scope}" if resolution.named else _mode
     return execute_in_session_kernel(
-        code, task_id=task_id or "", mode=_mode, child_python=_resolve_child_python(_mode),
-        child_cwd=_resolve_child_cwd(_mode, "", task_id=task_id or ""),
+        code, task_id=task_id or "", mode=kernel_mode, child_python=_resolve_child_python(_mode),
+        child_cwd=child_cwd,
         sandbox_tools=frozenset(_sandbox_tools_for(enabled_tools)),
         timeout=_cfg.get("timeout", DEFAULT_TIMEOUT),
         max_tool_calls=_cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS),
@@ -871,6 +1025,8 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
                     "and print your final result to stdout.")},
                 "reset": {"type": "boolean", "description": (
                     "Discard the kernel's persistent state and start fresh before running this code.")},
+                "execution_target": {"type": "string", "description": (
+                    "Optional named execution target. Uses terminal.default_target when omitted.")},
             },
             "required": ["code"],
         },
@@ -884,6 +1040,11 @@ EXECUTE_CODE_SCHEMA = build_execute_code_schema()
 def _execute_code_handler(args: dict, **kwargs) -> str:
     """Redirect misdirected calls (terminal's ``command`` arg, non-string ``code``) with an
     actionable error before dispatching to ``execute_code``."""
+    try:
+        from tools.execution_targets import validate_execution_target_args
+        validate_execution_target_args("execute_code", args)
+    except Exception as exc:
+        return tool_error(str(exc))
     if "code" not in args and "command" in args:
         logger.warning("execute_code received 'command' instead of the required 'code' argument")
         return tool_error("execute_code received a 'command' parameter, but it requires "
@@ -894,7 +1055,8 @@ def _execute_code_handler(args: dict, **kwargs) -> str:
         return tool_error(f"execute_code received a {type(code).__name__} in 'code', but it "
                           "requires Python source as a string. Retry as execute_code(code=\"...\").")
     return execute_code(code=code or "", task_id=kwargs.get("task_id"),
-                        enabled_tools=kwargs.get("enabled_tools"), reset=bool(args.get("reset", False)))
+                        enabled_tools=kwargs.get("enabled_tools"), reset=bool(args.get("reset", False)),
+                        execution_target=args.get("execution_target"))
 
 
 registry.register(

@@ -885,12 +885,12 @@ _BACKEND_PROBE_CMD = (
 )
 
 
-def _run_backend_probe(env_type: str, terminal_tool) -> str:
+def _run_backend_probe(env_type: str, terminal_tool, terminal_config=None, target_name="", runtime_scope="") -> str:
     """Execute the probe command inside a freshly built backend; "" when it yields nothing."""
     from tools.terminal_tool_backends import _container_config_from_config, _create_environment, _ssh_config_from_config
     from tools.terminal_tool_lifecycle import _cleanup_env
 
-    config = terminal_tool._get_env_config()
+    config = terminal_tool._get_env_config(dict(terminal_config)) if terminal_config is not None else terminal_tool._get_env_config()
     # Same container_config shaper as the live terminal path: a private copy of the key table here
     # drifted (no docker_network) and gave the probe a bridge-networked container under lockdown.
     env = _create_environment(
@@ -931,10 +931,10 @@ def _format_backend_probe(output: str) -> str:
     return "\n".join(f"  {label}: {value}" for label, value in fields if value)
 
 
-def _probe_remote_backend(env_type: str) -> str | None:
+def _probe_remote_backend(env_type: str, terminal_config=None, target_name="", runtime_scope="") -> str | None:
     """Describe the active non-local backend via a live probe; None if it failed (cached, failures included)."""
     from hermes_constants import hermes_home_key
-    cache_key = (hermes_home_key(), env_type, _tenv_read("TERMINAL_CWD", ""))
+    cache_key = (hermes_home_key(), env_type, runtime_scope or _tenv_read("TERMINAL_CWD", ""))
     formatted = _BACKEND_PROBE_CACHE.get(cache_key)
     if formatted is None:
         formatted = ""
@@ -944,7 +944,8 @@ def _probe_remote_backend(env_type: str) -> str | None:
             logger.debug("Backend probe unavailable (import failed): %s", e)
         else:
             try:
-                formatted = _format_backend_probe(_run_backend_probe(env_type, terminal_tool))
+                formatted = _format_backend_probe(_run_backend_probe(
+                    env_type, terminal_tool, terminal_config, target_name, runtime_scope))
             except Exception as e:
                 logger.debug("Backend probe failed: %s", e)
         _BACKEND_PROBE_CACHE[cache_key] = formatted
@@ -981,11 +982,11 @@ def _local_host_hints() -> list[str]:
     return ["\n".join(host_lines), _WINDOWS_BASH_SHELL_HINT]
 
 
-def _remote_backend_hint(backend: str) -> str:
+def _remote_backend_hint(backend: str, terminal_config=None, target_name="", runtime_scope="") -> str:
     """Backend-only block for remote/sandbox backends (host info deliberately suppressed)."""
     lead = (f"Terminal backend: {backend}. Your `terminal`, `read_file`, `write_file`, `patch`, and "
             f"`search_files` tools all operate inside ")
-    probe = _probe_remote_backend(backend)
+    probe = _probe_remote_backend(backend, terminal_config, target_name, runtime_scope) if terminal_config is not None else _probe_remote_backend(backend)
     if probe:
         return lead + (
             f"this {backend} environment — NOT on the machine where Hermes itself is running. The host OS, "
@@ -1020,14 +1021,70 @@ def _embedder_environment_hint() -> str:
         (_config_readonly("agent.environment_hint").get("agent", {}) or {}).get("environment_hint", "")).strip()
 
 
-def build_environment_hints() -> str:
-    """Execution-environment block: local backends get host OS/home/cwd; remote/sandbox
-    backends get ONLY the backend's own state (the agent's tools cannot touch the host).
-    WSL and embedder hints are appended."""
-    backend = (_tenv_read("TERMINAL_ENV") or "local").strip().lower()
+def _named_target_hints() -> str:
+    """Expose routing selectors, never inherited credentials, to the model."""
+    try:
+        from tools.execution_targets import list_execution_targets
+        targets = list_execution_targets()
+    except Exception as exc:
+        logger.debug("Could not build execution target inventory: %s", exc)
+        return ""
+    if not any(target.named for target in targets):
+        return ""
+    default = next((t.target for t in targets if t.is_default), None)
+    descriptions = [
+        f"{json.dumps(t.target)} ({t.backend}{', default' if t.is_default else ''})"
+        for t in targets
+    ]
+    return (
+        "Configured execution targets: " + ", ".join(descriptions) + ". "
+        "When you omit an execution-target selector, the named default applies. "
+        "`terminal`, `read_file`, `write_file`, `patch`, `search_files`, and "
+        "`execute_code` select one with `execution_target`; omitting it uses "
+        f"{default or 'the default'}. `search_files.target` remains the content/files "
+        "remains the content/files search mode, not execution routing. Paths and runtime state belong to "
+        "the selected target, not necessarily to this process."
+    )
+
+
+def build_environment_hints(*, home_override: Path | str | None = None) -> str:
+    """Build profile-scoped hints for the selected default execution target."""
+    if home_override is not None:
+        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+        token = set_hermes_home_override(home_override)
+        try:
+            return build_environment_hints()
+        finally:
+            reset_hermes_home_override(token)
+    selected = None
+    try:
+        from tools.execution_targets import resolve_execution_target
+        selected = resolve_execution_target()
+    except Exception as exc:
+        logger.debug("Could not resolve default target for prompt: %s", exc)
+    backend = selected.backend if selected is not None and selected.named else (
+        _tenv_read("TERMINAL_ENV") or "local"
+    ).strip().lower()
     is_remote_backend = backend in _REMOTE_TERMINAL_BACKENDS or _plugin_backend_is_remote(backend)
-    hints = [_remote_backend_hint(backend)] if is_remote_backend else _local_host_hints()
+    if is_remote_backend:
+        hints = [
+            _remote_backend_hint(
+                backend, dict(selected.config), selected.target, selected.security_scope
+            ) if selected is not None and selected.named else _remote_backend_hint(backend)
+        ]
+    else:
+        hints = _local_host_hints()
+        if selected is not None and selected.named:
+            cwd = selected.config.get("cwd")
+            if isinstance(cwd, str) and cwd.strip() and cwd not in {".", "auto", "cwd"}:
+                hints[0] = "\n".join(
+                    f"Current working directory: {cwd}" if line.startswith("Current working directory:") else line
+                    for line in hints[0].splitlines()
+                )
     hints += [WSL_ENVIRONMENT_HINT] if is_wsl() else []
+    target_hints = _named_target_hints()
+    if target_hints:
+        hints.append(target_hints)
     return "\n\n".join(h for h in (*hints, _embedder_environment_hint()) if h)
 
 

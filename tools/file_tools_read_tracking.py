@@ -101,7 +101,8 @@ def _pop_not_found(op: str, resolved_str: str, task_id: str) -> None:
         nf.pop((op, resolved_str), None)
 
 
-def _check_not_found_cache(op: str, resolved_str: str, task_id: str) -> str | None:
+def _check_not_found_cache(op: str, resolved_str: str, task_id: str, *,
+                           check_host_filesystem: bool = True) -> str | None:
     """Return cached not-found JSON for *(op, resolved_str)* if still fresh.
 
     *op* is "read" or "search" (different error JSON shapes). Evicted by TTL,
@@ -119,7 +120,7 @@ def _check_not_found_cache(op: str, resolved_str: str, task_id: str) -> str | No
     # "check → create → read" is common, so never serve a stale miss for a path
     # that now exists. The stat runs OUTSIDE the tracker lock: a hung stat on a
     # dead network mount must not stall every task.
-    if os.path.exists(resolved_str):
+    if check_host_filesystem and os.path.exists(resolved_str):
         with _read_tracker_lock:
             _pop_not_found(op, resolved_str, task_id)
         return None
@@ -144,6 +145,28 @@ def _bump_consecutive(task_data: dict, key: tuple) -> int:
     return task_data["consecutive"]
 
 
+def _trackers_for_logical_task(task_id: str) -> list[dict]:
+    """Current profile's default and named-target trackers for one session.
+
+    The dispatcher calls these hooks with the raw session id even when file
+    reads were keyed by a multiplex-profile and execution target. Never reset
+    another profile's similarly named session.
+    Call with ``_read_tracker_lock`` held.
+    """
+    keys = {task_id}
+    try:
+        from tools.execution_targets import _active_profile_scope
+        profile = _active_profile_scope()
+        if profile:
+            keys.add(f"profile-{profile}:{task_id}")
+    except Exception:
+        pass
+    return [
+        data for key, data in _read_tracker.items()
+        if (key[0] if isinstance(key, tuple) and key else key) in keys
+    ]
+
+
 def reset_file_dedup(task_id: str = None):
     """Advance the read-dedup generation after context compression (one task, or all
     when ``task_id`` is None). The per-key ``dedup`` mtime map is PRESERVED so unchanged
@@ -152,10 +175,7 @@ def reset_file_dedup(task_id: str = None):
     compaction returns full content the summary may have dropped. Stub-hit counters
     are cleared so the hard block restarts fresh."""
     with _read_tracker_lock:
-        if task_id:
-            targets = [_read_tracker[task_id]] if _read_tracker.get(task_id) else []
-        else:
-            targets = list(_read_tracker.values())
+        targets = _trackers_for_logical_task(task_id) if task_id else list(_read_tracker.values())
         for task_data in targets:
             if "dedup_hits" in task_data:
                 task_data["dedup_hits"].clear()
@@ -170,8 +190,8 @@ def notify_other_tool_call(task_id: str = "default"):
     have created a previously-missing path (or flipped its permissions).
     """
     with _read_tracker_lock:
-        task_data = _read_tracker.get(task_id)
-        if task_data:
+        # A targetless tool can affect any selected target in this profile.
+        for task_data in _trackers_for_logical_task(task_id):
             task_data["last_key"] = None
             task_data["consecutive"] = 0
             for key in ("dedup_hits", "not_found"):

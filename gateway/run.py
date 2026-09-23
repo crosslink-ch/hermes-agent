@@ -2031,6 +2031,8 @@ _cfg: dict = {}
 if _config_path.exists():
     try:
         _cfg = _load_bridge_config(_config_path)
+        from tools.execution_targets import set_execution_target_config_source
+        set_execution_target_config_source(_cfg)
         _bridge_config_to_env(_cfg)
     except Exception as _bridge_err:
         # stderr, not logger: the module logger is not initialized yet at import time.

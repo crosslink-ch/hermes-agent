@@ -194,7 +194,7 @@ def extract_persisted_path(content: str) -> str | None:
 
 def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, env=None,
                               config: BudgetConfig = DEFAULT_BUDGET,
-                              threshold: int | float | None = None) -> str:
+                              threshold: int | float | None = None, allow_host_without_env: bool = True) -> str:
     """Layer 2: persist an oversized result, return preview + path. ``threshold`` overrides
     ``config.resolve_threshold(tool_name)``; falls back to inline truncation when no write
     location succeeds."""
@@ -211,7 +211,7 @@ def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, en
         return _build_persisted_message(preview, has_more, len(content), path)
 
     # Always persist host-side first: cache/spillover is the single canonical home.
-    host_path = _write_to_spillover(content, filename)
+    host_path = _write_to_spillover(content, filename) if env is not None or allow_host_without_env else None
     host_side = _is_host_side_env(env)
     if host_side and host_path is not None:
         return _persisted(host_path)
@@ -234,7 +234,7 @@ def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, en
 
 
 def enforce_turn_budget(tool_messages: list[dict], env=None,
-                        config: BudgetConfig = DEFAULT_BUDGET) -> list[dict]:
+                        config: BudgetConfig = DEFAULT_BUDGET, env_resolver=None) -> list[dict]:
     """Layer 3: persist the largest non-persisted results first until the turn's aggregate is
     under budget. Mutates the list in-place and returns it."""
     sizes = [len(msg.get("content", "")) for msg in tool_messages]
@@ -248,9 +248,11 @@ def enforce_turn_budget(tool_messages: list[dict], env=None,
             break
         content = tool_messages[idx]["content"]
         tool_use_id = tool_messages[idx].get("tool_call_id", f"budget_{idx}")
+        message_env = env_resolver(tool_messages[idx]) if callable(env_resolver) else env
         replacement = maybe_persist_tool_result(
             content=content, tool_name=_BUDGET_TOOL_NAME, tool_use_id=tool_use_id,
-            env=env, config=config, threshold=0)
+            env=message_env, config=config, threshold=0,
+            allow_host_without_env=(not callable(env_resolver) or message_env is not None))
         if replacement != content:
             total_size += len(replacement) - size
             tool_messages[idx]["content"] = replacement

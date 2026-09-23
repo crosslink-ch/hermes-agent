@@ -871,6 +871,33 @@ class TestProfileScopedChatPty:
         assert env["TERMINAL_ENV"] == "docker"
         assert env["TERMINAL_SSH_USER"] == "operator-user"
 
+    def test_chat_argv_named_target_isolates_launch_config_but_keeps_operator_export(
+        self, isolated_profiles, monkeypatch
+    ):
+        (isolated_profiles["default"] / "config.yaml").write_text(
+            "terminal:\n  default_target: launch\n  targets:\n"
+            "    launch:\n      backend: docker\n      docker_image: launch-only-image\n",
+            encoding="utf-8",
+        )
+        (isolated_profiles["worker_beta"] / "config.yaml").write_text(
+            "terminal:\n  default_target: worker\n  targets:\n"
+            "    worker:\n      backend: ssh\n      ssh_host: worker.example.test\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("TERMINAL_ENV", "docker")
+        monkeypatch.setenv("TERMINAL_DOCKER_IMAGE", "launch-only-image")
+        monkeypatch.setenv("TERMINAL_SSH_USER", "operator-user")
+        monkeypatch.setattr(
+            "hermes_cli.main_tui_launch._make_tui_argv",
+            lambda root, tui_dev=False: (["cat"], None), raising=False,
+        )
+
+        _argv, _cwd, env = _web_server_chat._resolve_chat_argv(profile="worker_beta")
+        assert env["TERMINAL_ENV"] == "ssh"
+        assert env["TERMINAL_SSH_HOST"] == "worker.example.test"
+        assert env["TERMINAL_DOCKER_IMAGE"] != "launch-only-image"
+        assert env["TERMINAL_SSH_USER"] == "operator-user"
+
     @pytest.mark.parametrize("placeholder", [".", "auto", "cwd"])
     def test_chat_argv_placeholder_cwd_preserves_exported_value(
         self, isolated_profiles, monkeypatch, placeholder
