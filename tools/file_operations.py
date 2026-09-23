@@ -177,11 +177,14 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
     patches "succeed" with a plausible diff while landing in the wrong directory).
     """
 
-    def __init__(self, terminal_env, cwd: str = None):
+    def __init__(self, terminal_env, cwd: str = None, *, fixed_cwd: str = None):
         self.env = terminal_env
         # Never os.getcwd(): that is the HOST path, absent inside container backends.
         self.cwd = cwd or getattr(terminal_env, 'cwd', None) or \
                    getattr(getattr(terminal_env, 'config', None), 'cwd', None) or "/"
+        # Named SSH targets share an environment across conversations; pin
+        # each operation to the requesting session rather than mutable env.cwd.
+        self.fixed_cwd = fixed_cwd
         # Ordinary executables: bool cache (hits AND misses). rg is special — it has
         # an off-PATH resolver and may be installed mid-session — so only successful
         # rg resolutions are cached (see SearchMixin._resolve_command).
@@ -198,7 +201,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             kwargs['timeout'] = timeout
         if stdin_data is not None:
             kwargs['stdin_data'] = stdin_data
-        effective_cwd = cwd or getattr(self.env, 'cwd', None) or self.cwd
+        effective_cwd = cwd or self.fixed_cwd or getattr(self.env, 'cwd', None) or self.cwd
         result = self.env.execute(command, cwd=effective_cwd, **kwargs)
         exit_code = result.get("returncode", 0)
         # A stdin write failure with a clean child exit is still a failure: the
