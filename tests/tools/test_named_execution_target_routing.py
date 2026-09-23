@@ -8,6 +8,7 @@ import time
 import pytest
 import subprocess
 from tools import terminal_tool_lifecycle as terminal_lifecycle
+from tools import terminal_tool_target_lifecycle as target_lifecycle
 from tools import file_tools_read_tracking as read_tracking
 from tools import approval_context
 
@@ -1006,13 +1007,16 @@ def test_local_persistent_config_marks_environment(
             self.cwd = cwd
             self.timeout = timeout
 
-    monkeypatch.setattr(terminal_mod, "_LocalEnvironment", FakeLocal)
-    env = terminal_mod._create_environment(
+    import tools.terminal_tool_backends as backends
+    from tools.terminal_tool_lifecycle import _environment_is_persistent
+
+    monkeypatch.setattr(backends, "_LocalEnvironment", FakeLocal)
+    env = backends._create_environment(
         "local", "", "/workspace", 30,
         local_config={"persistent": True},
     )
 
-    assert terminal_mod._environment_is_persistent(env)
+    assert _environment_is_persistent(env)
 
 
 def test_process_metadata_survives_status_list_and_checkpoint(monkeypatch, tmp_path):
@@ -2037,7 +2041,7 @@ def test_command_approval_payload_and_observer_include_target_metadata(monkeypat
     assert first != second
 
     monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
-    monkeypatch.setattr(approval_mod, "_get_approval_mode", lambda: "manual")
+    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
     monkeypatch.setattr(approval_mod, "detect_hardline_command", lambda command: (False, None))
     monkeypatch.setattr(approval_mod, "_check_sudo_stdin_guard", lambda command: (False, None))
     monkeypatch.setattr(approval_mod, "_match_user_deny_rule", lambda command: None)
@@ -2061,7 +2065,7 @@ def test_command_approval_payload_and_observer_include_target_metadata(monkeypat
             entry.result = "deny"
             entry.event.set()
 
-    monkeypatch.setattr(approval_mod, "_fire_approval_hook", lambda name, **data: hooks.append((name, data)))
+    monkeypatch.setattr(approval_context, "_fire_approval_hook", lambda name, **data: hooks.append((name, data)))
     approval_mod.register_gateway_notify(session_key, notify)
     try:
         approval_mod.check_all_command_guards(
@@ -2083,7 +2087,7 @@ def test_execute_code_approval_payload_includes_target_metadata(monkeypatch):
     from tools import approval as approval_mod
 
     monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
-    monkeypatch.setattr(approval_mod, "_get_approval_mode", lambda: "manual")
+    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
     monkeypatch.setattr(approval_mod, "is_approved", lambda *args: False)
     monkeypatch.setattr(approval_mod, "_YOLO_MODE_FROZEN", False)
     monkeypatch.setattr(
@@ -2415,7 +2419,7 @@ def test_current_tool_leases_do_not_block_own_replacement_but_other_users_do(
                     env, environment_key,
                 )
             finally:
-                terminal_mod._release_environment_turn_key(other_key)
+                target_lifecycle._release_environment_turn_key(other_key)
 
 
 def test_idle_reaper_and_deferred_cleanup_wait_for_file_only_tool_lease(
@@ -2553,4 +2557,4 @@ def test_file_tool_lease_key_uses_explicit_nondefault_target(
     ) == expected
     assert terminal_mod.execution_environment_turn_key(
         "process", {"session_id": "proc_123"}, task_id="child-task",
-    ) == terminal_mod._turn_scope_key("child-task")
+    ) == target_lifecycle._turn_scope_key("child-task")
