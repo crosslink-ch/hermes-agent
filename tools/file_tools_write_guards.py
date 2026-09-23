@@ -288,7 +288,8 @@ def _check_protected_instruction_write(paths: list[str], task_id: str = "default
     return _request_protected_instruction_approval(reasons, task_id)
 
 
-def _check_approval_required_write(paths: list[str], task_id: str = "default") -> str | None:
+def _check_approval_required_write(paths: list[str], task_id: str = "default",
+                                   execution_target=None, *, _resolution=None) -> str | None:
     """Gate a write/patch touching an approval-required path (``~/.ssh/config`` can steer
     execution via ``ProxyCommand``). Routine gate: once/session/always, honors --yolo,
     fail-closed without an interactive/gateway channel."""
@@ -316,8 +317,13 @@ def _check_approval_required_write(paths: list[str], task_id: str = "default") -
     except Exception:
         return blocked.format(why=_APPROVAL_UNAVAILABLE)
 
+    from tools.approval import _execution_scoped_pattern_key
+    if _resolution is None and execution_target is not None:
+        from tools.execution_targets import resolve_execution_target
+        _resolution = resolve_execution_target(execution_target)
     result = _approval._run_approval_gate(
-        pattern_key="ssh_config_write",
+        pattern_key="ssh_config_write" if _resolution is None else _execution_scoped_pattern_key(
+            "ssh_config_write", _resolution.target, _resolution.named, _resolution.security_scope),
         description=description,
         display_target=f"<write to {display_targets}>",
         cron_deny_message=blocked.format(why="requires approval but this cron session denies it."),
@@ -369,7 +375,8 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
     return get_container_mirror_warning(resolved, mirror_prefix=_get_container_mirror_prefix_for_task(task_id))
 
 
-def _check_binary_document_write(filepath: str, task_id: str = "default") -> str | None:
+def _check_binary_document_write(filepath: str, task_id: str = "default", *,
+                                 _resolution=None) -> str | None:
     """Reject text-tool writes that would corrupt a binary document (read_file showed
     EXTRACTED text, so the model may write it back). Opaque formats are always rejected;
     .pdf only when OVERWRITING an existing file (raw PDF syntax is text-authorable).
@@ -389,8 +396,17 @@ def _check_binary_document_write(filepath: str, task_id: str = "default") -> str
             "python-docx/openpyxl/python-pptx via the terminal to create or edit "
             "this document.")
     if is_pdf_path(filepath):
+        if _resolution is not None and _resolution.backend != "local":
+            # A same-spelled host file is not evidence of a remote PDF. The
+            # remote backend's content must be checked there, never here.
+            return None
         try:
-            resolved = Path(_resolve_path_for_task(filepath, task_id))
+            if _resolution is not None and _resolution.named:
+                from tools.file_tools import _resolve_path_for_task as _target_path
+                resolved = Path(_target_path(filepath, task_id, _resolution.target,
+                                             _resolution=_resolution))
+            else:
+                resolved = Path(_resolve_path_for_task(filepath, task_id))
         except Exception:
             resolved = Path(_expand_tilde(filepath))
         try:

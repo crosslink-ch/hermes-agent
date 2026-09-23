@@ -173,6 +173,24 @@ def _rewrite_v4a_patch_paths_for_target(patch: str, path_to_resolved: dict) -> s
     return _V4A_MOVE_HEADER_RE.sub(lambda m: f"{m.group(1)}{_res(m.group(2))} -> {_res(m.group(3))}", patch)
 
 
+def _backend_v4a_patch(patch: str, task_id="default", execution_target=None, *,
+                       _resolution=None, path_to_resolved=None) -> str:
+    """Anchor remote patch headers to the same paths used for locking and staleness."""
+    from tools.execution_targets import resolve_execution_target
+    resolution = _resolution or resolve_execution_target(execution_target)
+    headers = _collect_v4a_header_paths(patch)
+    if isinstance(headers, str):
+        return patch  # The caller's precheck reports the malformed header.
+    if path_to_resolved is None:
+        path_to_resolved = {
+            raw: _backend_operation_path(raw, _resolve_path_for_task(
+                raw, task_id, resolution.target if resolution.named else None,
+                _resolution=resolution), task_id, resolution.target if resolution.named else None,
+                _resolution=resolution) for raw in dict.fromkeys(headers[0])
+        }
+    return _rewrite_v4a_patch_paths_for_target(patch, path_to_resolved)
+
+
 def _is_blocked_device_path(path: str) -> bool:
     """Return True for concrete device/fd/proc paths that can hang reads or leak process state."""
     normalized = os.path.normpath(_expand_tilde(path))
@@ -344,7 +362,7 @@ def _file_ops_for_resolution(task_id, resolution):
     file_ops = _get_file_ops(task_id, target=resolution.target, _resolution=resolution)
     if resolution.backend == "ssh":
         cwd = _authoritative_workspace_root(task_id, resolution.target, _resolution=resolution)
-        if cwd:
+        if cwd and hasattr(file_ops, "env"):
             scoped = ShellFileOperations(file_ops.env, cwd=cwd, fixed_cwd=cwd)
             scoped._command_cache = file_ops._command_cache
             return scoped
@@ -393,6 +411,8 @@ def _create_terminal_env_for_file_ops(raw_task_id: str, task_id: str,
         timeout=config["timeout"], task_id=backend_task_id or task_id,
         host_cwd=_resolve_task_host_cwd(config, raw_task_id),
         local_config={"persistent": config.get("local_persistent", False)} if env_type == "local" else None,
+        session_scoped=bool(resolution and resolution.named and env_type == "docker"
+                            and not config.get("container_persistent", True)),
     )
     if resolution is not None and resolution.named:
         from tools.terminal_tool import _record_environment_target
@@ -468,7 +488,11 @@ def _get_file_ops(task_id: str = "default", target: str = None, *,
                 _last_activity[task_id] = time.time()
             else:
                 terminal_env = None
+                old_env = _active_environments.get(task_id)
         if terminal_env is None:
+            if old_env is not None and resolution.named:
+                from tools.terminal_tool_target_lifecycle import _prepare_environment_replacement
+                _prepare_environment_replacement(old_env, task_id, target_name=resolution.target)
             env_type, terminal_env = _create_terminal_env_for_file_ops(
                 raw_task_id, task_id, resolution, backend_task_id)
             with _env_lock:
@@ -477,7 +501,9 @@ def _get_file_ops(task_id: str = "default", target: str = None, *,
                     if live.security_scope != resolution.security_scope:
                         from tools.terminal_tool_lifecycle import _cleanup_env
                         _cleanup_env(terminal_env, force_remove=True)
-                        raise RuntimeError("Execution target changed during file environment creation; retry.")
+                        raise RuntimeError(
+                            f"Execution target {resolution.target!r} changed while its environment "
+                            "was being created.")
                 _active_environments[task_id] = terminal_env
                 _last_activity[task_id] = time.time()
             _start_cleanup_thread()
@@ -775,8 +801,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT,
             return tool_error(block_error)
 
         resolved_str = str(_resolved)
-        cached_not_found = (_check_not_found_cache("read", resolved_str, state_task_id)
-                            if host_mtime_tracking else None)
+        cached_not_found = _check_not_found_cache(
+            "read", resolved_str, state_task_id,
+            check_host_filesystem=host_mtime_tracking)
         if cached_not_found is not None:
             return cached_not_found
 
@@ -875,11 +902,11 @@ def _write_precheck_error(paths: list[str], content_paths: list[str], task_id: s
         if err:
             return err
     for p in content_paths:
-        err = _check_binary_document_write(p, task_id)
+        err = _check_binary_document_write(p, task_id, _resolution=resolution)
         if err:
             return err
     return (_check_protected_instruction_write(guarded, task_id)
-            or _check_approval_required_write(guarded, task_id))
+            or _check_approval_required_write(guarded, task_id, _resolution=resolution))
 
 
 def _edit_warnings(paths: list[str], path_to_resolved: dict, task_id: str,
@@ -982,9 +1009,9 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     guarded_path = (_resolve_or_none(path, task_id, resolution) or path) if resolution.named else path
     # Preserve the base's binary-document-before-mirror order on writes.
     err = (_check_sensitive_path(guarded_path, task_id)
-           or _check_binary_document_write(path, task_id)
+           or _check_binary_document_write(path, task_id, _resolution=resolution)
            or _check_protected_instruction_write([guarded_path], task_id)
-           or _check_approval_required_write([guarded_path], task_id)
+           or _check_approval_required_write([guarded_path], task_id, _resolution=resolution)
            or (None if cross_profile else _check_cross_profile_path(guarded_path, task_id)))
     if not err and _is_internal_file_tool_content(content):
         err = ("Refusing to write internal read_file display text as file content. "
@@ -1119,7 +1146,8 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                     selected_target, _resolution=resolution) for _p, _r in _path_to_resolved.items()}
                 result = file_ops.patch_v4a(_rewrite_v4a_patch_paths_for_host(
                     patch, backend_paths, file_ops) if resolution.backend == "local"
-                    else _rewrite_v4a_patch_paths_for_target(patch, backend_paths))
+                    else _backend_v4a_patch(patch, task_id, selected_target,
+                                            _resolution=resolution, path_to_resolved=backend_paths))
             else:
                 return tool_error(f"Unknown mode: {mode}")
 
@@ -1210,13 +1238,15 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
 
         # A missing search root costs two shells (search + parent listing for
         # "Similar paths"); cache the miss so a retry skips both.
-        cached_search_nf = (_check_not_found_cache("search", resolved_search_path, state_task_id)
-                            if resolution.backend == "local" else None)
+        cached_search_nf = _check_not_found_cache(
+            "search", resolved_search_path, state_task_id,
+            check_host_filesystem=resolution.backend == "local")
         if cached_search_nf is not None:
             return cached_search_nf
 
-        operation_path = _backend_operation_path(
+        operation_path = (_backend_operation_path(
             path, resolved_search_path, task_id, selected_target, _resolution=resolution)
+            if resolution.named or resolution.backend != "ssh" else path)
         result = _file_ops_for_resolution(task_id, resolution).search(
             pattern=pattern, path=operation_path, target=target, file_glob=file_glob,
             limit=limit, offset=offset, output_mode=output_mode, context=context, order=order)
@@ -1410,7 +1440,7 @@ def _is_openai_family_main() -> bool:
 
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents. On macOS, broad searches above the user home automatically skip TCC-protected folders (Desktop, Documents, Downloads, Library, Movies, Music, Pictures); target one directly when access is intentional.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls. Discovery order is the fast bounded default; exact global newest-first order is an explicit opt-in and may scan the full tree.",
+    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents. The target field selects search mode (content/files); execution_target separately selects the named terminal execution target. On macOS, broad searches above the user home automatically skip TCC-protected folders (Desktop, Documents, Downloads, Library, Movies, Music, Pictures); target one directly when access is intentional.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls. Discovery order is the fast bounded default; exact global newest-first order is an explicit opt-in and may scan the full tree.",
     "parameters": {
         "type": "object",
         "properties": {

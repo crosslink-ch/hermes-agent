@@ -429,8 +429,9 @@ def test_runtime_generations_isolate_all_file_coordination_state(
         path, second_namespace
     )
 
-    monkeypatch.setattr(file_mod, "_read_tracker", {})
-    monkeypatch.setattr(file_mod, "_patch_failure_tracker", {})
+    from tools import file_tools_read_tracking as read_tracking
+    monkeypatch.setattr(read_tracking, "_read_tracker", {})
+    monkeypatch.setattr(read_tracking, "_patch_failure_tracker", {})
     file_mod._record_not_found("read", path, first_key, "g1-miss")
     assert (
         file_mod._check_not_found_cache(
@@ -438,10 +439,10 @@ def test_runtime_generations_isolate_all_file_coordination_state(
         )
         is None
     )
-    first_data = file_mod._read_tracker[first_key]
+    first_data = read_tracking._read_tracker[first_key]
     first_data["dedup"][(path, 1, 20)] = 7.0
     first_data["read_history"].add((path, 1, 20))
-    assert second_key not in file_mod._read_tracker
+    assert second_key not in read_tracking._read_tracker
     assert file_mod._record_patch_failure(first_key, path) == 1
     assert file_mod._record_patch_failure(first_key, path) == 2
     assert file_mod._record_patch_failure(second_key, path) == 1

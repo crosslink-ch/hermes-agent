@@ -108,7 +108,12 @@ class TestSshConfigApprovalGate:
 
         assert len(pattern_keys) == 2
         assert pattern_keys[0] != pattern_keys[1]
-        assert all(key.startswith("ssh_config_write:") for key in pattern_keys)
+        assert pattern_keys == [
+            approval._execution_scoped_pattern_key(
+                "ssh_config_write", name, True,
+                targets.resolve_execution_target(name).security_scope,
+            ) for name in ("alpha", "beta")
+        ]
 
 
 

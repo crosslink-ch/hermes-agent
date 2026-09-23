@@ -81,6 +81,12 @@ class FileStateRegistry:
     def _display_path(state_path: str) -> str:
         return state_path.split("\0", 1)[-1]
 
+    def _lock_for(self, resolved: str, namespace: Optional[str] = None) -> threading.Lock:
+        """Return the live namespace-scoped lock (also used by coordination probes)."""
+        key = self._state_path(resolved, namespace)
+        with self._meta_lock:
+            return self._path_locks.setdefault(key, threading.Lock())
+
     @contextmanager
     def lock_path(self, resolved: str, namespace: Optional[str] = None):
         """Per-path lock: threads on the same path serialize, different paths proceed.

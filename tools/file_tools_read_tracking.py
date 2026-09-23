@@ -101,7 +101,8 @@ def _pop_not_found(op: str, resolved_str: str, task_id: str) -> None:
         nf.pop((op, resolved_str), None)
 
 
-def _check_not_found_cache(op: str, resolved_str: str, task_id: str) -> str | None:
+def _check_not_found_cache(op: str, resolved_str: str, task_id: str, *,
+                           check_host_filesystem: bool = True) -> str | None:
     """Return cached not-found JSON for *(op, resolved_str)* if still fresh.
 
     *op* is "read" or "search" (different error JSON shapes). Evicted by TTL,
@@ -119,7 +120,7 @@ def _check_not_found_cache(op: str, resolved_str: str, task_id: str) -> str | No
     # "check → create → read" is common, so never serve a stale miss for a path
     # that now exists. The stat runs OUTSIDE the tracker lock: a hung stat on a
     # dead network mount must not stall every task.
-    if os.path.exists(resolved_str):
+    if check_host_filesystem and os.path.exists(resolved_str):
         with _read_tracker_lock:
             _pop_not_found(op, resolved_str, task_id)
         return None
@@ -170,8 +171,11 @@ def notify_other_tool_call(task_id: str = "default"):
     have created a previously-missing path (or flipped its permissions).
     """
     with _read_tracker_lock:
-        task_data = _read_tracker.get(task_id)
-        if task_data:
+        # A targetless tool can affect any selected target; reset each tracker
+        # for this logical task, not just the legacy/default entry.
+        for key, task_data in _read_tracker.items():
+            if key != task_id and not (isinstance(key, tuple) and key[0] == task_id):
+                continue
             task_data["last_key"] = None
             task_data["consecutive"] = 0
             for key in ("dedup_hits", "not_found"):

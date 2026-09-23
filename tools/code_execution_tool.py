@@ -414,7 +414,10 @@ def _get_or_create_env(task_id: str, target=None, expected_target_scope=None):
             raise ValueError(f"Execution target {target!r} changed while execute_code was running")
         if resolution.named:
             from tools.file_tools import _file_ops_for_resolution
-            ops = _file_ops_for_resolution(task_id, resolution)
+            try:
+                ops = _file_ops_for_resolution(task_id, resolution)
+            except RuntimeError as exc:
+                raise ValueError(str(exc)) from exc
             return ops.env, resolution.backend
     from tools.terminal_tool_backends import _container_config_from_config, _create_environment, _ssh_config_from_config
     from tools.terminal_tool import (
@@ -629,8 +632,10 @@ def _sandbox_tools_for(enabled_tools: Optional[List[str]]) -> frozenset:
 
 
 def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
-                         sandbox_tools: frozenset, *, timeout: int, max_tool_calls: int,
-                         exec_start: float, operation_cwd: str = None) -> str:
+                          sandbox_tools: frozenset, *, timeout: int, max_tool_calls: int,
+                          exec_start: float, operation_cwd: str = None,
+                          execution_target=None, execution_target_scope=None,
+                          execution_target_config=None) -> str:
     """Per-call script ship: stage hermes_tools.py + script.py in a fresh remote sandbox dir,
     serve file-RPC from a polling thread, run, clean up."""
     sandbox_dir = f"{_env_temp_dir(env)}/hermes_exec_{uuid.uuid4().hex[:12]}"
@@ -649,7 +654,8 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         rpc_thread = threading.Thread(
             target=propagate_context_to_thread(_rpc_poll_loop), daemon=True,
             args=(env, f"{sandbox_dir}/rpc", effective_task_id, [], tool_call_counter,
-                  max_tool_calls, sandbox_tools, stop_event, rpc_token))
+                  max_tool_calls, sandbox_tools, stop_event, rpc_token,
+                  execution_target, execution_target_scope, execution_target_config))
         rpc_thread.start()
         env_prefix = (f"HERMES_RPC_DIR={quoted_rpc_dir} HERMES_RPC_TOKEN={shlex.quote(rpc_token)} "
                       "PYTHONDONTWRITEBYTECODE=1")
@@ -746,7 +752,9 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
         return _remote_failure(exc, exec_start, 0)
     return _run_remote_per_call(env, env_type, code, effective_task_id, sandbox_tools,
                                 timeout=timeout, max_tool_calls=max_tool_calls, exec_start=exec_start,
-                                operation_cwd=operation_cwd)
+                                operation_cwd=operation_cwd, execution_target=target,
+                                execution_target_scope=expected_target_scope,
+                                execution_target_config=expected_target_config)
 
 
 # ---- Main entry point ----

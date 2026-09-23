@@ -25,9 +25,22 @@ logger = logging.getLogger("tools.code_execution_tool")
 _TERMINAL_BLOCKED_PARAMS = {"background", "pty", "notify", "notify_on_complete", "watch_patterns"}
 
 
-def _default_dispatch(task_id):
-    from model_tools import handle_function_call
-    return lambda tool_name, tool_args: handle_function_call(tool_name, tool_args, task_id=task_id)
+def _inherited_rpc_authority(execution_target, execution_target_scope,
+                             execution_target_config):
+    """Bind a remote session-kernel cell to its owning execute_code target.
+
+    Per-call transports pass the snapshot explicitly. Remote session kernels
+    carry the outer call's context into their per-cell poll thread instead.
+    """
+    if execution_target is not None:
+        return execution_target, execution_target_scope, execution_target_config
+    from tools.code_execution_tool import _bound_code_target, _frozen_target_config
+    target = _bound_code_target.get()
+    if not target:
+        return None, None, None
+    from tools.execution_targets import resolve_execution_target
+    resolution = resolve_execution_target(target)
+    return target, resolution.security_scope, _frozen_target_config(resolution)
 
 
 def _rpc_token_ok(request: dict, rpc_token: str) -> bool:
@@ -68,15 +81,26 @@ def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_co
 
 
 def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: list,
-                     tool_call_counter: list, max_tool_calls: int, allowed_tools: frozenset,
-                     stop_event: threading.Event, rpc_token: str, dispatch=None):
+                      tool_call_counter: list, max_tool_calls: int, allowed_tools: frozenset,
+                      stop_event: threading.Event, rpc_token: str, dispatch=None,
+                      execution_target=None, execution_target_scope=None,
+                      execution_target_config=None):
     """Accept one client and serve newline-delimited JSON requests until it disconnects, idles
     300s, or the call limit is reached. ``tool_call_counter`` is a mutable ``[int]``. ``dispatch``
     overrides how an allowed, budgeted call runs: per-call sandboxes use the default (the thread
     carries the cell's context); session kernels rebind each call to the CURRENT cell's authority.
     """
     if dispatch is None:
-        dispatch = _default_dispatch(task_id)
+        from tools.code_execution_tool import _dispatch_rpc_tool, _inherit_execution_target
+        from model_tools import handle_function_call
+        execution_target, execution_target_scope, execution_target_config = _inherited_rpc_authority(
+            execution_target, execution_target_scope, execution_target_config)
+
+        def dispatch(tool_name, tool_args):
+            bound_args = _inherit_execution_target(
+                tool_name, tool_args, execution_target, execution_target_scope)
+            return _dispatch_rpc_tool(handle_function_call, tool_name, bound_args,
+                                      task_id, execution_target_config)
     conn = None
     try:
         server_sock.settimeout(0.05)
@@ -128,12 +152,22 @@ def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: li
 
 
 def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_call_counter: list,
-                   max_tool_calls: int, allowed_tools: frozenset, stop_event: threading.Event,
-                   rpc_token: str):
+                    max_tool_calls: int, allowed_tools: frozenset, stop_event: threading.Event,
+                    rpc_token: str, execution_target=None, execution_target_scope=None,
+                    execution_target_config=None):
     """Poll the remote filesystem for request files and answer them. Background thread; each
     ``env.execute()`` is an independent process, so this is safe alongside the script-execution
     thread. Malformed or unauthorized requests are removed without a response."""
-    dispatch = _default_dispatch(task_id)
+    from tools.code_execution_tool import _dispatch_rpc_tool, _inherit_execution_target
+    from model_tools import handle_function_call
+    execution_target, execution_target_scope, execution_target_config = _inherited_rpc_authority(
+        execution_target, execution_target_scope, execution_target_config)
+
+    def dispatch(tool_name, tool_args):
+        bound_args = _inherit_execution_target(
+            tool_name, tool_args, execution_target, execution_target_scope)
+        return _dispatch_rpc_tool(handle_function_call, tool_name, bound_args,
+                                  task_id, execution_target_config)
     poll_interval = 0.1
     quoted_rpc_dir = shlex.quote(rpc_dir)
     while not stop_event.is_set():
