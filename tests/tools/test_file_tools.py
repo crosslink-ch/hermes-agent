@@ -335,8 +335,6 @@ class TestWindowsMsysPathResolution:
         ``C:\\Users\\...`` — faking ``sys.platform`` left PosixPath in place."""
         import tools.file_tools_paths as file_tools
 
-        monkeypatch.setattr(file_tools.sys, "platform", "win32")
-        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
         monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default", execution_target=None, _resolution=None: False)
 
         resolved = file_tools._resolve_path_for_task("/c/Users/Mark/project/app.py")
@@ -352,8 +350,6 @@ class TestWindowsMsysPathResolution:
         """
         import tools.file_tools_paths as file_tools
 
-        monkeypatch.setattr(file_tools.sys, "platform", "win32")
-        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
         monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default", execution_target=None, _resolution=None: True)
         monkeypatch.setattr(
             file_tools,
