@@ -327,13 +327,13 @@ def _resolve_chat_argv(
         env["HERMES_HOME"] = str(profile_dir)
     try:
         from hermes_cli.config import (
-            apply_terminal_config_to_env, read_raw_config, terminal_config_owned_env_vars)
+            TERMINAL_CONFIG_ENV_MAP, apply_terminal_config_to_env)
 
         if profile_dir is not None:
-            # Drop only the terminal keys the launch profile owns before applying
-            # the selected profile; operator exports for other keys stay valid.
-            raw_launch_terminal = read_raw_config().get("terminal")
-            for env_var in terminal_config_owned_env_vars(raw_launch_terminal):
+            # A dashboard process may have bridged settings from *its* profile
+            # into its environment. None of those inherited terminal settings
+            # may select a backend or timeout for a different profile's child.
+            for env_var in TERMINAL_CONFIG_ENV_MAP.values():
                 env.pop(env_var, None)
             with _config_profile_scope(requested):
                 apply_terminal_config_to_env(env=env)

@@ -4783,15 +4783,16 @@ def test_resolve_chat_argv_scopes_terminal_bridge_to_child_profile(
     monkeypatch, tmp_path,
 ):
     import hermes_cli.config as config_mod
-    import hermes_cli.main as cli_main
-    import hermes_cli.web_server as ws
+    import hermes_cli.main_tui_launch as tui_launch
+    import hermes_cli.web_server_chat as ws
+    import hermes_cli.web_server_profiles as profiles
     from hermes_constants import get_hermes_home
 
     profile_home = tmp_path / "profiles" / "work"
     profile_home.mkdir(parents=True)
-    monkeypatch.setattr(ws, "_resolve_profile_dir", lambda _name: profile_home)
+    monkeypatch.setattr(profiles, "_resolve_profile_dir", lambda _name: profile_home)
     monkeypatch.setattr(
-        cli_main,
+        tui_launch,
         "_make_tui_argv",
         lambda *_args, **_kwargs: (
             ["node", "fake-tui.js"],

@@ -160,6 +160,92 @@ def _result_environment(task_id: str, target: str | None, scope: str | None):
         return None
 
 
+def _active_env_for_tool_result(task_id: str, tool_name: str, args: dict, result=None):
+    """Find the producer of a result, never a changed default target.
+
+    Process output belongs to its background session even if a named target
+    was later reconfigured; spilling to the host/default environment would
+    cross the execution boundary.
+    """
+    if tool_name == "process" and args.get("session_id"):
+        try:
+            from tools.process_registry import process_registry
+            record = process_registry.get(args["session_id"])
+            if record is not None and record.env_ref is not None:
+                return record.env_ref
+        except Exception:
+            pass
+        return None
+    target, scope = _result_target_identity(tool_name, args, result)
+    try:
+        return _result_environment(task_id, target, scope)
+    except Exception:
+        return None
+
+
+def _selected_local_target_cwd(
+    task_id: str, tool_name: str, args: dict, *, runtime_scope: str | None = None,
+) -> str | None:
+    """Host cwd only when the producing target is still the same local runtime."""
+    if tool_name not in _TARGET_RESULT_TOOLS:
+        return None
+    try:
+        from tools.execution_targets import resolve_execution_target
+        from tools.terminal_tool import get_session_cwd
+        resolution = resolve_execution_target(args.get("execution_target"))
+        if resolution.backend != "local" or (
+            runtime_scope is not None and resolution.security_scope != runtime_scope
+        ):
+            return None
+        return (get_session_cwd(task_id, _resolution=resolution)
+                or resolution.config.get("cwd"))
+    except Exception:
+        return None
+
+
+def _target_subdirectory_hints(
+    agent, task_id: str, tool_name: str, args: dict,
+    target: str | None, *, runtime_scope: str | None = None,
+) -> str | None:
+    """Inject context from the *actual local target*, never a remote host path."""
+    if tool_name not in _TARGET_RESULT_TOOLS:
+        tracker = getattr(agent, "_subdirectory_hints", None)
+        return tracker.check_tool_call(tool_name, args) if tracker else None
+    from tools.execution_targets import resolve_execution_target
+    try:
+        resolution = resolve_execution_target(target)
+    except Exception:
+        return None
+    if resolution.backend != "local" or (
+        runtime_scope is not None and runtime_scope != resolution.security_scope
+    ):
+        return None
+    cwd = _selected_local_target_cwd(
+        task_id, tool_name, {**args, "execution_target": resolution.target},
+        runtime_scope=runtime_scope,
+    )
+    if not cwd:
+        tracker = getattr(agent, "_subdirectory_hints", None)
+        return (tracker.check_tool_call(tool_name, args)
+                if not resolution.named and tracker else None)
+    tracker = getattr(agent, "_subdirectory_hints", None)
+    if tracker is None or not getattr(tracker, "enabled", True):
+        return None
+    if not resolution.named and str(tracker.working_dir) == str(Path(cwd).resolve()):
+        return tracker.check_tool_call(tool_name, args)
+    from agent.subdirectory_hints import SubdirectoryHintTracker
+    trackers = getattr(agent, "_target_subdirectory_hint_trackers", None)
+    if trackers is None:
+        trackers = {}
+        agent._target_subdirectory_hint_trackers = trackers
+    key = (resolution.target, resolution.security_scope, str(Path(cwd).resolve()))
+    if key not in trackers:
+        trackers[key] = SubdirectoryHintTracker(
+            cwd, enabled=getattr(tracker, "enabled", True),
+        )
+    return trackers[key].check_tool_call(tool_name, args)
+
+
 def _persisted_target_hint(content: str, target: str | None, scope: str | None) -> str:
     if target and isinstance(content, str) and PERSISTED_OUTPUT_TAG in content and "Execution target for this saved output:" not in content:
         selector = f"execution_target={json.dumps(target)}"
@@ -836,6 +922,17 @@ def _run_agent_tool_execution_middleware(
         request_args = request_result.payload if isinstance(request_result.payload, dict) else relay_args
         trace.clear()
         trace.extend(request_result.trace)
+        # A removed/aliased selector must be rejected before execution hooks,
+        # guardrails, checkpointing, or any approval prompt sees it.
+        from tools.execution_targets import ExecutionTargetError, validate_execution_target_args
+        try:
+            validate_execution_target_args(function_name, request_args)
+        except ExecutionTargetError as exc:
+            state.args = request_args
+            state.blocked = True
+            if begin_execution is not None:
+                begin_execution()
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
         return run_tool_execution_middleware(
             function_name,
             request_args,
@@ -1106,7 +1203,9 @@ def _commit_tool_result(
     agent._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s){_status_suffix}")
 
     target, scope = _result_target_identity(function_name, function_args, function_result)
-    producing_env = _result_environment(effective_task_id, target, scope)
+    producing_env = _active_env_for_tool_result(
+        effective_task_id, function_name, function_args, function_result,
+    )
     identities = getattr(agent, "_execution_target_by_tool_call", None)
     if identities is None:
         identities = {}
@@ -1125,7 +1224,10 @@ def _commit_tool_result(
         persisted_result = _persisted_target_hint(persisted_result, target, scope)
     _record_persisted_path_for_stub(agent, tool_call_id, persisted_result)
 
-    subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
+    subdir_hints = _target_subdirectory_hints(
+        agent, effective_task_id, function_name, function_args, target,
+        runtime_scope=scope,
+    )
     if subdir_hints:
         if _is_multimodal_tool_result(persisted_result):
             # Hint goes on the text summary part so the model still sees it; image blocks untouched.

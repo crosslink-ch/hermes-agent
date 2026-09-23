@@ -881,7 +881,8 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
         prompt_command = redact_sensitive_text(command)
         prompt_description = redact_sensitive_text(description)
     hook_kwargs = dict(command=prompt_command, description=prompt_description, pattern_key=pattern_key,
-                       pattern_keys=list(pattern_keys), session_key=session_key, surface="cli")
+                       pattern_keys=list(pattern_keys), session_key=session_key, surface="cli",
+                       target=execution_target, backend=execution_backend)
     approval_context._fire_approval_hook("pre_approval_request", **hook_kwargs)
     choice = prompt_dangerous_approval(prompt_command, prompt_description, allow_permanent=allow_permanent,
                                        smart_denied=smart_denied, approval_callback=approval_callback)
