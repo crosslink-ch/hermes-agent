@@ -983,16 +983,18 @@ class DockerEnvironment(BaseEnvironment):
         container_id, state = existing
         if not network:
             actual_mode = self._container_network_mode(container_id)
+            if actual_mode is None:
+                raise RuntimeError(
+                    f"Could not verify NetworkMode of Docker runtime {container_id[:12]}; "
+                    "refusing to reuse or remove an unverified container."
+                )
             if actual_mode != "none":
                 logger.warning(
                     "Existing container %s has NetworkMode=%s but "
                     "docker_network=false requests an air-gapped "
                     "container — removing it and starting fresh (task=%s, profile=%s).",
                     container_id[:12], actual_mode or "unknown", task_label, profile_name)
-                try:
-                    run_capture([self._docker_exe, "rm", "-f", container_id], timeout=30)
-                except (subprocess.TimeoutExpired, OSError) as e:
-                    logger.warning("Failed to remove mismatched container %s: %s", container_id[:12], e)
+                self._retire_network_mismatched_container(container_id)
                 return False
 
         if state != "running":

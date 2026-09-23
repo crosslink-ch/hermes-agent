@@ -31,7 +31,7 @@ import os
 import pytest
 
 from tools import terminal_tool, terminal_tool_backends
-from tools.terminal_tool_lifecycle import is_persistent_env
+from tools.terminal_tool_lifecycle import is_persistent_env, _environment_is_persistent
 
 
 @pytest.fixture(autouse=True)
@@ -266,7 +266,7 @@ def test_session_scoped_environment_survives_turn_cleanup():
         _session_scoped=True,
     )
 
-    assert terminal_tool._environment_is_persistent(env) is True
+    assert _environment_is_persistent(env) is True
 
 
 class TestRecordedHostCwdDiscardedOnContainers:

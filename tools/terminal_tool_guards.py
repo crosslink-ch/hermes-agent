@@ -142,7 +142,7 @@ def _foreground_background_guidance(command: str) -> str | None:
 
 
 def _read_script_for_guard(env: Any, guard_cwd: str, script_path: str, max_bytes: int,
-                           *, remote: bool = False) -> Optional[str]:
+                           *, remote: bool = False) -> Optional[str] | tuple[None, bool]:
     """Best-effort script read: host filesystem first, then a bounded
     ``env.execute('head -c ... < path')`` for remote backends. Binary content
     (NUL byte) is not a script: feeding it to the guard tokenizes machine code
@@ -155,6 +155,11 @@ def _read_script_for_guard(env: Any, guard_cwd: str, script_path: str, max_bytes
         local_path = Path(script_path).expanduser()
         if not local_path.is_absolute():
             local_path = Path(guard_cwd) / local_path
+        # A FIFO/device must never be opened (or sent to env.execute as a
+        # fallback): it could block forever while the supervised gateway waits.
+        # The lifecycle scanner understands (text, unsafe) and fails closed.
+        if local_path.exists() and not stat.S_ISREG(local_path.stat().st_mode):
+            return None, True
         if local_path.is_file():
             metadata = local_path.stat()
             if stat.S_ISREG(metadata.st_mode) and metadata.st_size <= max_bytes:

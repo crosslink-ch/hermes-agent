@@ -86,10 +86,17 @@ def _stamp_gateway_routing(proc_session, get_session_env) -> None:
 
 
 def _spawn(process_registry, *, env, env_type, command, cwd, effective_task_id, task_id,
-           session_key, effective_pty, effective_timeout=None):
+           session_key, effective_pty, effective_timeout=None, resolution=None):
     common = dict(command=command, cwd=cwd, task_id=effective_task_id,
                   owner_task_id=task_id or effective_task_id, session_key=session_key)
+    if resolution is not None and resolution.named:
+        common.update(target=resolution.target, backend=env_type,
+                      runtime_scope=resolution.security_scope if resolution.named else "",
+                      environment_task_key=effective_task_id,
+                      timeout_seconds=effective_timeout or 0)
     if env_type == "local":
+        if resolution is not None and resolution.named:
+            common["env_ref"] = env
         return process_registry.spawn_local(
             env_vars=env.env if hasattr(env, 'env') else None, use_pty=effective_pty, **common)
     return process_registry.spawn_via_env(env=env, timeout=effective_timeout or 10, **common)
@@ -151,6 +158,7 @@ def spawn_background_process(
             process_registry, env=env, env_type=env_type, command=command, cwd=effective_cwd,
             effective_task_id=effective_task_id, task_id=task_id, session_key=session_key,
             effective_pty=effective_pty, effective_timeout=effective_timeout,
+            resolution=resolution,
         )
         if resolution is not None:
             proc_session.target = resolution.target
@@ -218,7 +226,7 @@ _YIELDED_NOTE = (
 
 def yield_to_background_handler(
     *, command: str, env_type: str, cwd: Optional[str], effective_task_id: str,
-    task_id: Optional[str], session_key: str, resolution=None,
+    task_id: Optional[str], session_key: str, resolution=None, env=None,
 ):
     """Build the ``yield_handler`` a foreground ``env.execute`` calls when the tool thread is
     asked to yield (a user message arrived mid-command). Local backend only: the live Popen
@@ -233,7 +241,11 @@ def yield_to_background_handler(
         session = process_registry.adopt_local(
             proc, command=command, cwd=cwd, task_id=effective_task_id,
             owner_task_id=task_id or effective_task_id, session_key=session_key,
-            output_so_far=output_so_far)
+            output_so_far=output_so_far,
+            **(dict(target=resolution.target, backend=env_type,
+                    runtime_scope=resolution.security_scope if resolution.named else "",
+                    environment_task_key=effective_task_id, env_ref=env)
+               if resolution is not None and resolution.named else {}))
         if resolution is not None:
             session.target = resolution.target
             session.backend = env_type

@@ -176,9 +176,14 @@ def _build_sandbox_env(env_type, *, image, cwd, timeout, cc, task_id, **_):
     return cls()(**kwargs)
 
 
-_build_singularity_env = functools.partial(_build_sandbox_env, "singularity")
-_build_daytona_env = functools.partial(_build_sandbox_env, "daytona")
-_build_vercel_env = functools.partial(_build_sandbox_env, "vercel_sandbox")
+def _build_singularity_env(**kwargs):
+    return _build_sandbox_env(**{**kwargs, "env_type": "singularity"})
+
+def _build_daytona_env(**kwargs):
+    return _build_sandbox_env(**{**kwargs, "env_type": "daytona"})
+
+def _build_vercel_env(**kwargs):
+    return _build_sandbox_env(**{**kwargs, "env_type": "vercel_sandbox"})
 
 
 def _build_ssh_env(*, cwd, timeout, ssh_config, probe_only=False, **_):
@@ -219,12 +224,17 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
                         ssh_config: dict = None, container_config: dict = None,
                         local_config: dict = None, task_id: str = "default",
                         host_cwd: Optional[str] = None, probe_only: bool = False,
-                        session_scoped: bool = False):
+                        session_scoped: Optional[bool] = None):
     """Create an execution environment (instance with ``execute()``) for *env_type*. ``image`` is ignored
     for local/ssh/vercel; ``container_config`` carries the container_*/docker_* resource keys; ``host_cwd`` is
     the host dir bound into Docker when cwd mounting is enabled. ``probe_only`` asks ssh for a throwaway
     connection with no remote setup/sync (the prompt-time probe). Unknown types fall through to plugin backends."""
     builder = _ENV_BUILDERS.get(env_type, _build_plugin_env)
+    if env_type == "docker" and session_scoped is None:
+        # Only direct legacy callers derive isolation from ambient settings.
+        # Routed callers pass an explicit value from their target snapshot.
+        from tools.terminal_tool import _docker_session_isolation_enabled
+        session_scoped = bool(task_id != "default" and _docker_session_isolation_enabled())
     return builder(env_type=env_type, image=image, cwd=cwd, timeout=timeout, cc=container_config or {},
                    task_id=task_id, ssh_config=ssh_config, host_cwd=host_cwd, probe_only=probe_only,
                    local_config=local_config, session_scoped=session_scoped)

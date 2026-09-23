@@ -256,7 +256,8 @@ def finalize_foreground_result(
     # Optional fields in observable JSON key order; None means "omit". Spill
     # metadata is present only when output overflowed the capture window.
     optional_fields: list[tuple[str, Any]] = [
-        ("cwd", changed_cwd),
+        # Named target results include effective cwd; legacy results only echo changes.
+        ("cwd", (observed_cwd or command_cwd) if resolution is not None and resolution.named else changed_cwd),
         ("environment_recreated", _ENV_RECREATED_NOTE if result.get("environment_recreated") else None),
         *_redact_spill_file(result.get("full_output_path"), result.get("output_total_chars"), command),
         ("verification_evidence", _verification_evidence(

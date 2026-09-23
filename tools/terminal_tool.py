@@ -234,6 +234,14 @@ def _maybe_reap_docker_orphans(container_config: Dict[str, Any]) -> None:
         lifetime = int(_tenv("TERMINAL_LIFETIME_SECONDS", "300"))
     except (TypeError, ValueError):
         lifetime = 300
+    # One profile-wide sweep must honor the longest-lived named Docker target.
+    try:
+        from tools.execution_targets import list_execution_targets
+        for target in list_execution_targets():
+            if target.named and target.backend == "docker":
+                lifetime = max(lifetime, int(target.config.get("lifetime_seconds", lifetime)))
+    except (ValueError, TypeError, ImportError):
+        logger.debug("Could not inspect named Docker lifetimes for orphan sweep", exc_info=True)
     max_age = max(60, lifetime) * 2
 
     try:
@@ -526,7 +534,8 @@ def _docker_session_isolation_enabled(config: Optional[Mapping[str, Any]] = None
     """See :attr:`_SessionScope.docker_session_isolated` (used by the docker builder)."""
     if config is not None:
         backend = config.get("env_type") or config.get("backend")
-        persistent = config.get("container_persistent", True)
+        # Legacy partial configs still inherit the bridged process setting.
+        persistent = config["container_persistent"] if "container_persistent" in config else _session_scope().persistent
         if not isinstance(persistent, bool):
             persistent = str(persistent).lower() in {"true", "1", "yes", "on"}
         return backend == "docker" and not persistent
@@ -556,7 +565,7 @@ def _resolve_container_task_id(task_id: Optional[str], *, config: Optional[Mappi
         return task_id
     scope = _session_scope() if config is None else _SessionScope(
         str(config.get("env_type") or config.get("backend") or "local"),
-        bool(config.get("container_persistent", True)),
+        bool(config["container_persistent"] if "container_persistent" in config else _session_scope().persistent),
     )
     if task_id and scope.session_isolated:
         return _resolve_container_alias(task_id)
@@ -1488,7 +1497,7 @@ def _run_foreground(
                 command, timeout=effective_timeout, cwd=command_cwd, bounded_capture=True,
                 **_yield_kwargs(command, env_type=env_type, cwd=command_cwd, effective_task_id=eff,
                                 task_id=task_id, session_key=session_key,
-                                resolution=plan.resolution),
+                                resolution=plan.resolution, env=env),
             )
             break
         except Exception as e:
