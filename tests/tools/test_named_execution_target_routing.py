@@ -46,8 +46,12 @@ def isolated_target_state(monkeypatch):
     monkeypatch.setattr(terminal_mod, "_retired_environments", [])
     monkeypatch.setattr(terminal_mod, "_start_cleanup_thread", lambda: None)
     monkeypatch.setattr(file_mod, "_file_ops_cache", {})
-    monkeypatch.setattr(file_mod, "_read_tracker", {})
-    monkeypatch.setattr(file_mod, "_patch_failure_tracker", {})
+    read_tracker = {}
+    patch_failures = {}
+    monkeypatch.setattr(read_tracking, "_read_tracker", read_tracker)
+    monkeypatch.setattr(file_mod, "_read_tracker", read_tracker)
+    monkeypatch.setattr(read_tracking, "_patch_failure_tracker", patch_failures)
+    monkeypatch.setattr(file_mod, "_patch_failure_tracker", patch_failures)
     monkeypatch.setattr(
         terminal_mod,
         "_check_all_guards",
@@ -1397,40 +1401,34 @@ def test_tool_output_persistence_uses_the_result_target(monkeypatch):
         json.dumps({"target": "beta", "output": "large"}),
     ) is producing_env
 
-    captured = {}
+    selected = {"content": "large", "tool_call_id": "call-beta"}
+    ordinary = {"content": "web result", "tool_call_id": "call-web"}
+    messages = [selected, ordinary]
+    identities = {"call-beta": ("beta", None, beta_env)}
+    captured = []
 
-    def fake_enforce(messages, env=None, env_resolver=None, config=None):
+    def fake_enforce(turn_messages, *, env_resolver=None, config=None):
         assert callable(env_resolver)
-        captured["default"] = env
-        captured["selected"] = env_resolver(messages[0])
+        captured.extend(env_resolver(message) for message in turn_messages)
 
     monkeypatch.setattr(executor, "enforce_turn_budget", fake_enforce)
-    messages = [{"content": "large", "tool_call_id": "call-beta"}]
-    target_map = {"call-beta": "beta"}
-    executor._enforce_target_aware_turn_budget(
-        messages, "session", executor.DEFAULT_BUDGET, target_map,
+    agent = SimpleNamespace(
+        _execution_target_by_tool_call=identities,
+        _apply_pending_steer_to_tool_results=lambda *_args: None,
     )
-
-    assert captured == {"default": default_env, "selected": beta_env}
-    assert target_map == {}
-    assert "_execution_target" not in messages[0]
-
-    captured.clear()
-    executor._enforce_target_aware_turn_budget(
-        [{"content": "web result", "tool_call_id": "call-web"}],
-        "session",
-        executor.DEFAULT_BUDGET,
-        {},
+    executor._finalize_tool_batch(
+        agent, messages, "session", len(messages), executor.DEFAULT_BUDGET,
     )
-    assert captured == {"default": default_env, "selected": default_env}
-    persisted = executor._append_persisted_target_hint(
-        f"{executor.PERSISTED_OUTPUT_TAG}\nfull output saved",
-        "beta",
+    assert captured == [beta_env, default_env]
+    assert identities == {}
+    assert "_execution_target" not in selected
+
+    persisted = executor._persisted_target_hint(
+        f"{executor.PERSISTED_OUTPUT_TAG}\nfull output saved", "beta", None,
     )
     assert 'Execution target for this saved output: "beta"' in persisted
     assert 'execution_target="beta"' in persisted
-
-    scoped = executor._append_persisted_target_hint(
+    scoped = executor._persisted_target_hint(
         f"saved {executor.PERSISTED_OUTPUT_TAG}", "beta", "scope-v1",
     )
     assert 'runtime_scope="scope-v1"' in scoped
@@ -1443,14 +1441,13 @@ def test_tool_output_persistence_uses_the_result_target(monkeypatch):
         "session", "terminal", {"execution_target": "broken"},
     ) is None
     captured.clear()
-    target_map = {"call-broken": "broken"}
-    executor._enforce_target_aware_turn_budget(
-        [{"content": "error", "tool_call_id": "call-broken"}],
-        "session",
-        executor.DEFAULT_BUDGET,
-        target_map,
+    identities["call-broken"] = ("broken", None, None)
+    executor._finalize_tool_batch(
+        agent, [{"content": "error", "tool_call_id": "call-broken"}],
+        "session", 1, executor.DEFAULT_BUDGET,
     )
-    assert captured == {"default": None, "selected": None}
+    assert captured == [None]
+    assert identities == {}
 
 
 def test_subdirectory_hints_follow_local_target_and_skip_remote_host(
@@ -1580,67 +1577,68 @@ def test_targetless_intervening_tool_resets_all_target_read_trackers(
     file_mod._read_tracker[profile_key] = {
         "dedup": {"region": (1.0, 2, "hash")},
         "dedup_hits": {"region": 3},
+        "dedup_generation_reads": {"region"},
     }
     read_tracking.reset_file_dedup("session")
-    assert file_mod._read_tracker[profile_key]["dedup"] == {}
+    # Fork main retains mtimes across compression; only the generation and
+    # stub-loop counters reset, including for the current profile's targets.
+    assert file_mod._read_tracker[profile_key]["dedup"] == {"region": (1.0, 2, "hash")}
     assert file_mod._read_tracker[profile_key]["dedup_hits"] == {}
+    assert file_mod._read_tracker[profile_key]["dedup_generation_reads"] == set()
 
 
 def test_sudo_cache_and_nopasswd_probe_are_target_scoped(
     monkeypatch, isolated_target_state,
 ):
-    terminal_mod, _ = isolated_target_state
-    terminal_mod._reset_cached_sudo_passwords()
+    from tools import terminal_tool_sudo as sudo_mod
 
-    terminal_mod._set_cached_sudo_password("local-secret", "local", "local")
-    assert terminal_mod._get_cached_sudo_password("local", "local") == "local-secret"
-    assert terminal_mod._get_cached_sudo_password("devbox", "ssh") == ""
+    sudo_mod._reset_cached_sudo_passwords()
+    sudo_mod._set_cached_sudo_password("local-secret", "local", "local")
+    assert sudo_mod._get_cached_sudo_password("local", "local") == "local-secret"
+    assert sudo_mod._get_cached_sudo_password("devbox", "ssh") == ""
 
+    # Current backends supply their own sudo -n probe, never a host-global
+    # subprocess probe. A selected target must use only its supplied callback.
+    sudo_mod._reset_cached_sudo_passwords()
+    monkeypatch.delenv("SUDO_PASSWORD", raising=False)
+    monkeypatch.setenv("HERMES_INTERACTIVE", "1")
+    monkeypatch.setattr(sudo_mod, "_in_delegated_child_context", lambda: False)
     calls = []
-
-    class Probe:
-        returncode = 0
-
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *args, **kwargs: calls.append((args, kwargs)) or Probe(),
-    )
-    with terminal_mod._scoped_sudo_execution("devbox", "ssh"):
-        assert terminal_mod._sudo_nopasswd_works() is False
-    assert calls == []
-
-    with terminal_mod._scoped_sudo_execution("local", "local"):
-        assert terminal_mod._sudo_nopasswd_works() is True
-    assert len(calls) == 1
+    with sudo_mod._scoped_sudo_execution("devbox", "ssh"):
+        command, password = sudo_mod._transform_sudo_command(
+            "sudo id", sudo_nopasswd_check=lambda: calls.append("devbox") or True,
+        )
+        assert (command, password) == ("sudo id", None)
+    with sudo_mod._scoped_sudo_execution("local", "local"):
+        command, password = sudo_mod._transform_sudo_command(
+            "sudo id", sudo_nopasswd_check=lambda: calls.append("local") or True,
+        )
+        assert (command, password) == ("sudo id", None)
+    assert calls == ["devbox", "local"]
 
     monkeypatch.setenv("SUDO_PASSWORD", "default-secret")
-    with terminal_mod._scoped_sudo_execution(
+    with sudo_mod._scoped_sudo_execution(
         "devbox", "ssh", named=True, sudo_password="target-secret",
     ):
-        transformed, selected_password = terminal_mod._transform_sudo_command(
-            "sudo id",
-        )
+        transformed, selected_password = sudo_mod._transform_sudo_command("sudo id")
     assert "target-secret" not in transformed
     assert "default-secret" not in transformed
     assert selected_password == "target-secret\n"
 
-    with terminal_mod._scoped_sudo_execution("devbox", "ssh", named=True):
-        terminal_mod._set_cached_sudo_password("cached-target")
-        _, cached_password = terminal_mod._transform_sudo_command("sudo id")
+    monkeypatch.delenv("SUDO_PASSWORD")
+    with sudo_mod._scoped_sudo_execution("devbox", "ssh", named=True):
+        sudo_mod._set_cached_sudo_password("cached-target")
+        _, cached_password = sudo_mod._transform_sudo_command("sudo id")
     assert cached_password == "cached-target\n"
 
-    monkeypatch.delenv("SUDO_PASSWORD")
-    with terminal_mod._scoped_sudo_execution(
+    with sudo_mod._scoped_sudo_execution(
         "devbox", "ssh", named=True, target_scope="config-v2",
     ):
-        terminal_mod._set_cached_sudo_password("stale-secret")
-    assert terminal_mod._invalidate_cached_sudo_on_auth_failure(
+        sudo_mod._set_cached_sudo_password("stale-secret")
+    assert sudo_mod._invalidate_cached_sudo_on_auth_failure(
         "sudo id", "sudo: authentication failed", "devbox", "ssh", "config-v2",
     ) is True
-    assert terminal_mod._get_cached_sudo_password(
-        "devbox", "ssh", "config-v2",
-    ) == ""
+    assert sudo_mod._get_cached_sudo_password("devbox", "ssh", "config-v2") == ""
 
 
 def test_requirements_keep_tools_registered_when_any_target_is_usable(
@@ -2155,13 +2153,16 @@ def test_gateway_script_guard_reads_selected_named_target_cwd(
         lambda: _named_config({"alpha": str(alpha), "beta": str(beta)}),
     )
     monkeypatch.setenv("_HERMES_GATEWAY", "1")
+    monkeypatch.setattr(
+        "tools.process_registry._is_supervised_gateway_process", lambda: True,
+    )
 
     result = json.loads(terminal_mod.terminal_tool(
         "bash restart.sh", task_id="gateway-guard", execution_target="beta",
     ))
 
     assert result["status"] == "error"
-    assert "cannot restart or stop the gateway" in result["error"]
+    assert "cannot restart, stop, or uninstall the gateway" in result["error"]
 
 
 def test_checkpoint_alias_flip_pins_dispatch_generation(monkeypatch, tmp_path):

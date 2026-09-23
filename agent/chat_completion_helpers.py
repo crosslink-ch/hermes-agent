@@ -42,7 +42,6 @@ from agent.message_sanitization import (
 )
 from agent.reasoning_summaries import append_streamed_reasoning_detail, separate_glued_reasoning_blocks
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
-from tools.terminal_tool_lifecycle import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_float, env_int
 
 logger = logging.getLogger(__name__)
@@ -2161,29 +2160,47 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
 
 
 def cleanup_task_resources(agent, task_id: str) -> None:
-    """Per-turn VM + browser cleanup for a task. Skips ``cleanup_vm`` for persistent
-    terminal envs (``_cleanup_inactive_envs`` reaps them after ``terminal.lifetime_seconds``)
-    and ``cleanup_browser`` in headed mode (the inactivity reaper handles idle sessions)."""
-    def _headed() -> bool:
-        try:
-            from tools.browser_tool_cloud import _is_headed_mode
-            return _is_headed_mode()
-        except Exception:
-            return bool(os.environ.get("AGENT_BROWSER_HEADED"))
+    """Release this logical turn before cleaning its non-persistent environments.
 
-    for label, skip, skip_what, cleanup in (
-        ("VM", is_persistent_env, "cleanup_vm for persistent env", lambda: _ra().cleanup_vm(task_id, preserve_persistent=True, include_collapsed=True)),
-        ("browser", lambda _tid: _headed(), "cleanup_browser for headed session", lambda: _ra().cleanup_browser(task_id)),
-    ):
+    A sibling turn may still be using a shared environment. Defer collapsed
+    cleanup until that sibling finishes; the idle reaper owns persistent ones.
+    Headed browser sessions likewise remain open until their idle reaper runs.
+    """
+    try:
+        from tools.terminal_tool_target_lifecycle import (
+            active_environment_turns,
+            defer_environment_turn_cleanup,
+            release_logical_environment_turn_for_cleanup,
+        )
+
+        release_logical_environment_turn_for_cleanup(task_id)
+        include_collapsed = active_environment_turns(task_id) == 0
+        if not include_collapsed:
+            defer_environment_turn_cleanup(task_id)
+        _ra().cleanup_vm(
+            task_id, preserve_persistent=True, include_collapsed=include_collapsed,
+        )
+    except Exception as e:
+        if agent.verbose_logging:
+            logger.warning("Failed to cleanup VM for task %s: %s", task_id, e)
+
+    try:
+        from tools.browser_tool_cloud import _is_headed_mode
+        headed = _is_headed_mode()
+    except Exception:
+        headed = bool(os.environ.get("AGENT_BROWSER_HEADED"))
+    if headed:
+        if agent.verbose_logging:
+            logging.debug(
+                "Skipping per-turn cleanup_browser for headed session %s; "
+                "idle reaper will handle it.", task_id,
+            )
+    else:
         try:
-            if skip(task_id):
-                if agent.verbose_logging:
-                    logging.debug(f"Skipping per-turn {skip_what} {task_id}; idle reaper will handle it.")
-            else:
-                cleanup()
+            _ra().cleanup_browser(task_id)
         except Exception as e:
             if agent.verbose_logging:
-                logger.warning("Failed to cleanup %s for task %s: %s", label, task_id, e)
+                logger.warning("Failed to cleanup browser for task %s: %s", task_id, e)
 
 
 def _build_partial_stream_stub(role, full_content, full_reasoning, model_name, usage_obj, *,

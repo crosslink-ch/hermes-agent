@@ -69,10 +69,6 @@ class TestCleanupTaskResourcesHeadedSkip:
             patch("tools.browser_tool_cloud._is_headed_mode", return_value=False),
             patch("run_agent.cleanup_vm"),
             patch("run_agent.cleanup_browser") as mock_cb,
-            patch(
-                "agent.chat_completion_helpers.is_persistent_env",
-                return_value=False,
-            ),
         ):
             cleanup_task_resources(_make_agent(), "task-x")
             mock_cb.assert_called_once_with("task-x")
@@ -85,10 +81,6 @@ class TestCleanupTaskResourcesHeadedSkip:
             patch("tools.browser_tool_cloud._is_headed_mode", return_value=True),
             patch("run_agent.cleanup_vm") as mock_vm,
             patch("run_agent.cleanup_browser"),
-            patch(
-                "agent.chat_completion_helpers.is_persistent_env",
-                return_value=False,
-            ),
         ):
             cleanup_task_resources(_make_agent(), "task-x")
             mock_vm.assert_called_once_with(
