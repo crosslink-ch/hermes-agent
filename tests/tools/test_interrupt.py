@@ -204,6 +204,9 @@ class TestPreToolCheck:
         # for any attribute access, which would short-circuit the interrupt
         # skip path before any cancelled-tool messages are appended.
         agent._incremental_persistence_failed = False
+        # A bare MagicMock would synthesize a .pop() result instead of the
+        # per-call target map used by a real agent during batch finalization.
+        agent._execution_target_by_tool_call = {}
 
         # Import and call the method
         import types
