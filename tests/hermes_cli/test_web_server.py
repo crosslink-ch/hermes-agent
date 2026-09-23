@@ -4807,6 +4807,12 @@ def test_resolve_chat_argv_scopes_terminal_bridge_to_child_profile(
         env["TERMINAL_ENV"] = "ssh"
 
     monkeypatch.setattr(config_mod, "apply_terminal_config_to_env", fake_apply)
+    launch_home = tmp_path / "launch"
+    launch_home.mkdir()
+    (launch_home / "config.yaml").write_text(
+        "terminal:\n  backend: local\n  timeout: 999\n", encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(launch_home))
     monkeypatch.setenv("TERMINAL_ENV", "local")
     monkeypatch.setenv("TERMINAL_TIMEOUT", "999")
 
