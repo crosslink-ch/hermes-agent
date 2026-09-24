@@ -58,11 +58,24 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
         tmux("resize-window", "-t", "p", "-x", str(cols), "-y", "24")
 
     def ask(turn: int) -> None:
-        tmux("send-keys", "-t", "p", "-l", f"question zq{turn}q please")
-        # Under CI load a fixed delay can end before prompt_toolkit processes the pasted
-        # input. Submit only after the whole question is visible.
-        wait_for(f"question zq{turn}q please")
-        tmux("send-keys", "-t", "p", "Enter")
+        question = f"question zq{turn}q please"
+        prior_requests = len(llm.main_requests())
+        tmux("send-keys", "-t", "p", "-l", question)
+        wait_for(question)
+        # A painted prompt can still lose Enter while startup/paste handling is busy.
+        # Resubmit only while it visibly holds this turn's text; never resubmit a
+        # question that has reached the provider.
+        for _attempt in range(3):
+            tmux("send-keys", "-t", "p", "Enter")
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline:
+                if len(llm.main_requests()) > prior_requests:
+                    return
+                time.sleep(0.1)
+            if not any(f"❯ {question}" in line for line in transcript().splitlines()[-8:]):
+                break
+        pytest.fail(f"question never reached fake provider: {question!r}, "
+                    f"requests={len(llm.main_requests())}; {transcript()[-1800:]}")
 
     def reply_done(turn: int) -> None:
         wait_for(f"t{turn}w{WORDS[turn] - 1:03d}")
