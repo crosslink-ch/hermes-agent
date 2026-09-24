@@ -5,13 +5,14 @@ FTS-scoped corruption detection and the atomic fail-open trigger detach."""
 import logging
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Optional, Sequence
 
 from hermes_constants import get_hermes_home
 from hermes_state_common import (FTS_CJK_STALE_KEY, FTS_STALE_KEY, _FTS_CJK_TRIGGERS, _FTS_TRIGGERS,
     routed_sessions_setting)
-from hermes_state_errors import is_fts_scoped_corruption_error
+from hermes_state_errors import StateDbCorruptError, is_fts_scoped_corruption_error, is_sqlite_lock_error
 
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
@@ -533,29 +534,53 @@ class SessionFtsSetupMixin:
         )
         return True
 
-    def _enter_fts_fail_open(self, exc: sqlite3.DatabaseError, *, confirmed: bool = False) -> bool:
+    def _enter_fts_fail_open(
+        self, exc: sqlite3.DatabaseError, *, confirmed: bool = False,
+        deadline: float | None = None, patience_s: float | None = None,
+    ) -> bool:
         """Detach corrupt FTS indexes so canonical writes can continue. Breadcrumb +
         trigger drop commit atomically: once triggers are absent the index has a
-        gap of unknown extent, so nobody may reinstall them without a full rebuild."""
+        gap of unknown extent, so nobody may reinstall them without a full rebuild.
+        Contended detach retries on the canonical writer's existing lock budget."""
         if not self._fts_enabled or (not confirmed and not self._is_fts_write_corruption_error(exc)):
             return False
-        self._raise_if_db_corrupt()
-        self._halt_if_db_generation_changed()
-        try:
-            with self._lock:
-                self._conn.execute("BEGIN IMMEDIATE")
-                try:
-                    self._mark_fts_stale_and_drop_triggers(self._conn.cursor())
-                    self._conn.commit()
-                except BaseException:
-                    self._conn.rollback()
-                    raise
-        except sqlite3.Error as detach_exc:
-            logger.error(
-                "Could not detach corrupt FTS indexes; canonical write still cannot proceed: %s",
-                detach_exc,
-            )
-            return False
+        if patience_s is None:
+            patience_s = self._WRITE_PATIENCE_S
+        if deadline is None:
+            deadline = time.monotonic() + patience_s
+        while True:
+            # A sibling may quarantine while we wait; never commit a stale marker
+            # or trigger drop to a quarantined/replaced generation.
+            self._raise_if_db_corrupt(storage=True)
+            try:
+                with self._lock:
+                    self._raise_if_db_corrupt(storage=True)
+                    self._raise_if_db_replaced()
+                    if self._conn is None:
+                        self._reopen_after_close_locked(context="write")
+                    self._conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        self._raise_if_db_corrupt(storage=True)
+                        self._mark_fts_stale_and_drop_triggers(self._conn.cursor())
+                        self._conn.commit()
+                    except BaseException:
+                        if self._conn.in_transaction:
+                            self._conn.rollback()
+                        raise
+                break
+            except StateDbCorruptError:
+                raise  # never turn a process-wide quarantine into the original FTS error
+            except sqlite3.Error as detach_exc:
+                if (
+                    isinstance(detach_exc, sqlite3.OperationalError) and is_sqlite_lock_error(detach_exc)
+                    and self._sleep_before_write_retry(deadline, patience_s)
+                ):
+                    continue
+                logger.error(
+                    "Could not detach corrupt FTS indexes; canonical write still cannot proceed: %s",
+                    detach_exc,
+                )
+                return False
         self._fts_stale = True
         self._fts_enabled = False
         self._trigram_available = False

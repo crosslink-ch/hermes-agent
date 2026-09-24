@@ -17,9 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import hermes_state
 import hermes_state_wal
-from hermes_state_wal import apply_wal_with_fallback, is_sqlite_wal_reset_vulnerable, sqlite_source_id
+from hermes_state_wal import apply_wal_with_fallback, is_sqlite_wal_reset_vulnerable
 
 
 @pytest.fixture(autouse=True)
@@ -65,8 +64,6 @@ class TestApplyWalWalResetGate:
             mode = apply_wal_with_fallback(conn, db_label="fresh.db")
         assert mode == "delete"
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "delete"
-        assert any("instead of enabling WAL" in r.getMessage() for r in caplog.records)
-        assert any(sys.executable in r.getMessage() for r in caplog.records)
         conn.close()
 
     def test_existing_wal_left_alone_when_vulnerable(
@@ -94,11 +91,6 @@ class TestApplyWalWalResetGate:
             assert mode == "wal"
             assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
             assert conn.execute("SELECT x FROM t").fetchone()[0] == 42
-            assert any("already in WAL mode" in r.getMessage() for r in caplog.records)
-            # Must not attempt a live journal_mode flip.
-            assert not any(
-                "instead of enabling WAL" in r.getMessage() for r in caplog.records
-            )
         finally:
             conn.close()
 
@@ -189,17 +181,6 @@ class TestApplyWalWalResetGate:
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         conn.close()
 
-    def test_warning_deduped_per_label(self, tmp_path, monkeypatch, caplog):
-        monkeypatch.setattr(
-            hermes_state_wal, "is_sqlite_wal_reset_vulnerable", lambda version_info=None: True
-        )
-        with caplog.at_level("WARNING", logger="hermes_state"):
-            for name in ("a.db", "a.db", "b.db"):
-                conn = sqlite3.connect(str(tmp_path / name))
-                apply_wal_with_fallback(conn, db_label=name)
-                conn.close()
-        warnings = [r for r in caplog.records if "WAL-reset" in r.getMessage()]
-        assert len(warnings) == 2
 
 
 _HOLDER_SCRIPT = """

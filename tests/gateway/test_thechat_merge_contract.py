@@ -73,6 +73,7 @@ async def test_telegram_manifest_tracks_actual_webhook_listener(monkeypatch):
     adapter = object.__new__(telegram.TelegramAdapter)
     adapter.platform = Platform.TELEGRAM
     adapter.config = PlatformConfig()
+    adapter._drop_pending_on_cold_boot = True
     adapter._app = SimpleNamespace(updater=SimpleNamespace(start_webhook=AsyncMock()))
     monkeypatch.setenv("TELEGRAM_WEBHOOK_SECRET", "test-webhook-secret")
     monkeypatch.setenv("TELEGRAM_WEBHOOK_PORT", "18765")
