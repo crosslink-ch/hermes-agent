@@ -8,6 +8,9 @@ validation, migration, and the ``hermes config`` command."""
 from hermes_cli.stale_modules import drop_stale_root_modules
 
 drop_stale_root_modules()
+# The N-1 updater reloads config.py after pulling but keeps config_providers cached.
+# Discard that old sibling before binding newly exported provider helpers.
+drop_stale_root_modules({"hermes_cli.config_providers": ("get_custom_provider_api_mode",)})
 
 import copy
 import difflib
