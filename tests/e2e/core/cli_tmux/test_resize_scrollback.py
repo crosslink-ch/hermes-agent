@@ -59,7 +59,9 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
 
     def ask(turn: int) -> None:
         tmux("send-keys", "-t", "p", "-l", f"question zq{turn}q please")
-        time.sleep(0.5)  # typed text + Enter in one write is a paste, not a submit
+        # Under CI load a fixed delay can end before prompt_toolkit processes the pasted
+        # input. Submit only after the whole question is visible.
+        wait_for(f"question zq{turn}q please")
         tmux("send-keys", "-t", "p", "Enter")
 
     def reply_done(turn: int) -> None:

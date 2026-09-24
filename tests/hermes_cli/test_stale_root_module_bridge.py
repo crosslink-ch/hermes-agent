@@ -64,3 +64,20 @@ def test_drop_stale_root_modules_leaves_complete_utils_alone():
     before = sys.modules["utils"]
     assert drop_stale_root_modules() == []
     assert sys.modules["utils"] is before
+
+
+def test_reloading_config_after_pull_discards_cached_n_minus_one_provider_module():
+    """An N-1 updater reloads config after pull but not its cached provider sibling."""
+    import subprocess
+    import sys
+
+    script = """
+import importlib, sys
+from hermes_cli import config, config_providers
+del config_providers.get_custom_provider_api_mode
+reloaded = importlib.reload(config)
+assert callable(reloaded.get_custom_provider_api_mode)
+assert sys.modules['hermes_cli.config_providers'] is not config_providers
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
