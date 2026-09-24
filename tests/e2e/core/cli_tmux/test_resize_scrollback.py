@@ -40,6 +40,7 @@ def _reply(turn: int) -> str:
 def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Path) -> None:
     sock = f"hermes-e2e-{uuid.uuid4().hex[:8]}"
     home = tmp_path / "home"
+    assert home.resolve().is_relative_to(tmp_path.resolve())
     (tmp_path / "work").mkdir()
 
     def tmux(*args: str) -> str:
@@ -85,8 +86,11 @@ def test_resizes_keep_each_transcript_line_once_in_tmux_scrollback(tmp_path: Pat
     with FakeLLMServer(script, aux=lambda _r: Text("Scripted session title")) as llm:
         write_hermes_home(home / ".hermes", llm.base_url)
         env = {k: v for k, v in os.environ.items() if not k.startswith(("HERMES_", "TMUX"))}
+        # The child inherits pytest context, but its only DB lives inside tmp_path.
+        # Without this explicit exemption the live-DB guard treats the child's
+        # overridden HOME as its production root and prints a warning mid-prompt.
         env.update(HOME=str(home), HERMES_HOME=str(home / ".hermes"), PYTHONPATH=str(REPO_ROOT),
-                   TERM="xterm-256color")
+                   HERMES_STATE_DB_GUARD_BYPASS="1", TERM="xterm-256color")
         argv = [sys.executable, "-m", "hermes_cli.main", "chat", "--cli", "--yolo"]
         subprocess.run(["tmux", "-L", sock, "-f", os.devnull, "new-session", "-d", "-s", "p", "-x", "120",
                         "-y", "24", "-c", str(tmp_path / "work"), *argv], env=env, check=True, timeout=30)
