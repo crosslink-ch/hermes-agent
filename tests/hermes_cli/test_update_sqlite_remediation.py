@@ -1,10 +1,12 @@
 """Post-update reporting for unresolved SQLite WAL-reset risk."""
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 from hermes_cli import update_cmd
 import hermes_cli.update_cmd_maint as update_cmd_maint
+from hermes_cli.distribution import INSTALLER_BASE_URL
 
 
 def test_runtime_status_probes_running_venv_outside_checkout(tmp_path, monkeypatch):
@@ -58,6 +60,8 @@ def test_summary_withholds_success_when_sqlite_remediation_failed(capsys, monkey
     out = capsys.readouterr().out
     assert complete is False
     assert "Update complete" not in out
+    suffix = "ps1" if sys.platform == "win32" else "sh"
+    assert f"{INSTALLER_BASE_URL}/install.{suffix}" in out
 
 
 

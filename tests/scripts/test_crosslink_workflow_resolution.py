@@ -172,13 +172,28 @@ def test_crosslink_main_and_release_runs_publish_multiarch_images():
     )
 
     assert workflow["jobs"]["publish"]["if"] == expected
-    assert workflow["jobs"]["merge"]["if"] == expected
+    assert workflow["jobs"]["merge"]["if"] == "${{ !cancelled() && " + expected + " }}"
     assert expected.split(" && ", 1)[0] in workflow["jobs"]["build"]["if"]
     assert workflow["jobs"]["build"]["needs"] == ["detect"]
     assert workflow["jobs"]["publish"]["needs"] == ["build"]
     assert workflow["jobs"]["merge"]["needs"] == ["publish"]
     assert workflow["jobs"]["publish"]["environment"] == "container-publish"
     assert workflow["jobs"]["merge"]["environment"] == "container-publish"
+    assert workflow["env"]["IMAGE_NAME"] == (
+        "${{ github.repository == 'crosslink-ch/hermes-agent' && "
+        "'crosslinkch/hermes-agent' || 'nousresearch/hermes-agent' }}"
+    )
+    for job_name in ("build", "publish"):
+        matrix = workflow["jobs"][job_name]["strategy"]["matrix"]
+        assert matrix["arch"] == ["amd64", "arm64"]
+        assert matrix["variant"] == ["slim", "desktop"]
+    assert workflow["jobs"]["merge"]["strategy"]["matrix"]["include"] == [
+        {"variant": "slim", "suffix": ""},
+        {"variant": "desktop", "suffix": "-desktop"},
+    ]
+    manifest = _step(workflow["jobs"]["merge"], "Create manifest list and push")["run"]
+    assert 'if [ "${#args[@]}" -ne 2 ]; then' in manifest
+    assert '"${IMAGE_NAME}:main${SUFFIX}"' in manifest
 
 
 def test_upstream_site_deployment_is_not_activated_on_crosslink():

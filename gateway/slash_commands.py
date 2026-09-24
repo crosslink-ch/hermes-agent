@@ -1200,7 +1200,7 @@ class GatewaySlashCommandsMixin(
         count = resolve_gateway_approval(session_key, choice, resolve_all="all" in args, resolved_request_ids=resolved_request_ids)
         if not count:
             return t("gateway.approve.no_pending")
-        await self._notify_approval_resolution(self._adapter_for_source(event.source), event.source, session_key, choice, count, "all" in args, resolved_request_ids)
+        await self._notify_approval_resolution(self._delivery_adapter_for(event.source), event.source, session_key, choice, count, "all" in args, resolved_request_ids)
         confirmation_text = t(f"gateway.approve.{choice}_{'plural' if count > 1 else 'singular'}", count=count)
         logger.info("User approved %d dangerous command(s) via /approve (%s)", count, choice)
         return await self._deliver_approval_confirmation(event, confirmation_text, "approve")
@@ -1227,7 +1227,7 @@ class GatewaySlashCommandsMixin(
         count = resolve_gateway_approval(session_key, "deny", resolve_all=resolve_all, reason=reason or None, resolved_request_ids=resolved_request_ids)
         if not count:
             return t("gateway.deny.no_pending")
-        await self._notify_approval_resolution(self._adapter_for_source(event.source), event.source, session_key, "deny", count, resolve_all, resolved_request_ids)
+        await self._notify_approval_resolution(self._delivery_adapter_for(event.source), event.source, session_key, "deny", count, resolve_all, resolved_request_ids)
         logger.info("User denied %d dangerous command(s) via /deny%s", count,
                     " (with reason)" if reason else "")
         key = "gateway.deny.denied" + ("_reason" if reason else "") + ("_plural" if count > 1 else "_singular")

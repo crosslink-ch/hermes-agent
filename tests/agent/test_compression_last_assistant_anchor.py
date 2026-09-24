@@ -37,9 +37,13 @@ def _assert_no_same_role_adjacency(messages):
 
 
 def _count_reply(messages):
+    from agent.compression_todo import _TODO_INTERNAL_NOTE_PREFIX
+
     return sum(
         1 for m in messages
-        if m.get("role") == "assistant" and (m.get("content") or "").strip() == REPLY.strip()
+        if m.get("role") == "assistant"
+        and isinstance(m.get("content"), str)
+        and m["content"].split(_TODO_INTERNAL_NOTE_PREFIX, 1)[0].strip() == REPLY.strip()
     )
 
 
@@ -75,6 +79,21 @@ def test_normalized_twin_of_reply_counts_as_present(kept_shape):
     assert len(assistant_rows) == 1
     _assert_no_same_role_adjacency(compressed)
 
+
+
+def test_internal_todo_only_assistant_is_not_a_visible_reply():
+    """An internal continuity carrier must not be carried as a delivered answer."""
+    from agent.compression_todo import _TODO_INTERNAL_NOTE_PREFIX
+
+    original = [
+        {"role": "user", "content": "bulk " + "x" * 8000},
+        {"role": "assistant", "content": f"{_TODO_INTERNAL_NOTE_PREFIX}\n## Current Tasks\n- [ ] inspect"},
+        {"role": "user", "content": FOLLOWER},
+    ]
+    compressed = [{"role": "user", "content": SUMMARY}, {"role": "user", "content": FOLLOWER}]
+
+    assert _ensure_compressed_keeps_last_assistant_reply(original, compressed) is None
+    assert len(compressed) == 2
 
 
 def _tool_chain(*call_ids):
@@ -179,8 +198,8 @@ class TestEngineDropsReplyEndToEnd:
     @pytest.mark.parametrize("todo_store", [False, True], ids=["dropped", "dropped_with_todo_store"])
     def test_reply_row_stays_active_after_commit(self, tmp_path, todo_store):
         """LCM-shaped fold: summary + next-turn tail only; the long reply gone. With an
-        active todo store the snapshot fold rewrites the trailing user row, so the reply
-        must be back in place BEFORE it runs."""
+        active todo store, the internal note is embedded in the recovered assistant
+        row; its visible reply and durable rewind must still survive."""
         fold = [{"role": "user", "content": SUMMARY}, {"role": "user", "content": FOLLOWER}]
         db, session_id, messages, agent = _seed(tmp_path, [], fold, FOLLOWER)
         if todo_store:
@@ -190,6 +209,10 @@ class TestEngineDropsReplyEndToEnd:
 
         assert _count_reply(live) == 1, "just-delivered reply left the active set after compaction"
         assert any(str(c).startswith(FOLLOWER) for c in live_contents)
+        if todo_store:
+            from agent.compression_todo import _TODO_INTERNAL_NOTE_PREFIX
+            assert sum(_TODO_INTERNAL_NOTE_PREFIX in str(c) for c in live_contents) == 1
+            assert not any(_TODO_INTERNAL_NOTE_PREFIX in str(m.get("content")) for m in live if m["role"] == "user")
         # Display projection (include_compacted): the reply renders once, not as archived
         # original + fresh twin.
         display = db.get_messages_as_conversation(

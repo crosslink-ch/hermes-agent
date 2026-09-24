@@ -1362,6 +1362,9 @@ class TestTodoSnapshotInternalNote:
             }
             for i in range(20)
         ]
+        # The stub retained the original reply and latest multimodal user turn.
+        input_msgs[-1]["content"] = "acknowledged"
+        input_msgs.append({"role": "user", "content": list(original_parts)})
         compressed, _ = agent._compress_context(
             input_msgs, "sys", approx_tokens=120_000
         )
@@ -1441,7 +1444,7 @@ class TestTodoSnapshotInternalNote:
             # original alongside it.
             return [
                 {"role": "user", "content": "[CONTEXT COMPACTION] summary"},
-                {"role": "assistant", "content": messages[-1]["content"]},
+                {"role": "assistant", "content": messages[-2]["content"]},
                 {"role": "user", "content": list(original_parts)},
             ]
 
@@ -1463,6 +1466,8 @@ class TestTodoSnapshotInternalNote:
             }
             for i in range(20)
         ]
+        input_msgs[-1]["content"] = "ok"
+        input_msgs.append({"role": "user", "content": list(original_parts)})
         compressed, _ = agent._compress_context(
             input_msgs, "sys", approx_tokens=120_000
         )

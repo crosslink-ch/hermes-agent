@@ -1982,7 +1982,7 @@ export const fr = defineLocale({
       sshErrHostKey:
         "La clé de l'hôte a changé depuis votre dernière connexion. Vérifiez que ce changement est attendu, puis exécutez ssh-keygen -R <host> et reconnectez-vous.",
       sshErrNotInstalled:
-        "Hermes n'est pas installé sur l'hôte distant. Installez-le là-bas (curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh) ou définissez le chemin Hermes.",
+        "Hermes n'est pas installé sur l'hôte distant. Installez-le là-bas (curl -fsSL https://share.kihub.ch/hermes/install.sh | bash) ou définissez le chemin Hermes.",
       sshErrPlatform:
         'Plateforme distante non prise en charge. Le mode SSH de Hermes Desktop supporte les hôtes distants Linux, macOS et Windows.',
       sshErrTimeout: "Expiration de la connexion SSH. L'hôte peut être inaccessible ou en veille.",

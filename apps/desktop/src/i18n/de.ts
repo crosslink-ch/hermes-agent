@@ -1980,7 +1980,7 @@ export const de = defineLocale({
       sshErrHostKey:
         'Der Host-Key hat sich seit Ihrer letzten Verbindung GEÄNDERT. Prüfen Sie, ob das erwartet ist, führen Sie dann ssh-keygen -R <host> aus und verbinden Sie sich erneut.',
       sshErrNotInstalled:
-        'Hermes ist auf dem Remote-Host nicht installiert. Installieren Sie es dort (curl -fsSL https://hermes-agent.nousresearch.com/install.sh | sh) oder legen Sie den Hermes-Pfad fest.',
+        'Hermes ist auf dem Remote-Host nicht installiert. Installieren Sie es dort (curl -fsSL https://share.kihub.ch/hermes/install.sh | bash) oder legen Sie den Hermes-Pfad fest.',
       sshErrPlatform:
         'Nicht unterstützte Remote-Plattform. Der Desktop-SSH-Modus von Hermes unterstützt Linux-, macOS- und Windows-Remote-Hosts.',
       sshErrTimeout: 'SSH-Verbindung ist ausgelaufen. Der Host ist möglicherweise nicht erreichbar oder schläft.',

@@ -4013,6 +4013,10 @@ def compress_context(
                 "active set (session=%s).", agent.session_id or "none",
             )
         compressed_user_turn_outcome = _ensure_compressed_has_user_turn(messages, compressed)
+        # Todo continuity may append to this assistant dict in place. The DB
+        # rewind matches the original row's byte-exact identity, not its
+        # post-fold content; keep a separate snapshot for carried-row lookup.
+        carried_reply = copy.deepcopy(reinserted_reply) if reinserted_reply is not None else None
         from agent.compression_todo import fold_todo_snapshot
         fold_todo_snapshot(agent, compressed)
         new_system_prompt = _rebuild_system_prompt_at_boundary(agent, system_message)
@@ -4021,11 +4025,9 @@ def compress_context(
             system_message=system_message, compressed_user_turn_outcome=compressed_user_turn_outcome,
             messages_before_compression=messages_before_compression, made_progress=_compression_made_progress,
             attempt=attempt, verbatim_tail=verbatim_tail,
-            # The reinserted copy keeps the original's _row_id/timestamp (production flush stamps
-            # both); carry exactly that one row so the commit rewinds the durable original instead
-            # of archiving it compacted=1 next to a fresh twin (display would show it twice). The
-            # todo fold / user-anchor rows added above are NOT carried: they keep their own class.
-            carried_messages=[reinserted_reply] if reinserted_reply is not None else None,
+            # Carry the original byte-exact identity, not the post-todo dict:
+            # the latter no longer matches the durable row to rewind.
+            carried_messages=[carried_reply] if carried_reply is not None else None,
         )
         if commit.refused_prompt is not None:
             return messages, commit.refused_prompt

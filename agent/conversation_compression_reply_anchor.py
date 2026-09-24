@@ -48,12 +48,18 @@ def _ensure_compressed_keeps_last_assistant_reply(
         _DB_PERSISTED_MARKER, _fresh_compaction_message_copy, is_compaction_summary_message,
     )
     from agent.conversation_compression import _message_text
+    from agent.compression_todo import _strip_todo_internal_note
 
     reply, reply_text = None, ""
     for message in reversed(original_messages):
         if not isinstance(message, dict) or message.get("role") != "assistant":
             continue
         if message.get("tool_calls") or is_compaction_summary_message(message):
+            continue
+        # Fork todo continuity can occupy a standalone assistant carrier. That
+        # is not a delivered reply to preserve; the todo fold refreshes it from
+        # the store separately at this same boundary.
+        if not _message_text({"content": _strip_todo_internal_note(message.get("content"))}).strip():
             continue
         reply_text = _message_text(message).strip()
         if not reply_text:

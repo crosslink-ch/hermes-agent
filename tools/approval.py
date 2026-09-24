@@ -143,19 +143,28 @@ def resolve_gateway_approval(session_key: str, choice: str,
     """Unblock waiting agent thread(s) from the gateway's /approve or /deny handler.
 
     *resolve_all* resolves every pending approval (``/approve all``); otherwise the oldest
-    (FIFO) or the one matching *request_id*. *reason* is the ``/deny <reason>`` free text,
-    relayed to the agent in the BLOCKED message. Returns the number resolved.
+    (FIFO) or the one matching *request_id*. An explicitly targeted request may pass earlier
+    requests only inside the same desktop preparation batch. *reason* is the
+    ``/deny <reason>`` free text relayed to the agent in the BLOCKED message.
+    Returns the number resolved.
     """
     with _lock:
         queue = _gateway_queues.get(session_key)
         if not queue:
             return 0
         if request_id is not None:
-            target = queue[0]
-            if target.request_id != request_id:
+            target_index = next((i for i, entry in enumerate(queue)
+                                 if entry.request_id == request_id), None)
+            if target_index is None:
                 return 0
-            queue.pop(0)
-            targets = [target]
+            if target_index:
+                batch = queue[target_index].prepared_batch
+                # Never jump a different request or batch. Desktop batches publish
+                # all their cards before execution, but release shells in call order.
+                if batch is None or any(entry.prepared_batch is not batch
+                                        for entry in queue[:target_index]):
+                    return 0
+            targets = [queue.pop(target_index)]
         elif resolve_all:
             targets = list(queue)
             queue.clear()

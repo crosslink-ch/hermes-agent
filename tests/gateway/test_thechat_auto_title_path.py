@@ -4,6 +4,7 @@ import asyncio
 import sys
 import threading
 import types
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -190,6 +191,9 @@ async def test_run_agent_wires_thechat_title_callback_into_auto_title(
         message_id="message-1",
         profile="secondary",
     )
+    # Live events retain the receiving adapter independently of the routed runtime.
+    source._transport_adapter_ref = weakref.ref(secondary_adapter)
+    assert runner._delivery_adapter_for(source) is secondary_adapter
 
     auto_title_calls = []
 

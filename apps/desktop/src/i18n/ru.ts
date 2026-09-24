@@ -1367,7 +1367,7 @@ export const ru = defineLocale({
       sshErrHostKey:
         'Ключ хоста ИЗМЕНИЛСЯ с последнего подключения. Убедитесь, что это ожидаемо, затем выполните ssh-keygen -R <host> и переподключитесь.',
       sshErrNotInstalled:
-        'Hermes не установлен на удалённой машине. Установите его там (curl -fsSL https://share.kihub.ch/hermes/install.sh | sh) или задайте путь к Hermes.',
+        'Hermes не установлен на удалённой машине. Установите его там (curl -fsSL https://share.kihub.ch/hermes/install.sh | bash) или задайте путь к Hermes.',
       sshErrPlatform:
         'Неподдерживаемая удалённая платформа. SSH-режим Hermes Desktop поддерживает удалённые хосты Linux, macOS и Windows.',
       sshErrTimeout: 'SSH-соединение истекло. Хост может быть недоступен или «спит».',

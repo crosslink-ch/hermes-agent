@@ -225,7 +225,7 @@ class GatewayTheChatMixin:
         ):
             return None
 
-        adapter = self._adapter_for_source(source)
+        adapter = self._delivery_adapter_for(source)
         sender = getattr(adapter, "send_session_title_update", None) if adapter else None
         if not callable(sender):
             return None
@@ -293,7 +293,7 @@ class GatewayTheChatMixin:
             return
 
         if adapter is None:
-            adapter = self._adapter_for_source(source)
+            adapter = self._delivery_adapter_for(source)
         sender = getattr(adapter, "send_session_title_update", None) if adapter else None
         if not callable(sender):
             return

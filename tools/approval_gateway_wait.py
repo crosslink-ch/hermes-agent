@@ -27,7 +27,7 @@ logger = logging.getLogger("tools.approval")
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("event", "data", "result", "reason", "acknowledged", "request_id", "settle", "cancelled")
+    __slots__ = ("event", "data", "result", "reason", "acknowledged", "request_id", "settle", "cancelled", "prepared_batch")
 
     def __init__(self, data: dict, *, request_id: Optional[str] = None):
         self.event = threading.Event()
@@ -52,6 +52,8 @@ class _ApprovalEntry:
         # Why the prompt was withdrawn with nobody answering (interrupt cause, session teardown);
         # followers and teardown read it so a withdrawn prompt never renders as a user deny.
         self.cancelled: str | None = None
+        # Only a desktop batch may answer its already-published cards out of order.
+        self.prepared_batch = None
 
 
 def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str) -> str:

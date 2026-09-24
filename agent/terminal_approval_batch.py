@@ -203,6 +203,8 @@ def register_prepared_approval(session_key, entry):
     slot = _slot.get()
     if slot is not None:
         slot.check_cancelled()
+        if slot.preparing:
+            entry.prepared_batch = slot.batch
         slot.batch.pending_approvals.append((session_key, entry))
 
 

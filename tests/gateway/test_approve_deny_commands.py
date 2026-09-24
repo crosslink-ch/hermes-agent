@@ -197,6 +197,32 @@ class TestBlockingGatewayApproval:
         assert second.event.is_set()
         assert second.result == "deny"
 
+    def test_targeted_batch_consent_cannot_skip_an_unrelated_request(self):
+        from tools.approval import _gateway_queues, resolve_gateway_approval
+        from tools.approval_gateway_wait import _ApprovalEntry
+
+        key = "mixed-approval-queue"
+        batch = object()
+        first = _ApprovalEntry({"command": "batch-first"})
+        second = _ApprovalEntry({"command": "batch-second"})
+        unrelated = _ApprovalEntry({"command": "independent"})
+        for entry in (first, second):
+            entry.prepared_batch = batch
+        _gateway_queues[key] = [first, unrelated, second]
+
+        assert resolve_gateway_approval(key, "once", request_id=second.request_id) == 0
+        assert not second.event.is_set()
+        assert resolve_gateway_approval(key, "once", request_id=first.request_id) == 1
+        assert resolve_gateway_approval(key, "once", request_id=second.request_id) == 0
+        assert unrelated.result is None
+        assert resolve_gateway_approval(key, "deny", request_id=unrelated.request_id) == 1
+        ids = []
+        assert resolve_gateway_approval(
+            key, "once", request_id=second.request_id, resolved_request_ids=ids
+        ) == 1
+        assert ids == [second.request_id]
+        assert second.result == "once"
+
     def test_notify_callback_receives_queued_request_id(self):
         from tools import approval as approval_module
 
