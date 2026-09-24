@@ -69,6 +69,13 @@ def test_python_suite_budget_preserves_full_standard_runner_coverage():
     assert not ({"HERMES_TEST_FILE_TIMEOUT", "HERMES_TEST_PATHS", "HERMES_TEST_SLICE"} & env.keys())
 
 
+def test_ci_detection_budget_covers_full_history_checkout_on_standard_runner():
+    # A one-minute budget cancelled main CI during actions/checkout, before
+    # detect-changes could schedule Python and upgrade E2E jobs.
+    workflow = _load_yaml(".github/workflows/ci.yaml")
+    assert workflow["jobs"]["detect"]["timeout-minutes"] >= 10
+
+
 def test_release_tag_picker_accepts_crosslink_release_tags(tmp_path):
     repo = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
