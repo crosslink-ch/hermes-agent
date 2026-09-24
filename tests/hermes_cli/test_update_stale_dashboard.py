@@ -177,6 +177,37 @@ class TestFindStaleDashboardPids:
 
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX kill stub")
+def test_mixed_generation_scanner_keeps_only_own_home(tmp_path):
+    """A pre-pull N-1 scanner has no scope_home, but update must still fail closed."""
+    own_home = tmp_path / "own"
+    other_home = tmp_path / "other"
+    own_home.mkdir()
+    other_home.mkdir()
+    owners = {32101: str(own_home), 32102: str(other_home), 32103: None}
+
+    # Old main.py was imported before the git pull; its scanner only accepted
+    # exclude_pids and discovered backends across every profile/install.
+    def stale_n_minus_one_scanner(*, exclude_pids=None):
+        return [pid for pid in owners if pid not in (exclude_pids or set())]
+
+    def fake_kill(pids, killed, failed):
+        killed.extend(pids)
+
+    with patch.object(main_dashboard, "_find_stale_dashboard_pids",
+                      stale_n_minus_one_scanner), \
+         patch.object(dashboard_procs, "_hermes_home_for_pid",
+                      side_effect=owners.get), \
+         patch.object(dashboard_procs, "_kill_pids_posix", side_effect=fake_kill) as kill:
+        result = _kill_stale_dashboard_processes(scope_home=str(own_home))
+
+    assert result["matched"] == [32101]
+    assert result["killed"] == [32101]
+    assert result["failed"] == []
+    kill.assert_called_once()
+    assert kill.call_args.args[0] == [32101]
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX kill semantics")
 class TestKillStaleDashboardPosix:
     """Kill path on Linux / macOS: SIGTERM then SIGKILL any survivors."""
