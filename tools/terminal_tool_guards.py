@@ -141,7 +141,8 @@ def _foreground_background_guidance(command: str) -> str | None:
     return next((msg for hit, msg in _FOREGROUND_GUIDANCE if hit(unquoted)), None)
 
 
-def _read_script_for_guard(env: Any, guard_cwd: str, script_path: str, max_bytes: int) -> Optional[str]:
+def _read_script_for_guard(env: Any, guard_cwd: str, script_path: str, max_bytes: int,
+                           *, remote: bool = False) -> Optional[str] | tuple[None, bool]:
     """Best-effort script read: host filesystem first, then a bounded
     ``env.execute('head -c ... < path')`` for remote backends. Binary content
     (NUL byte) is not a script: feeding it to the guard tokenizes machine code
@@ -149,9 +150,16 @@ def _read_script_for_guard(env: Any, guard_cwd: str, script_path: str, max_bytes
     if env is None:
         return None
     try:
+        if remote:
+            raise FileNotFoundError("remote target: never consult host filesystem")
         local_path = Path(script_path).expanduser()
         if not local_path.is_absolute():
             local_path = Path(guard_cwd) / local_path
+        # A FIFO/device must never be opened (or sent to env.execute as a
+        # fallback): it could block forever while the supervised gateway waits.
+        # The lifecycle scanner understands (text, unsafe) and fails closed.
+        if local_path.exists() and not stat.S_ISREG(local_path.stat().st_mode):
+            return None, True
         if local_path.is_file():
             metadata = local_path.stat()
             if stat.S_ISREG(metadata.st_mode) and metadata.st_size <= max_bytes:
@@ -183,6 +191,7 @@ def gateway_lifecycle_block(
     cwd: str,
     workdir: Optional[str],
     session_key: str,
+    resolution=None,
 ) -> Optional[str]:
     """Refuse gateway lifecycle commands issued from inside the supervised gateway.
 
@@ -223,16 +232,19 @@ def gateway_lifecycle_block(
             "not by switching launchctl verbs to bypass this rejection.",
             "error",
         )
-    guard_cwd_base = get_session_cwd(session_key)
+    guard_cwd_base = get_session_cwd(session_key, _resolution=resolution)
     if guard_cwd_base is None:
         guard_cwd_base = getattr(env, "cwd", None) or cwd
     guard_cwd = _resolve_command_cwd(
         workdir=workdir, default_cwd=guard_cwd_base, session_key=session_key, env_type=env_type,
+        _resolution=resolution,
     )
     unsafe, refusal = scan_gateway_lifecycle(
         command,
         cwd=guard_cwd,
-        read_remote_script=lambda p: _read_script_for_guard(env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES),
+        read_remote_script=lambda p: _read_script_for_guard(
+            env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES, remote=env_type == "ssh",
+        ),
     )
     if unsafe and refusal:
         # Not a lifecycle command: a script the command EXECUTES could not be scanned (budget,
@@ -267,6 +279,7 @@ def self_repo_block(
     cwd: str,
     workdir: Optional[str],
     session_key: str,
+    resolution=None,
 ) -> Optional[str]:
     """Windows-only guard against git-mutating the checkout backing this interpreter.
 
@@ -281,7 +294,9 @@ def self_repo_block(
 
     if not guard_active():
         return None
-    guard_cwd = _resolve_command_cwd(workdir=workdir, default_cwd=cwd, session_key=session_key)
+    guard_cwd = _resolve_command_cwd(
+        workdir=workdir, default_cwd=cwd, session_key=session_key, _resolution=resolution,
+    )
     hit, msg = detect_self_repo_git_mutation(command, guard_cwd)
     if not hit:
         return None
