@@ -36,6 +36,20 @@ def _wait_job(client, job_id: str, timeout: float = 10.0) -> dict:
         time.sleep(0.05)
     raise AssertionError(f"job {job_id} still running after {timeout}s")
 
+@pytest.fixture
+def recommended_machine(monkeypatch):
+    """Pin a machine that can run a resident model, independently of CI hardware."""
+    from hermes_cli.local_runtime.estimator import HardwareBudget
+    from hermes_cli.web_routers import local_models as lm
+
+    gib = 1 << 30
+    budget = HardwareBudget(
+        usable_vram_bytes=64 * gib, total_device_bytes=80 * gib,
+        ram_available_bytes=128 * gib, uma=False,
+    )
+    monkeypatch.setattr(lm.hardware, "probe_budget", lambda **kw: budget)
+    assert lm.catalog.recommended_entry(budget, lm._eligible_entries()) is not None
+
 
 def test_quickstart_unknown_model_404s(client):
     r = client.post("/api/local-models/quickstart", json={"model_id": "no-such"})

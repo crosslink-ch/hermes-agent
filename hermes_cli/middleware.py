@@ -143,10 +143,38 @@ def run_llm_execution_middleware(
 def run_tool_execution_middleware(
     tool_name: str, args: Dict[str, Any], next_call: Callable[[Dict[str, Any]], Any], **context: Any,
 ) -> Any:
-    """Run tool execution through registered tool execution middleware."""
+    """Run tool middleware without allowing it to retarget an authorized call."""
+    from hermes_cli.plugins import has_middleware
+    from tools.execution_targets import (
+        uses_execution_target_argument, validate_execution_target_dispatch_args,
+    )
+
+    # With no listeners, preserve the exact argument object supplied to the
+    # authorized executor; copying it changes the no-middleware contract.
+    if not has_middleware(TOOL_EXECUTION_MIDDLEWARE):
+        return next_call(args)
+
+    if not uses_execution_target_argument(tool_name):
+        return _run_execution_chain(
+            TOOL_EXECUTION_MIDDLEWARE, next_call,
+            tool_name=tool_name, args=args,
+            original_args=context.pop("original_args", args), **context,
+        )
+    # Validate before copying: user-provided dict subclasses can override
+    # __deepcopy__/get and change a selector between approval and dispatch.
+    validate_execution_target_dispatch_args(tool_name, args, args)
+    authorized_args = dict(args)
+    middleware_args = dict(authorized_args)
+
+    def guarded_next_call(dispatch_args: Dict[str, Any]) -> Any:
+        validate_execution_target_dispatch_args(tool_name, authorized_args, dispatch_args)
+        return next_call(dict(dispatch_args))
+
     return _run_execution_chain(
-        TOOL_EXECUTION_MIDDLEWARE, next_call,
-        tool_name=tool_name, args=args, original_args=context.pop("original_args", args), **context)
+        TOOL_EXECUTION_MIDDLEWARE, guarded_next_call,
+        tool_name=tool_name, args=middleware_args,
+        original_args=context.pop("original_args", args), **context,
+    )
 
 
 class _DownstreamExecutionError(Exception):
