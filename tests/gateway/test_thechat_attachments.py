@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -192,6 +193,76 @@ def _json_response(
     return httpx.Response(status_code, json=payload, request=request)
 
 
+def test_inbound_attachment_timeout_defaults_and_http_client_contract(monkeypatch):
+    adapter = _adapter()
+    assert adapter.attachment_transfer_timeout_seconds == 600
+    assert adapter.attachment_batch_timeout_seconds == 3600
+
+    captured: dict[str, Any] = {}
+
+    def guarded_client(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(thechat, "create_ssrf_safe_async_client", guarded_client)
+    adapter._new_object_store_client()
+    assert captured["timeout"].read == 600
+    assert captured["timeout"].connect == thechat._ATTACHMENT_CONNECT_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("bad", [None, True, 0, -1, "oops", "nan", "inf", 100000])
+def test_invalid_inbound_attachment_timeout_settings_keep_bounded_defaults(bad):
+    adapter = TheChatAdapter(PlatformConfig.from_dict({
+        "enabled": True,
+        "base_url": "https://thechat.example",
+        "attachment_transfer_timeout_seconds": bad,
+        "attachment_batch_timeout_seconds": bad,
+    }))
+    assert adapter.attachment_transfer_timeout_seconds == 600
+    assert adapter.attachment_batch_timeout_seconds == 3600
+
+
+@pytest.mark.asyncio
+async def test_inbound_file_uses_configured_transfer_deadline(
+    attachment_scratch,
+    monkeypatch,
+):
+    body = b"slow recording"
+    descriptor = _descriptor(
+        "attachment-slow",
+        file_name="meeting.mp3",
+        media_type="audio/mpeg",
+        body=body,
+        kind="file",
+    )
+    adapter = TheChatAdapter(PlatformConfig.from_dict({
+        "enabled": True,
+        "base_url": "https://thechat.example",
+        "attachment_transfer_timeout_seconds": 0.15,
+    }))
+    monkeypatch.setattr(thechat, "_ATTACHMENT_TRANSFER_TIMEOUT_SECONDS", 0.01)
+
+    async def slow_content(request: httpx.Request) -> httpx.Response:
+        assert request.extensions["timeout"]["read"] == 0.15
+        await asyncio.sleep(0.03)
+        return httpx.Response(200, content=body, request=request)
+
+    adapter._client = httpx.AsyncClient(
+        base_url=adapter.base_url,
+        transport=httpx.MockTransport(slow_content),
+    )
+    try:
+        media_urls, media_types, _ = await adapter._download_inbound_attachments(
+            [descriptor]
+        )
+    finally:
+        await adapter._client.aclose()
+
+    assert len(media_urls) == 1
+    assert Path(media_urls[0]).read_bytes() == body
+    assert media_types == ["audio/mpeg"]
+
+
 @pytest.mark.asyncio
 async def test_inbound_image_and_file_follow_authenticated_redirects_into_media_cache(
     attachment_scratch,
@@ -324,6 +395,42 @@ async def test_inbound_batch_limits_count_and_cumulative_bytes(
     assert len(media_urls) == 2
     assert media_types == ["text/plain", "text/plain"]
     assert media_kinds == ["document", "document"]
+
+
+@pytest.mark.asyncio
+async def test_inbound_batch_uses_configured_total_deadline(
+    attachment_scratch,
+    monkeypatch,
+):
+    adapter = TheChatAdapter(PlatformConfig.from_dict({
+        "enabled": True,
+        "base_url": "https://thechat.example",
+        "attachment_batch_timeout_seconds": 0.15,
+    }))
+    monkeypatch.setattr(thechat, "_ATTACHMENT_INBOUND_TOTAL_TIMEOUT_SECONDS", 0.01)
+    descriptors = [
+        _descriptor(
+            f"attachment-{index}",
+            file_name=f"file-{index}.txt",
+            media_type="text/plain",
+            body=b"x",
+            kind="file",
+        )
+        for index in range(2)
+    ]
+
+    async def slow_download(_descriptor: dict[str, Any]) -> bytes:
+        await asyncio.sleep(0.03)
+        return b"x"
+
+    adapter._download_attachment_bytes = cast(Any, slow_download)
+    media_urls, media_types, _ = await adapter._download_inbound_attachments(
+        descriptors
+    )
+
+    assert len(media_urls) == 2
+    assert [Path(path).read_bytes() for path in media_urls] == [b"x", b"x"]
+    assert media_types == ["text/plain", "text/plain"]
 
 
 @pytest.mark.asyncio
