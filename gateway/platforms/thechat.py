@@ -6,6 +6,14 @@ uses a timestamped HMAC secret returned by authenticated registration, keeping
 the Better Auth bot API key outbound-only. This adapter feeds those events into
 the normal Hermes gateway message pipeline and posts the gateway response back
 to TheChat as the configured bot.
+
+Inbound attachment settings in config.yaml under platforms.thechat:
+attachment_transfer_timeout_seconds (default 600) limits each file; and
+attachment_batch_timeout_seconds (default 3600) limits the whole message's
+attachment batch. Both accept positive finite seconds up to 86400. For example,
+`hermes config set --force platforms.thechat.attachment_transfer_timeout_seconds 900`
+(or `hermes config set --force platforms.thechat.attachment_batch_timeout_seconds 5400`).
+The gateway must be restarted for a changed adapter setting to take effect.
 """
 
 from __future__ import annotations
@@ -16,6 +24,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import mimetypes
 import os
 import re
@@ -74,7 +83,8 @@ _INTERACTION_CHOICE_MAX_COUNT = 20
 _INTERACTION_RECORD_MAX_LIFETIME_SECONDS = 24 * 60 * 60
 _INTERACTION_PROGRESS_MAX_ATTEMPTS = 3
 _INTERACTION_PROGRESS_RETRY_BASE_SECONDS = 0.1
-_ATTACHMENT_TRANSFER_TIMEOUT_SECONDS = 20.0
+_ATTACHMENT_TRANSFER_TIMEOUT_SECONDS = 600.0
+_ATTACHMENT_TIMEOUT_MAX_SECONDS = 24 * 60 * 60
 _ATTACHMENT_CONNECT_TIMEOUT_SECONDS = 5.0
 _ATTACHMENT_POLL_TIMEOUT_SECONDS = 120.0
 _ATTACHMENT_POLL_INTERVAL_SECONDS = 0.25
@@ -85,7 +95,7 @@ _ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
 _ATTACHMENT_OUTBOUND_MAX_BYTES = 10 * 1024 * 1024
 _ATTACHMENT_INBOUND_MAX_COUNT = 10
 _ATTACHMENT_INBOUND_TOTAL_MAX_BYTES = 50 * 1024 * 1024
-_ATTACHMENT_INBOUND_TOTAL_TIMEOUT_SECONDS = 60.0
+_ATTACHMENT_INBOUND_TOTAL_TIMEOUT_SECONDS = 3600.0
 _ATTACHMENT_CHUNK_BYTES = 1024 * 1024
 _ATTACHMENT_FILENAME_MAX_CHARS = 180
 _ATTACHMENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,254}$")
@@ -110,6 +120,21 @@ _ATTACHMENT_MEDIA_TYPE_ALIASES = {
 def _normalize_attachment_media_type(value: Any) -> str:
     normalized = str(value or "").split(";", 1)[0].strip().lower()
     return _ATTACHMENT_MEDIA_TYPE_ALIASES.get(normalized, normalized)
+
+
+def _attachment_timeout_seconds(extra: dict, key: str, default: float) -> float:
+    """Read a bounded platform timeout without letting bad config disable downloads."""
+    if key not in extra:
+        return default
+    value = extra[key]
+    try:
+        seconds = float(value) if not isinstance(value, bool) else float("nan")
+    except (TypeError, ValueError, OverflowError):
+        seconds = float("nan")
+    if math.isfinite(seconds) and 0 < seconds <= _ATTACHMENT_TIMEOUT_MAX_SECONDS:
+        return seconds
+    logger.warning("TheChat: invalid %s; using default timeout", key)
+    return default
 
 
 def _s3_error_code(response: httpx.Response) -> Optional[str]:
@@ -159,6 +184,12 @@ class TheChatAdapter(BasePlatformAdapter):
         self.base_url = str(config.extra.get("base_url") or "").rstrip("/")
         self.token = str(config.token or "")
         self.poll_interval = float(config.extra.get("poll_interval") or 1.0)
+        self.attachment_transfer_timeout_seconds = _attachment_timeout_seconds(
+            config.extra, "attachment_transfer_timeout_seconds", _ATTACHMENT_TRANSFER_TIMEOUT_SECONDS
+        )
+        self.attachment_batch_timeout_seconds = _attachment_timeout_seconds(
+            config.extra, "attachment_batch_timeout_seconds", _ATTACHMENT_INBOUND_TOTAL_TIMEOUT_SECONDS
+        )
         self._client: Optional[httpx.AsyncClient] = None
         self._poll_task: Optional[asyncio.Task] = None
         self.webhook_host = str(
@@ -555,7 +586,7 @@ class TheChatAdapter(BasePlatformAdapter):
             )
         deadline = (
             asyncio.get_running_loop().time()
-            + _ATTACHMENT_INBOUND_TOTAL_TIMEOUT_SECONDS
+            + self.attachment_batch_timeout_seconds
         )
         total_bytes = 0
         for raw_descriptor in raw_attachments[:_ATTACHMENT_INBOUND_MAX_COUNT]:
@@ -608,7 +639,7 @@ class TheChatAdapter(BasePlatformAdapter):
         descriptor: Dict[str, Any],
     ) -> bytes:
         try:
-            async with asyncio.timeout(_ATTACHMENT_TRANSFER_TIMEOUT_SECONDS):
+            async with asyncio.timeout(self.attachment_transfer_timeout_seconds):
                 return await self._download_attachment_bytes_impl(descriptor)
         except TimeoutError as exc:
             raise _AttachmentError(
@@ -632,7 +663,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 descriptor["download_path"],
                 follow_redirects=False,
                 timeout=httpx.Timeout(
-                    _ATTACHMENT_TRANSFER_TIMEOUT_SECONDS,
+                    self.attachment_transfer_timeout_seconds,
                     connect=_ATTACHMENT_CONNECT_TIMEOUT_SECONDS,
                 ),
             ) as response:
@@ -739,7 +770,7 @@ class TheChatAdapter(BasePlatformAdapter):
     def _new_object_store_client(self) -> httpx.AsyncClient:
         return create_ssrf_safe_async_client(
             timeout=httpx.Timeout(
-                _ATTACHMENT_TRANSFER_TIMEOUT_SECONDS,
+                self.attachment_transfer_timeout_seconds,
                 connect=_ATTACHMENT_CONNECT_TIMEOUT_SECONDS,
             ),
             follow_redirects=False,
