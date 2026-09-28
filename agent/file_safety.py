@@ -195,7 +195,7 @@ def build_write_denied_paths(home: str) -> set[str]:
     # ("true containment belongs in Docker/remote backends and OS permissions,
     # not an expanding hardcoded denylist"). They stay read-denied, not write-denied.
     hermes_files = (
-        ".env", ".anthropic_oauth.json",
+        ".env", ".anthropic_oauth.json", ".execution-target-fingerprint-key",
         os.path.join("auth", "google_oauth.json"),
         *SECRET_CACHE_STORES,
     )
@@ -346,7 +346,8 @@ _DID_SUFFIX = (
 # Exact-file credential stores under HERMES_HOME / <root>. The agent never
 # needs these directly — provider tools consume them through internal channels.
 _CREDENTIAL_FILE_NAMES = (
-    "auth.json", "auth.lock", ".anthropic_oauth.json", ".env", "webhook_subscriptions.json",
+    "auth.json", "auth.lock", ".anthropic_oauth.json", ".env",
+    ".execution-target-fingerprint-key", "webhook_subscriptions.json",
     os.path.join("auth", "google_oauth.json"), *SECRET_CACHE_STORES,
 )
 

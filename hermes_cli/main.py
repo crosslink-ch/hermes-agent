@@ -3246,6 +3246,11 @@ def _build_cli_parser():
     build_checkpoints_parser(subparsers)
     build_import_cmd_parser(subparsers, cmd_import=cmd_import)
     build_config_parser(subparsers, cmd_config=cmd_config)
+    targets_parser = subparsers.add_parser(
+        "targets", help="Register and manage runtime execution targets without restart"
+    )
+    from hermes_cli.targets import register_cli as register_targets_cli
+    register_targets_cli(targets_parser)
     build_skin_parser(subparsers, cmd_skin=cmd_skin)
     build_console_parser(subparsers, cmd_console=cmd_console)
     build_pairing_parser(subparsers, cmd_pairing=cmd_pairing)
