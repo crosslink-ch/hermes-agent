@@ -72,9 +72,48 @@ class FileStateRegistryUnitTests(unittest.TestCase):
         file_state.note_write("B", p)
         warn = file_state.check_stale("A", p)
         self.assertIsNotNone(warn)
+        assert isinstance(warn, str)
         self.assertIn("B", warn)
         self.assertIn("sibling", warn.lower())
 
+    def test_remote_write_records_without_host_stat(self):
+        remote_path = "/remote-only/project/file.txt"
+        namespace = "ssh:physical-host"
+        file_state.record_read(
+            "A", remote_path, namespace=namespace, stat_path=False,
+        )
+        time.sleep(0.01)
+        file_state.note_write(
+            "B", remote_path, namespace=namespace, stat_path=False,
+        )
+        warn = file_state.check_stale("A", remote_path, namespace=namespace)
+        self.assertIsNotNone(warn)
+        assert isinstance(warn, str)
+        self.assertIn("B", warn)
+        self.assertIn("sibling", warn.lower())
+
+    def test_identical_remote_paths_in_distinct_namespaces_do_not_conflict(self):
+        path = self._mk()
+        file_state.record_read(("A", "devbox"), path, namespace="ssh:devbox", stat_path=False)
+        file_state.note_write(("B", "other"), path, namespace="ssh:other", stat_path=False)
+        self.assertIsNone(file_state.check_stale(("A", "devbox"), path, namespace="ssh:devbox"))
+        os.utime(path, None)
+        self.assertIsNone(file_state.check_stale(("A", "devbox"), path, namespace="ssh:devbox"))
+
+    def test_namespaced_reads_and_writes_since_keep_physical_identity(self):
+        path = "/workspace/shared.txt"
+        file_state.record_read(("parent", "devbox"), path,
+                               namespace="ssh:physical", stat_path=False)
+        before = time.time()
+        file_state.note_write(("child", "alias"), path,
+                              namespace="ssh:physical", stat_path=False)
+        self.assertIn("child", file_state.check_stale(("parent", "devbox"), path,
+                                                       namespace="ssh:physical"))
+        known = file_state.known_reads("parent")
+        self.assertIn("ssh:physical\0" + path, known)
+        self.assertEqual(file_state.writes_since("parent", before, known), {"child": [path]})
+        file_state.get_registry().forget_task("parent")
+        self.assertFalse(file_state.known_reads("parent"))
 
     def test_lock_path_serializes_same_path(self):
         p = self._mk()

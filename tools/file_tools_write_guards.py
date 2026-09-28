@@ -350,16 +350,8 @@ def _check_protected_instruction_write(paths: list[str], task_id: str = "default
     return _request_protected_instruction_approval(reasons, task_id)
 
 
-# Approval key -> (prompt noun, why it is gated). One key per class so an approve-always for one
-# class never authorizes the other.
-_APPROVAL_WRITE_CLASSES = {
-    "ssh_config_write": ("SSH client config file(s)",
-                         "The SSH config can carry ProxyCommand / Match exec directives that run commands"),
-    "shell_rc_write": ("shell startup file(s)", "Shell startup files run their commands in every new login shell"),
-}
-
-
-def _check_approval_required_write(paths: list[str], task_id: str = "default") -> str | None:
+def _check_approval_required_write(paths: list[str], task_id: str = "default",
+                                   execution_target=None, *, _resolution=None) -> str | None:
     """Gate a write/patch touching an approval-required path (``~/.ssh/config`` can steer
     execution via ``ProxyCommand``; shell rc files run at login). Routine gate: once/session/always,
     honors --yolo, fail-closed without an interactive/gateway channel. Each class is gated under
@@ -393,22 +385,27 @@ def _check_approval_required_write(paths: list[str], task_id: str = "default") -
         except Exception:
             return blocked.format(why=_APPROVAL_UNAVAILABLE)
 
-        result = _approval._run_approval_gate(
-            pattern_key=pattern_key,
-            description=description,
-            display_target=f"<write to {display_targets}>",
-            cron_deny_message=blocked.format(why="requires approval but this cron session denies it."),
-            single_query_deny_message=blocked.format(
-                why="requires approval but single-query (-q) sessions run "
-                    "without a user present to approve it. To allow flagged "
-                    "actions in single-query mode, set approvals.single_query_mode: "
-                    "approve in config.yaml."),
-            autoapprove_log_prefix=pattern_key,
-            fail_closed_when_no_human=True,
-            no_human_block_message=blocked.format(why=_NO_HUMAN))
-        if not result.get("approved"):
-            return result.get("message") or blocked.format(why="was denied.")
-    return None
+    from tools.approval import _execution_scoped_pattern_key
+    if _resolution is None and execution_target is not None:
+        from tools.execution_targets import resolve_execution_target
+        _resolution = resolve_execution_target(execution_target)
+    result = _approval._run_approval_gate(
+        pattern_key="ssh_config_write" if _resolution is None else _execution_scoped_pattern_key(
+            "ssh_config_write", _resolution.target, _resolution.named, _resolution.security_scope),
+        description=description,
+        display_target=f"<write to {display_targets}>",
+        cron_deny_message=blocked.format(why="requires approval but this cron session denies it."),
+        single_query_deny_message=blocked.format(
+            why="requires approval but single-query (-q) sessions run "
+                "without a user present to approve it. To allow flagged "
+                "actions in single-query mode, set approvals.single_query_mode: "
+                "approve in config.yaml."),
+        autoapprove_log_prefix="ssh_config_write",
+        fail_closed_when_no_human=True,
+        no_human_block_message=blocked.format(why=_NO_HUMAN))
+    if result.get("approved"):
+        return None
+    return result.get("message") or blocked.format(why="was denied.")
 
 
 def _get_container_mirror_prefix_for_task(task_id: str = "default") -> str | None:
@@ -446,7 +443,7 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
     return get_container_mirror_warning(resolved, mirror_prefix=_get_container_mirror_prefix_for_task(task_id))
 
 
-def _target_regular_file_state(filepath: str, task_id: str = "default") -> str:
+def _target_regular_file_state(filepath: str, task_id: str = "default", *, _resolution=None) -> str:
     """Is a REGULAR file at *filepath* present where the write will execute
     (the task's backend, not the controller's disk — #122662)?
 
@@ -454,13 +451,13 @@ def _target_regular_file_state(filepath: str, task_id: str = "default") -> str:
     keep ``Path.is_file`` semantics; anything not proven absent is
     ``"unavailable"`` and callers must fail closed.
     """
-    from tools.file_tools import _file_ops_uses_host_paths, _get_file_ops
+    from tools.file_tools import _file_ops_uses_host_paths, _get_file_ops, _file_ops_for_resolution, _resolve_or_none
     try:
-        resolved = str(_resolve_path_for_task(filepath, task_id))
+        resolved = _resolve_or_none(filepath, task_id, _resolution)
     except Exception:
         resolved = None
     try:
-        file_ops = _get_file_ops(task_id)
+        file_ops = _file_ops_for_resolution(task_id, _resolution) if _resolution is not None else _get_file_ops(task_id)
     except Exception:
         return "unavailable"
     if _file_ops_uses_host_paths(file_ops):
@@ -487,7 +484,7 @@ def _target_regular_file_state(filepath: str, task_id: str = "default") -> str:
     return "unavailable"
 
 
-def _check_binary_document_write(filepath: str, task_id: str = "default") -> str | None:
+def _check_binary_document_write(filepath: str, task_id: str = "default", *, _resolution=None) -> str | None:
     """Reject text-tool writes that would corrupt a binary document (read_file showed
     EXTRACTED text, so the model may write it back). Opaque document formats and
     SQLite sidecars (-wal/-shm/-journal) are always rejected; .pdf and every other
@@ -510,9 +507,8 @@ def _check_binary_document_write(filepath: str, task_id: str = "default") -> str
             "bytes). Use the microsoft-office skill or a library like "
             "python-docx/openpyxl/python-pptx via the terminal to create or edit "
             "this document.")
-    # A -wal/-shm/-journal path is never a legitimate text target, even when
-    # no sidecar exists yet: a checkpointed db has none on disk, and a garbage
-    # WAL dropped next to a live database is picked up on the next open.
+    # SQLite sidecars are dangerous even before they exist: SQLite may pick
+    # up a garbage WAL on its next open. Never treat them as text files.
     if is_sqlite_sidecar(filepath):
         return (
             f"Refusing to write plain text to binary SQLite sidecar '{filepath}' ({ext}). "
@@ -520,13 +516,11 @@ def _check_binary_document_write(filepath: str, task_id: str = "default") -> str
             "reads on the next open; text there corrupts the database. Use the "
             "sqlite3 CLI or a SQLite library via the terminal to modify the "
             "database instead.")
-    # Overwriting an existing binary (PDF, image, archive, SQLite db, ...)
-    # with text destroys it — the model only ever saw extracted or mojibake
-    # text. Creating a NEW file with such an extension stays allowed: raw PDF
-    # syntax is text-authorable and text fixtures named ``*.db`` exist.
+    # Only an EXISTING binary document is unsafe to overwrite. Check on the
+    # selected backend, not the same-spelled host path.
     pdf = is_pdf_path(filepath)
     if pdf or has_binary_extension(filepath):
-        state = _target_regular_file_state(filepath, task_id)
+        state = _target_regular_file_state(filepath, task_id, _resolution=_resolution)
         if state == "exists":
             if pdf:
                 return (
@@ -561,8 +555,10 @@ _READ_DEDUP_STATUS_MESSAGE = (
     "still current — refer to that instead of re-reading.")
 
 
-def _stale_overwrite_blocker(filepath: str, resolved: str | None, task_id: str) -> str | None:
-    """Reason write_file must NOT replace the existing file, else ``None``.
+def _stale_overwrite_blocker(filepath: str, resolved: str | None, task_id: str,
+                             *, state_task_id=None, namespace=None, resolution=None,
+                             file_ops=None, operation_path=None) -> str | None:
+    """Refuse a whole-file overwrite without a current, full-content baseline.
 
     Refuses BEFORE any disk mutation (the pre-#65604 warning arrived after the
     clobber): a sibling/external/partial-read staleness finding, or an existing
@@ -571,20 +567,36 @@ def _stale_overwrite_blocker(filepath: str, resolved: str | None, task_id: str) 
     (in one page or by paging contiguously to the last line), wrote, or patched
     from such a baseline, unresolvable paths and the file-state kill switch all
     let the write proceed.
+    The remote check compares bytes on the selected backend; a same-spelled
+    host file is never evidence about the remote file's existence or version.
+    Both checks run under the namespace-scoped path lock before mutation.
     """
     if file_state.guard_disabled():
         return None
-    stale = file_state.check_stale(task_id, resolved) if resolved else None
+    key = state_task_id or task_id
+    stale = file_state.check_stale(key, resolved, namespace=namespace) if resolved else None
     if stale:
         return stale
-    if _read_mtime_drifted(filepath, task_id):
-        return (
-            f"{filepath} was modified since you last read it (external edit or "
-            "concurrent agent). Re-read the file before writing.")
-    from tools.environments.sandbox_scope import hosted_scope
-    if not resolved or hosted_scope() is not None or _has_full_write_baseline(resolved, task_id):
-        # A hosted agent's path names its sandbox, where no host baseline can exist (as for any
-        # remote backend, whose files the host-side existence check below never finds).
+    if resolution is not None and resolution.backend != "local":
+        if not resolved or file_ops is None or not operation_path:
+            return "Cannot verify the selected backend file before overwriting it."
+        _size, status = file_ops._probe_regular_file(operation_path)
+        if status == "missing":
+            return None
+        if status not in ("ok", "bad_size"):
+            return f"Cannot verify the selected backend file before overwriting it ({status})."
+        from tools.file_tools import _backend_file_version, _read_tracker, _read_tracker_lock
+        with _read_tracker_lock:
+            data = _read_tracker.get(key) or {}
+            baseline = data.get("full_write_baselines", {}).get(resolved)
+        if baseline is not None and _backend_file_version(file_ops, operation_path) == baseline:
+            return None
+        return (f"{resolved} exists on the selected backend but this task has not seen "
+                "its full current content. Read every page before overwriting, or use patch.")
+    if _read_mtime_drifted(filepath, task_id) and (resolution is None or not resolution.named):
+        return (f"{filepath} was modified since you last read it (external edit or "
+                "concurrent agent). Re-read the file before writing.")
+    if not resolved or _has_full_write_baseline(resolved, key):
         return None
     try:
         exists = Path(resolved).exists()
@@ -602,7 +614,6 @@ def _stale_overwrite_blocker(filepath: str, resolved: str | None, task_id: str) 
         "file — every page of it, if it needs offset/limit — or use patch for a "
         "targeted edit; a stale conversation copy must not overwrite the current "
         "disk content.")
-
 
 def _stale_write_refusal(filepath: str, reason: str, resolved: str | None = None) -> dict:
     """Model-facing refusal payload for write_file; ``stale_write_blocked`` lets
