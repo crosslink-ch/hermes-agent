@@ -182,18 +182,11 @@ def build_write_denied_paths(home: str) -> set[str]:
         (".ssh", "authorized_keys"), (".ssh", "id_rsa"), (".ssh", "id_ed25519"),
         (".netrc",), (".pgpass",), (".npmrc",), (".pypirc",), (".git-credentials",),
     )
-    # Secret material under HERMES_HOME, on both the active profile and the global
-    # root: overwriting the root .env leaks credentials across every profile that
-    # inherits it, and the root Anthropic PKCE store is still read by default /
-    # non-profile sessions when a profile is active. google_oauth.json is an OAuth
-    # token store; both Bitwarden caches hold Secrets Manager material.
-    #
-    # auth.json, auth.lock, config.yaml and webhook_subscriptions.json are
-    # deliberately NOT here: #45947 freed those control files on purpose
-    # ("true containment belongs in Docker/remote backends and OS permissions,
-    # not an expanding hardcoded denylist"). They stay read-denied, not write-denied.
+    # Secret material at both the active profile and root must remain protected.
+    # Control files (auth.json, config.yaml, webhook_subscriptions.json) remain
+    # editable as intended by #45947; the target fingerprint key is not one.
     hermes_files = (
-        ".env", ".anthropic_oauth.json",
+        ".env", ".anthropic_oauth.json", ".execution-target-fingerprint-key",
         os.path.join("auth", "google_oauth.json"),
         os.path.join("cache", "bws_cache.json"),
         os.path.join("cache", "bws_cache.enc.json"),
@@ -319,7 +312,8 @@ _DID_SUFFIX = (
 # needs these directly — provider tools consume them through internal channels.
 # bws_cache.json is the Bitwarden Secrets Manager disk cache: plaintext secret values.
 _CREDENTIAL_FILE_NAMES = (
-    "auth.json", "auth.lock", ".anthropic_oauth.json", ".env", "webhook_subscriptions.json",
+    "auth.json", "auth.lock", ".anthropic_oauth.json", ".env",
+    ".execution-target-fingerprint-key", "webhook_subscriptions.json",
     os.path.join("auth", "google_oauth.json"), os.path.join("cache", "bws_cache.json"),
 )
 
