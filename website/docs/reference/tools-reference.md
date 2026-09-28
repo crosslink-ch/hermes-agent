@@ -130,7 +130,7 @@ patch(mode="replace", path="app.py", old_string="old", new_string="new", executi
 search_files(pattern="TODO", target="content", execution_target="devbox")
 ```
 
-Relative paths use the selected target's own session working directory and FileOperations adapter. Results include resolved `target` and `backend` metadata, plus `cwd` when available. See [Named Execution Targets](/user-guide/configuration#named-execution-targets) for configuration, default, and legacy behavior.
+Relative paths use the selected target's own session working directory and FileOperations adapter. Results include resolved `target` and `backend` metadata, plus `cwd` when available. See [Named Execution Targets](../user-guide/configuration.md#named-execution-targets) for configuration, default, and legacy behavior.
 
 ## `homeassistant` toolset
 
