@@ -1804,6 +1804,7 @@ def check_terminal_requirements() -> bool:
         return _check_terminal_config_requirements(_get_env_config())
     except Exception as exc:
         logger.error("Invalid execution target config: %s", exc)
+        _record_unavailable_reason(f"invalid execution target config: {exc}")
         return False
 
 

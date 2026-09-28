@@ -242,8 +242,13 @@ def gateway_lifecycle_block(
     unsafe, refusal = scan_gateway_lifecycle(
         command,
         cwd=guard_cwd,
-        read_remote_script=lambda p: _read_script_for_guard(
-            env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES, remote=env_type == "ssh",
+        # Local scripts use the lifecycle scanner's SQLite-safe bounded reader.
+        # A non-local target must read its own filesystem, never a same-spelled
+        # host path (nor the host's live SQLite connection state).
+        read_remote_script=(
+            (lambda p: _read_script_for_guard(
+                env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES, remote=True,
+            )) if env_type != "local" else None
         ),
     )
     if unsafe and refusal:
