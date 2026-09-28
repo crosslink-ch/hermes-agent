@@ -789,6 +789,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT,
     → Hermes internal denylist → document extraction → binary-extension guard
     → negative-result cache → dedup stub → real read.
     """
+    nt_err = get_nt_namespace_error(path, verb="Read")
+    if nt_err:
+        return tool_error(nt_err)
     try:
         from tools.execution_targets import resolve_execution_target
         selected_execution_target = execution_target
@@ -905,19 +908,22 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT,
                           _backend_file_version(file_ops, operation_path))
         if (cached_version is not None and not is_background_review()
                 and version_before == cached_version and content_served_in_generation):
-            return _dedup_stub_or_block(task_data, dedup_key, path)
+            stub = json.loads(_dedup_stub_or_block(task_data, dedup_key, path))
+            stub.update(resolution.metadata(cwd=_authoritative_workspace_root(
+                task_id, selected_target, _resolution=resolution)))
+            return json.dumps(stub, ensure_ascii=False)
 
         result = file_ops.read_file(operation_path, offset, limit)
         result_dict = result.to_dict()
         result_dict.setdefault("resolved_path", operation_path)
+        result_dict.update(resolution.metadata(cwd=_authoritative_workspace_root(
+            task_id, selected_target, _resolution=resolution)))
 
         # Failed reads cannot establish whole-file knowledge.
         _err = result_dict.get("error") or ""
         if isinstance(_err, str) and _err.startswith("File not found:"):
             _record_not_found("read", resolved_str, state_task_id, json.dumps(result_dict, ensure_ascii=False))
         if _err or result_dict.get("is_binary"):
-            result_dict.update(resolution.metadata(cwd=_authoritative_workspace_root(
-                task_id, selected_target, _resolution=resolution)))
             return json.dumps(result_dict, ensure_ascii=False)
 
         # Char budget on the FORMATTED content (what enters context), BEFORE
@@ -1117,6 +1123,9 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
     (unadvertised in the schema; the mirror rejection error teaches it — the
     cross-PROFILE guard it was named for no longer exists).
     """
+    nt_err = get_nt_namespace_error(path, verb="Write")
+    if nt_err:
+        return tool_error(nt_err)
     try:
         from tools.execution_targets import resolve_execution_target
         resolution = resolve_execution_target(execution_target)
@@ -1240,6 +1249,17 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
     ``cross_profile``: same semantics as ``write_file``'s flag (mirror-guard
     bypass only; unadvertised).
     """
+    # Validate raw paths before target resolution can touch the filesystem.
+    early_paths = [path] if path else []
+    if mode == "patch" and patch:
+        collected = _collect_v4a_header_paths(patch)
+        if isinstance(collected, str):
+            return collected
+        early_paths.extend(collected[0])
+    for raw_path in early_paths:
+        nt_err = get_nt_namespace_error(raw_path, verb="Write")
+        if nt_err:
+            return tool_error(nt_err)
     try:
         from tools.execution_targets import resolve_execution_target
         resolution = resolve_execution_target(execution_target)
@@ -1344,6 +1364,9 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 order: str = "discovery",
                 task_id: str = "default", execution_target: str = None) -> str:
     """Search for content or files."""
+    nt_err = get_nt_namespace_error(path, verb="Search")
+    if nt_err:
+        return tool_error(nt_err)
     try:
         from tools.execution_targets import resolve_execution_target
 
