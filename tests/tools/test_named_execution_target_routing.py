@@ -2165,10 +2165,31 @@ def test_gateway_script_guard_reads_selected_named_target_cwd(
     assert "cannot restart, stop, or uninstall the gateway" in result["error"]
 
 
+
+def test_named_local_read_reports_target_for_full_and_deduplicated_reads(tmp_path):
+    import tools.execution_targets as targets_mod
+    from tools.file_tools import read_file_tool
+
+    (tmp_path / "sample.txt").write_text("routed read")
+    targets_mod.set_execution_target_config_source(
+        _named_config({"read-box": str(tmp_path)}, default="read-box")
+    )
+    try:
+        for _ in range(2):
+            result = json.loads(read_file_tool(
+                "sample.txt", task_id="target-read-metadata", execution_target="read-box",
+            ))
+            assert result["target"] == "read-box"
+            assert result["backend"] == "local"
+            assert result["cwd"] == str(tmp_path)
+    finally:
+        targets_mod.set_execution_target_config_source(None)
+
+
 def test_checkpoint_alias_flip_pins_dispatch_generation(monkeypatch, tmp_path):
     from agent import tool_executor
     import tools.execution_targets as targets_mod
-    from tools.file_tools import write_file_tool
+    from tools.file_tools import read_file_tool, write_file_tool
 
     first = tmp_path / "first"
     second = tmp_path / "second"
@@ -2178,6 +2199,10 @@ def test_checkpoint_alias_flip_pins_dispatch_generation(monkeypatch, tmp_path):
     config_a = _named_config({"dev": str(first)}, default="dev")
     config_b = _named_config({"dev": str(second)}, default="dev")
     targets_mod.set_execution_target_config_source(config_a)
+    # Current main requires a full read before overwriting an existing file.
+    # Establish the baseline before the checkpoint deliberately changes the alias.
+    initial = read_file_tool("sample.txt", task_id="target-race", execution_target="dev")
+    assert "before" in initial
     checkpoints = []
 
     class CheckpointManager:
