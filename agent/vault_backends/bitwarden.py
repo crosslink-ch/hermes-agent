@@ -59,15 +59,15 @@ class BitwardenLoginBackend(LoginBackend):
         # bw refuses a piped password ("Master password is required"); its non-interactive contract is
         # --passwordenv: the variable exists only in the child's environment, never in argv or ours.
         generation = _unlock.begin_unlock(self.name)
-        proc = run_with_secret_env([str(self._bw()), "unlock", "--raw", "--nointeraction", "--passwordenv", "HERMES_BW_MASTER"],
-                                   env=self._env(None), secret_env="HERMES_BW_MASTER", secret=master_password,
-                                   timeout=_TIMEOUT, label="bw")
+        try:
+            proc = run_with_secret_env([str(self._bw()), "unlock", "--raw", "--nointeraction", "--passwordenv", "HERMES_BW_MASTER"],
+                                      env=self._env(None), secret_env="HERMES_BW_MASTER", secret=master_password,
+                                      timeout=_TIMEOUT, label="bw")
+        except Exception:
+            raise RuntimeError("Bitwarden unlock failed") from None
         token = (proc.stdout or "").strip()
         if proc.returncode != 0 or not token:
-            err = scrub_ansi(proc.stderr or "").strip()[:200]
-            if "not logged in" in err.lower():
-                err = "not logged in — run `bw login` once in a terminal first"
-            raise RuntimeError(f"Bitwarden unlock failed: {err or 'no session key'}")
+            raise RuntimeError("Bitwarden unlock failed; check the secure prompt or run `bw login` first") from None
         if not _unlock.store_session_token(self.name, token, generation):
             raise RuntimeError("Bitwarden was locked while unlocking; try again")
 
@@ -75,14 +75,17 @@ class BitwardenLoginBackend(LoginBackend):
         token = _unlock.get_session_token(self.name)
         if not token:
             raise UnlockRequired(self)
-        proc = run_cli([str(self._bw()), *args, "--nointeraction"], env=self._env(token), timeout=_TIMEOUT,
-                       label="bw", timeout_message="bw timed out", stdin=subprocess.DEVNULL)
+        try:
+            proc = run_cli([str(self._bw()), *args, "--nointeraction"], env=self._env(token), timeout=_TIMEOUT,
+                           label="bw", timeout_message="bw timed out", stdin=subprocess.DEVNULL)
+        except Exception:
+            raise RuntimeError("Bitwarden operation failed") from None
         if proc.returncode != 0:
             err = scrub_ansi(proc.stderr or "")
             if "locked" in err.lower() or "session" in err.lower():
                 _unlock.lock(self.name)
                 raise UnlockRequired(self)
-            raise RuntimeError(f"bw failed: {err[:200]}")
+            raise RuntimeError("Bitwarden operation failed") from None
         return proc.stdout or ""
 
     def list_items(self) -> List[VaultItemMeta]:

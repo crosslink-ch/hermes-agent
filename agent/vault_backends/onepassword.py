@@ -76,10 +76,13 @@ class OnePasswordLoginBackend(LoginBackend):
         cmd = [str(self._op()), "signin", "--raw"]
         if account := str(self.cfg.get("account") or ""):
             cmd += ["--account", account]
-        proc = run_with_stdin_secret(cmd, env=self._env(None), secret=master_password, timeout=_TIMEOUT, label="op")
+        try:
+            proc = run_with_stdin_secret(cmd, env=self._env(None), secret=master_password, timeout=_TIMEOUT, label="op")
+        except Exception:
+            raise RuntimeError("1Password unlock failed") from None
         token = (proc.stdout or "").strip()
         if proc.returncode != 0 or not token:
-            raise RuntimeError(f"1Password unlock failed: {_scrub(proc.stderr or '')[:200] or 'no session token'}")
+            raise RuntimeError("1Password unlock failed; check the secure prompt or sign in first") from None
         if not _unlock.store_session_token(self.name, token, generation):
             raise RuntimeError("1Password was locked while unlocking; try again")
 
@@ -87,14 +90,17 @@ class OnePasswordLoginBackend(LoginBackend):
         token = None if self._service_token else _unlock.get_session_token(self.name)
         if not self._service_token and not token:
             raise UnlockRequired(self)
-        proc = run_cli([str(self._op()), *args], env=self._env(token), timeout=_TIMEOUT, label="op",
-                       timeout_message="op timed out", stdin=subprocess.DEVNULL)
+        try:
+            proc = run_cli([str(self._op()), *args], env=self._env(token), timeout=_TIMEOUT, label="op",
+                           timeout_message="op timed out", stdin=subprocess.DEVNULL)
+        except Exception:
+            raise RuntimeError("1Password operation failed") from None
         if proc.returncode != 0:
             err = _scrub(proc.stderr or "")
             if "session" in err.lower() or "sign in" in err.lower() or "not signed in" in err.lower():
                 _unlock.lock(self.name)
                 raise UnlockRequired(self)
-            raise RuntimeError(f"op failed: {err[:200]}")
+            raise RuntimeError("1Password operation failed") from None
         return proc.stdout or ""
 
     # ── backend contract ───────────────────────────────────────────────────
