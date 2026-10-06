@@ -217,6 +217,14 @@ def _focus_bound_origin(task_id: str, origin: str, kind: str) -> Optional[str]:
 # Handlers
 # ---------------------------------------------------------------------------
 
+def _external_vault_denial(*, handle: str = "", backend: str = "") -> Optional[str]:
+    from agent.vault_backends.unlock import external_access_allowed
+    if (backend in {"bitwarden", "onepassword"} or handle.startswith(("bw:", "op:"))) and not external_access_allowed():
+        return json.dumps({"success": False, "error_type": "external_vault_access_denied",
+                           "error": "External password managers are available only to the bot owner in this invocation."})
+    return None
+
+
 def browser_vault_list() -> str:
     """List login handles + metadata across every enabled backend. Passwords are never included.
 
@@ -228,14 +236,18 @@ def browser_vault_list() -> str:
 
     items, locked, errors = [], [], []
     for backend in enabled_backends():
+        if _external_vault_denial(backend=backend.name):
+            errors.append({"backend": backend.name, "error_type": "external_vault_access_denied",
+                           "error": "External manager access is restricted to the bot owner."})
+            continue
         if backend.needs_unlock and not backend.is_unlocked():
             locked.append({"backend": backend.name, "display_name": backend.display_name,
                            "unlock": "browser_vault_unlock" if can_prompt_here() else "unavailable_in_this_session"})
             continue
         try:
             metas = backend.list_items()
-        except Exception as exc:
-            errors.append({"backend": backend.name, "error": str(exc)[:200]})
+        except Exception:
+            errors.append({"backend": backend.name, "error": "Password manager listing failed."})
             continue
         for meta in metas:
             entry = {"handle": meta.id, "backend": backend.name, "label": meta.label, "kind": meta.kind,
@@ -264,6 +276,8 @@ def browser_vault_unlock(backend_name: str) -> str:
     from agent.vault_backends import enabled_backends
     from agent.vault_backends.unlock import can_prompt_here, get_unlock_prompt_callback
 
+    if denial := _external_vault_denial(backend=backend_name):
+        return denial
     backend = next((b for b in enabled_backends() if b.name == backend_name and b.needs_unlock), None)
     if backend is None:
         return json.dumps({"success": False, "error": f"No unlockable vault backend named {backend_name!r}."})
@@ -274,17 +288,23 @@ def browser_vault_unlock(backend_name: str) -> str:
                            "error": (f"{backend.display_name} is locked and this session cannot prompt for the "
                                      "master password (headless/cron/API). Unlock it from an interactive Hermes "
                                      "session or the Desktop app first.")})
+    from agent.vault_backends.unlock import unlock_attempt
     prompt = get_unlock_prompt_callback()
-    master = prompt(backend.name, backend.display_name) if prompt else ""
-    if not master:
-        return json.dumps({"success": False, "error_type": "unlock_cancelled",
-                           "error": f"The user declined to unlock {backend.display_name}."})
-    try:
-        backend.unlock(master)  # type: ignore[attr-defined]
-    except Exception as exc:
-        return json.dumps({"success": False, "error_type": "unlock_failed", "error": str(exc)[:300]})
-    finally:
-        del master
+    # Fence BEFORE the human-length prompt, not merely before the manager child starts.
+    with unlock_attempt(backend.name):
+        master = ""
+        try:
+            master = prompt(backend.name, backend.display_name) if prompt else ""
+            if not master:
+                return json.dumps({"success": False, "error_type": "unlock_cancelled",
+                                   "error": f"The user declined to unlock {backend.display_name}."})
+            backend.unlock(master)  # type: ignore[attr-defined]
+        except Exception:
+            # A CLI (or prompt transport) exception may contain the master or stderr.
+            return json.dumps({"success": False, "error_type": "unlock_failed",
+                               "error": "Password manager unlock failed. Retry from the secure prompt."})
+        finally:
+            del master
     return json.dumps({"success": True, "backend": backend.name})
 
 
@@ -342,6 +362,8 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
     from agent.vault_backends.unlock import can_prompt_here, get_code_prompt_callback
     from agent.vault_login_classifier import LoginControl, build_fill_js, build_inspection_js, build_otp_fills, classify_otp_controls
 
+    if denial := _external_vault_denial(handle=handle):
+        return denial
     effective_task_id = task_id or "default"
     _focus_bound_origin(effective_task_id, "", "otp")
     origin = _current_page_origin(effective_task_id)
@@ -419,6 +441,8 @@ def browser_vault_fill(handle: str, task_id: Optional[str] = None) -> str:
     from agent.vault_backends import UnlockRequired, backend_for_handle
     from agent.vault_store import ADDRESS_FIELDS, PAYMENT_FIELDS, scrub_secret_from_text
 
+    if denial := _external_vault_denial(handle=handle):
+        return denial
     effective_task_id = task_id or "default"
     backend = backend_for_handle(handle)
     if backend is not None and backend.needs_unlock and not backend.is_unlocked():

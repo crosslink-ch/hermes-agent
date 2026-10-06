@@ -15,6 +15,8 @@ approvals take where nobody can answer.
 
 from __future__ import annotations
 
+import contextvars
+from contextlib import contextmanager
 import threading
 import time
 from typing import Callable, Dict, Optional
@@ -76,15 +78,44 @@ _generation: Dict[tuple[str, str], int] = {}
 # Which gateway session performed the unlock; the token is released when THAT session ends,
 # not when any sibling session in the profile is torn down.
 _owner_session: Dict[tuple[str, str], Optional[str]] = {}
-_current_session_tls = threading.local()
+_current_session = contextvars.ContextVar("vault_owner_session", default=None)
+_external_access = contextvars.ContextVar("vault_external_access", default=None)
+_external_live = contextvars.ContextVar("vault_external_live", default=None)
+
+
+@contextmanager
+def external_access_scope(allowed: bool, *, live=None):
+    """Server-attested authority, inherited by tool workers; never a model argument."""
+    token = _external_access.set(allowed)
+    live_token = _external_live.set(live)
+    try:
+        yield
+    finally:
+        _external_live.reset(live_token)
+        _external_access.reset(token)
+
+
+def external_access_allowed() -> bool:
+    allowed = _external_access.get()
+    if allowed is None:
+        from tools.approval_context import _get_session_platform
+        return _get_session_platform() != "thechat"
+    live = _external_live.get()
+    return bool(allowed and (live is None or live()))
+
+
+def get_current_session_id() -> Optional[str]:
+    return _current_session.get()
 
 
 def set_current_session_id(session_id: Optional[str]) -> None:
-    """Gateway surfaces bind the session running on this thread so an unlock records its owner."""
-    _current_session_tls.sid = session_id
+    """Gateway surfaces bind the session so propagated tool workers retain token ownership."""
+    _current_session.set(session_id)
 
 
 def _live(backend: str, *, touch: bool) -> Optional[str]:
+    if not external_access_allowed():
+        return None
     key = _key(backend)
     with _lock:
         entry = _sessions.get(key)
@@ -92,7 +123,7 @@ def _live(backend: str, *, touch: bool) -> Optional[str]:
             return None
         token, last = entry
         if time.monotonic() - last > _IDLE_TTL_S:
-            del _sessions[key]
+            _forget(key)
             return None
         if touch:
             _sessions[key] = (token, time.monotonic())
@@ -104,20 +135,54 @@ def get_session_token(backend: str) -> Optional[str]:
     return _live(backend, touch=True)
 
 
-def begin_unlock(backend: str) -> int:
-    """Snapshot the lock generation before spawning the manager CLI; pass it to ``store_session_token``."""
+_attempt_generation = contextvars.ContextVar("vault_unlock_attempt", default=None)
+
+
+@contextmanager
+def unlock_attempt(backend: str):
+    """A lock during the surface prompt must fence the later CLI token commit too."""
+    key = _key(backend)
     with _lock:
-        return _generation.get(_key(backend), 0)
+        generation = _generation.setdefault(key, 0)
+        _owner_session.setdefault(key, get_current_session_id())
+    token = _attempt_generation.set((key, generation))
+    try:
+        yield
+    finally:
+        _attempt_generation.reset(token)
+        with _lock:
+            if key not in _sessions:
+                _owner_session.pop(key, None)
+
+
+def unlock_attempt_is_current(backend: str) -> bool:
+    """Let a surface retire a prompt immediately when a native Lock/session release wins."""
+    attempt = _attempt_generation.get()
+    key = _key(backend)
+    with _lock:
+        return attempt is None or (attempt[0] == key and attempt[1] == _generation.get(key, 0))
+
+
+def begin_unlock(backend: str) -> int:
+    """Reuse a pre-prompt fence, or begin a direct native CLI unlock."""
+    key = _key(backend)
+    attempt = _attempt_generation.get()
+    if attempt is not None and attempt[0] == key:
+        return attempt[1]
+    with _lock:
+        return _generation.setdefault(key, 0)
 
 
 def store_session_token(backend: str, token: str, generation: Optional[int] = None) -> bool:
     """Commit an unlock. Returns False (and drops the token) when a Lock happened since ``begin_unlock``."""
+    if not external_access_allowed():
+        return False
     key = _key(backend)
     with _lock:
         if generation is not None and generation != _generation.get(key, 0):
             return False
         _sessions[key] = (token, time.monotonic())
-        _owner_session[key] = getattr(_current_session_tls, "sid", None)
+        _owner_session[key] = get_current_session_id()
         return True
 
 
@@ -135,9 +200,10 @@ def lock(backend: Optional[str] = None) -> None:
 
 
 def release_session(session_id: str) -> None:
-    """A gateway session ended: drop only the tokens that session unlocked."""
+    """Drop only the current profile's tokens owned by this gateway session."""
+    home = _key("")[0]
     with _lock:
-        for key in [k for k, sid in _owner_session.items() if sid == session_id]:
+        for key in [k for k, sid in _owner_session.items() if k[0] == home and sid == session_id]:
             _forget(key)
 
 
@@ -150,7 +216,7 @@ def _forget(key: tuple[str, str]) -> None:
 def lock_all_profiles() -> None:
     """Process shutdown: drop every token."""
     with _lock:
-        for key in list(_sessions):
+        for key in set(_sessions) | set(_generation):
             _forget(key)
 
 

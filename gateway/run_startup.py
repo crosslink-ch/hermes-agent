@@ -81,6 +81,9 @@ class GatewayStartupMixin:
         if queue is None:
             queue = self._startup_restore_queue = []
         queue.append(event)
+        # Admission may return before startup replay runs the actual turn. Adapters must not
+        # report execution completion for that deferred attempt.
+        event._hermes_startup_restore_queued = True
         with suppress(Exception):
             source = event.source
             logger.info(

@@ -66,10 +66,10 @@ def run_with_stdin_secret(argv: Sequence[str], *, env: Dict[str, str], secret: s
         return subprocess.run(  # noqa: S603 — argv list, no shell
             list(argv), env=env, input=secret + "\n", capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"{label} unlock timed out after {timeout:.0f}s") from exc
-    except OSError as exc:
-        raise RuntimeError(f"failed to invoke {label}: {exc}") from exc
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{label} unlock timed out after {timeout:.0f}s") from None
+    except OSError:
+        raise RuntimeError(f"failed to invoke {label}") from None
 
 
 def run_with_secret_env(argv: Sequence[str], *, env: Dict[str, str], secret_env: str, secret: str, timeout: float,
@@ -82,10 +82,10 @@ def run_with_secret_env(argv: Sequence[str], *, env: Dict[str, str], secret_env:
         return subprocess.run(  # noqa: S603 — argv list, no shell
             list(argv), env=child_env, stdin=subprocess.DEVNULL, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"{label} unlock timed out after {timeout:.0f}s") from exc
-    except OSError as exc:
-        raise RuntimeError(f"failed to invoke {label}: {exc}") from exc
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"{label} unlock timed out after {timeout:.0f}s") from None
+    except OSError:
+        raise RuntimeError(f"failed to invoke {label}") from None
 
 
 def _cfg() -> Dict:

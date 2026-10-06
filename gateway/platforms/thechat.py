@@ -222,6 +222,9 @@ class TheChatAdapter(BasePlatformAdapter):
         self._interaction_requests: Dict[str, Dict[str, Any]] = {}
         # Typed /approve remains FIFO and may resolve all pending requests.
         self._approval_request_ids: Dict[str, list[str]] = {}
+        from gateway.platforms.thechat_vault import VaultUnlockBroker
+        self._vault_unlock = VaultUnlockBroker()
+        self._owner_user_id = ""
 
     def public_http_routes(self) -> list[dict]:
         if not self.webhook_url:
@@ -248,6 +251,7 @@ class TheChatAdapter(BasePlatformAdapter):
         try:
             response = await self._client.get("/hermes-platform/health")
             response.raise_for_status()
+            self._capture_vault_owner(response.json())
         except Exception:
             await self._client.aclose()
             self._client = None
@@ -273,6 +277,10 @@ class TheChatAdapter(BasePlatformAdapter):
         try:
             response = await self._client.get("/hermes-platform/health")
             response.raise_for_status()
+            self._capture_vault_owner(response.json())
+            from gateway.platforms.thechat_vault import VaultUnlockBroker
+            if self._vault_unlock.closed:
+                self._vault_unlock = VaultUnlockBroker()
             if self.webhook_url:
                 await self._start_webhook_server()
                 await self._register_webhook()
@@ -300,8 +308,20 @@ class TheChatAdapter(BasePlatformAdapter):
             )
         return True
 
+    def _capture_vault_owner(self, health: Any) -> None:
+        # No fallback to the bot's user id, sender, config or model-controlled input.
+        from gateway.platforms.thechat_vault import VaultUnlockError, _token
+        self._owner_user_id = ""
+        try:
+            if isinstance(health, dict):
+                self._owner_user_id = _token(health.get("ownerUserId"), 255)
+        except VaultUnlockError:
+            pass  # Older workers may omit this field; external vault access stays denied.
+
     async def disconnect(self) -> None:
         self._running = False
+        self._vault_unlock.close()
+        self._owner_user_id = ""
         if self._webhook_recovery_task:
             self._webhook_recovery_task.cancel()
             try:
@@ -1983,6 +2003,8 @@ class TheChatAdapter(BasePlatformAdapter):
             "chat_type": item["chatType"],
             "thread_id": thread_id,
         }
+        sender = item.get("sender")
+        context["requester_user_id"] = sender.get("id") if isinstance(sender, dict) else None
         if isinstance(session_intent, dict):
             context["sessionIntent"] = session_intent
         return context
@@ -2016,9 +2038,18 @@ class TheChatAdapter(BasePlatformAdapter):
     async def on_processing_complete(
         self, event: MessageEvent, outcome: ProcessingOutcome
     ) -> None:
+        if (
+            outcome == ProcessingOutcome.SUCCESS
+            and getattr(event, "_hermes_startup_restore_queued", False)
+            and not getattr(event, "_hermes_startup_restore_replay", False)
+        ):
+            # Startup only admitted the message. Keep its invocation/prompt routing until
+            # the replayed turn finishes; a silent completion here rejects later unlock cards.
+            return
         context = self._event_contexts.pop(str(event.message_id or ""), None)
         if not context:
             return
+        self._vault_unlock.cancel_invocation(context["invocation_id"])
         context_key = self._context_key(event.source.chat_id, event.source.thread_id)
         active_context = self._contexts.get(context_key)
         if active_context is context:
@@ -2692,8 +2723,19 @@ class TheChatAdapter(BasePlatformAdapter):
             return web.json_response({"error": "Invalid JSON"}, status=400)
         if not self._is_authorized_webhook_request(request.headers, body):
             return web.json_response({"error": "Unauthorized"}, status=401)
+        # Dedicated secret-bearing interaction lane: verify signature FIRST, then
+        # dispatch in memory BEFORE the durable message/approval inbox can see it.
+        from gateway.platforms.thechat_vault import VaultUnlockError
         try:
             payload = json.loads(body)
+            if isinstance(payload, dict) and payload.get("type") == "thechat.hermes_platform.vault_unlock":
+                try:
+                    duplicate = self._vault_unlock.resolve(payload, owner_user_id=self._owner_user_id)
+                    return web.json_response({"ok": True, "duplicate": duplicate})
+                except VaultUnlockError as exc:
+                    return web.json_response({"error": "Invalid or stale vault unlock interaction"}, status=exc.status)
+                except Exception:
+                    return web.json_response({"error": "Vault unlock interaction failed"}, status=409)
             if (
                 isinstance(payload, dict)
                 and payload.get("type")
