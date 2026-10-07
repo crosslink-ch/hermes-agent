@@ -34,14 +34,14 @@ def vault_turn_scope(turn):
     context = adapter._event_contexts.get(str(ctx.source.message_id or "")) if isinstance(adapter, TheChatAdapter) else None
     context = dict(context) if context else None
     owner = adapter._owner_user_id if isinstance(adapter, TheChatAdapter) else ""
-    allowed = bool(owner and context and ctx.source.user_id == owner and context.get("requester_user_id") == owner
+    allowed = bool(context and ctx.source.user_id and context.get("requester_user_id") == ctx.source.user_id
                    and context["conversation_id"] == ctx.source.chat_id
                    and context.get("thread_id") == ctx.source.thread_id)
     active = threading.Event()
     active.set()
 
     def live():
-        return bool(active.is_set() and allowed and adapter._owner_user_id == owner
+        return bool(active.is_set() and allowed
                     and not adapter._vault_unlock.closed and adapter._client is not None
                     and ctx._run_still_current() and not turn._agent_interrupted()
                     and str(get_hermes_home()) == home)
@@ -51,8 +51,7 @@ def vault_turn_scope(turn):
     def prompt(backend, _display):
         if backend != "bitwarden" or not live():
             return ""
-        record = adapter._vault_unlock.create(context=context, owner_user_id=owner,
-                                              profile_id=profile_id, session_key=ctx.session_key)
+        record = adapter._vault_unlock.create(context=context, profile_id=profile_id, session_key=ctx.session_key)
         records.append(record)
         future = None
         try:
@@ -92,7 +91,7 @@ def vault_turn_scope(turn):
             resolved = _publish(turn, adapter, context, {
                 "type": "vault.unlock.resolved", "status": "completed", "label": "Bitwarden unlock prompt closed",
                 "preview": "Secure unlock prompt closed.", "payload": {
-                    "version": 1, "requestId": record.payload["requestId"], "sessionKey": ctx.session_key,
+                    "version": 2, "requestId": record.payload["requestId"], "sessionKey": ctx.session_key,
                     "outcome": record.outcome}}) if adapter._client is not None else None
             if resolved is not None:
                 try:
@@ -107,7 +106,9 @@ def vault_turn_scope(turn):
     unlock.set_unlock_prompt_callback(prompt if allowed and adapter.webhook_url else None)
     unlock.set_current_session_id(ctx.session_id)
     try:
-        with unlock.external_access_scope(allowed, live=live):
+        with unlock.external_access_scope(
+                lambda: bool(owner and allowed and ctx.source.user_id == owner and adapter._owner_user_id == owner),
+                live=live, bitwarden_allowed=allowed):
             yield
     finally:
         active.clear()

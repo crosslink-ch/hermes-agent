@@ -75,32 +75,43 @@ def _key(backend: str) -> tuple[str, str]:
 # not commit its token afterwards (a slow `bw unlock` child would otherwise silently undo an
 # acknowledged Lock).
 _generation: Dict[tuple[str, str], int] = {}
-# Which gateway session performed the unlock; the token is released when THAT session ends,
-# not when any sibling session in the profile is torn down.
+# Session-owned CLI/Desktop tokens; successful native shared Bitwarden tokens have no owner.
 _owner_session: Dict[tuple[str, str], Optional[str]] = {}
+_pending_attempts: Dict[threading.Event, tuple[tuple[str, str], Optional[str]]] = {}
 _current_session = contextvars.ContextVar("vault_owner_session", default=None)
 _external_access = contextvars.ContextVar("vault_external_access", default=None)
 _external_live = contextvars.ContextVar("vault_external_live", default=None)
+_bitwarden_access = contextvars.ContextVar("vault_bitwarden_access", default=None)
 
 
 @contextmanager
-def external_access_scope(allowed: bool, *, live=None):
-    """Server-attested authority, inherited by tool workers; never a model argument."""
+def external_access_scope(allowed: bool | Callable[[], bool], *, live=None, bitwarden_allowed: Optional[bool] = None):
+    """Server-attested authority; an explicit native Bitwarden grant is profile-shared.
+
+    CLI/Desktop omit the grant and keep their session-owned token lifetime.
+    This context is inherited by tool workers, never supplied by model arguments.
+    """
     token = _external_access.set(allowed)
     live_token = _external_live.set(live)
+    bitwarden_token = _bitwarden_access.set(bitwarden_allowed)
     try:
         yield
     finally:
+        _bitwarden_access.reset(bitwarden_token)
         _external_live.reset(live_token)
         _external_access.reset(token)
 
 
-def external_access_allowed() -> bool:
+def external_access_allowed(backend: str = "") -> bool:
     allowed = _external_access.get()
+    if backend == "bitwarden" and _bitwarden_access.get() is not None:
+        allowed = _bitwarden_access.get()
     if allowed is None:
         from tools.approval_context import _get_session_platform
         return _get_session_platform() != "thechat"
     live = _external_live.get()
+    if callable(allowed):
+        allowed = allowed()
     return bool(allowed and (live is None or live()))
 
 
@@ -114,7 +125,7 @@ def set_current_session_id(session_id: Optional[str]) -> None:
 
 
 def _live(backend: str, *, touch: bool) -> Optional[str]:
-    if not external_access_allowed():
+    if not external_access_allowed(backend):
         return None
     key = _key(backend)
     with _lock:
@@ -142,17 +153,17 @@ _attempt_generation = contextvars.ContextVar("vault_unlock_attempt", default=Non
 def unlock_attempt(backend: str):
     """A lock during the surface prompt must fence the later CLI token commit too."""
     key = _key(backend)
+    cancelled = threading.Event()
     with _lock:
         generation = _generation.setdefault(key, 0)
-        _owner_session.setdefault(key, get_current_session_id())
-    token = _attempt_generation.set((key, generation))
+        _pending_attempts[cancelled] = (key, get_current_session_id())
+    token = _attempt_generation.set((key, generation, cancelled))
     try:
         yield
     finally:
         _attempt_generation.reset(token)
         with _lock:
-            if key not in _sessions:
-                _owner_session.pop(key, None)
+            _pending_attempts.pop(cancelled, None)
 
 
 def unlock_attempt_is_current(backend: str) -> bool:
@@ -160,7 +171,8 @@ def unlock_attempt_is_current(backend: str) -> bool:
     attempt = _attempt_generation.get()
     key = _key(backend)
     with _lock:
-        return attempt is None or (attempt[0] == key and attempt[1] == _generation.get(key, 0))
+        return attempt is None or (attempt[0] == key and attempt[1] == _generation.get(key, 0)
+                                   and not attempt[2].is_set())
 
 
 def begin_unlock(backend: str) -> int:
@@ -175,14 +187,20 @@ def begin_unlock(backend: str) -> int:
 
 def store_session_token(backend: str, token: str, generation: Optional[int] = None) -> bool:
     """Commit an unlock. Returns False (and drops the token) when a Lock happened since ``begin_unlock``."""
-    if not external_access_allowed():
+    if not external_access_allowed(backend):
         return False
     key = _key(backend)
     with _lock:
+        attempt = _attempt_generation.get()
+        if attempt is not None and attempt[0] == key and attempt[2].is_set():
+            return False
         if generation is not None and generation != _generation.get(key, 0):
             return False
         _sessions[key] = (token, time.monotonic())
-        _owner_session[key] = get_current_session_id()
+        # Native TheChat Bitwarden is shared by the profile after success; CLI/Desktop and
+        # other managers retain their existing initiating-session lifetime.
+        shared = backend == "bitwarden" and _bitwarden_access.get() is True
+        _owner_session[key] = None if shared else get_current_session_id()
         return True
 
 
@@ -200,9 +218,12 @@ def lock(backend: Optional[str] = None) -> None:
 
 
 def release_session(session_id: str) -> None:
-    """Drop only the current profile's tokens owned by this gateway session."""
+    """Fence this session's pending work; retain successful profile-shared tokens."""
     home = _key("")[0]
     with _lock:
+        for cancelled, (key, sid) in _pending_attempts.items():
+            if key[0] == home and sid == session_id:
+                cancelled.set()
         for key in [k for k, sid in _owner_session.items() if k[0] == home and sid == session_id]:
             _forget(key)
 

@@ -26,7 +26,7 @@ def test_backend_exceptions_never_include_cli_secrets(monkeypatch, operation):
     unlock.lock("bitwarden")
 
 
-def test_nonowner_cannot_use_already_unlocked_external_manager(monkeypatch):
+def test_unattested_invocation_cannot_use_already_unlocked_external_manager(monkeypatch):
     from tools import browser_vault_tool as tool
     from agent.vault_store import VaultItemMeta
     backend = BitwardenLoginBackend({"binary_path": "/fixture/bw"})
@@ -121,4 +121,51 @@ def test_expired_token_does_not_keep_previous_session_as_prompt_owner(monkeypatc
             assert not unlock.unlock_attempt_is_current("bitwarden")
     finally:
         unlock.set_current_session_id(None)
+        unlock.lock("bitwarden")
+
+
+@pytest.mark.parametrize("released", ["session-A", "session-B"])
+@pytest.mark.parametrize("shared_token", [False, True])
+def test_release_fences_only_its_pending_unlock_and_preserves_shared_token(released, shared_token):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
+    unlock.lock("bitwarden")
+    if shared_token:
+        with unlock.external_access_scope(False, bitwarden_allowed=True):
+            assert unlock.store_session_token("bitwarden", "existing-shared-token")
+    ready = {sid: threading.Event() for sid in ("session-A", "session-B")}
+    finish = threading.Event()
+
+    def attempt(sid):
+        unlock.set_current_session_id(sid)
+        try:
+            with unlock.external_access_scope(False, bitwarden_allowed=True), unlock.unlock_attempt("bitwarden"):
+                generation = unlock.begin_unlock("bitwarden")
+                ready[sid].set()
+                assert finish.wait(5)
+                current = unlock.unlock_attempt_is_current("bitwarden")
+                committed = unlock.store_session_token("bitwarden", "replacement-token", generation)
+                return current, committed
+        finally:
+            unlock.set_current_session_id(None)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            tasks = {sid: pool.submit(attempt, sid) for sid in ready}
+            try:
+                assert all(event.wait(5) for event in ready.values())
+                unlock.release_session(released)
+                if shared_token:
+                    assert unlock.get_session_token("bitwarden") == "existing-shared-token"
+            finally:
+                finish.set()
+            results = {sid: task.result(timeout=5) for sid, task in tasks.items()}
+        assert results[released] == (False, False)
+        other = "session-B" if released == "session-A" else "session-A"
+        assert results[other] == (True, True)
+        unlock.release_session(other)
+        assert unlock.get_session_token("bitwarden") == "replacement-token"
+    finally:
+        finish.set()
         unlock.lock("bitwarden")

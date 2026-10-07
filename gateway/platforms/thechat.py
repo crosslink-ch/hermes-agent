@@ -316,7 +316,7 @@ class TheChatAdapter(BasePlatformAdapter):
             if isinstance(health, dict):
                 self._owner_user_id = _token(health.get("ownerUserId"), 255)
         except VaultUnlockError:
-            pass  # Older workers may omit this field; external vault access stays denied.
+            pass  # Older workers may omit this field; TheChat 1Password access stays denied.
 
     async def disconnect(self) -> None:
         self._running = False
@@ -2730,7 +2730,7 @@ class TheChatAdapter(BasePlatformAdapter):
             payload = json.loads(body)
             if isinstance(payload, dict) and payload.get("type") == "thechat.hermes_platform.vault_unlock":
                 try:
-                    duplicate = self._vault_unlock.resolve(payload, owner_user_id=self._owner_user_id)
+                    duplicate = self._vault_unlock.resolve(payload)
                     return web.json_response({"ok": True, "duplicate": duplicate})
                 except VaultUnlockError as exc:
                     return web.json_response({"error": "Invalid or stale vault unlock interaction"}, status=exc.status)
