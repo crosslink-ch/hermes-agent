@@ -20,7 +20,7 @@ ALGORITHM = "RSA-OAEP-3072-SHA256+A256GCM"
 REQUEST_LIFETIME_S = 120
 MAX_REQUESTS = 512
 PREVIEW = "Enter your Bitwarden master password in the secure unlock dialog. It never enters the conversation."
-_REQUEST_FIELDS = {"version", "requestId", "sessionKey", "profileId", "backend", "ownerUserId",
+_REQUEST_FIELDS = {"version", "requestId", "sessionKey", "profileId", "backend",
                    "requesterUserId", "nonce", "expiresAt", "algorithm"}
 _RELAY_FIELDS = _REQUEST_FIELDS | {"id", "requestType", "invocationId", "conversationId", "threadId", "actorUserId", "action"}
 _CIPHER_FIELDS = {"wrappedKeyB64", "ivB64", "ciphertextB64"}
@@ -95,27 +95,25 @@ class VaultUnlockBroker:
         self._lock = threading.RLock()
         self.closed = False
 
-    def create(self, *, context, owner_user_id, profile_id, session_key) -> PendingUnlock:
+    def create(self, *, context, profile_id, session_key) -> PendingUnlock:
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
-        _token(owner_user_id, 255)
+        requester = _token(context.get("requester_user_id"), 255)
         _token(profile_id, 255)
         _token(session_key)
-        if context.get("requester_user_id") != owner_user_id:
-            raise VaultUnlockError()
         for key in ("invocation_id", "conversation_id"):
             _uuid(context.get(key))
         _token(context.get("bot_id"), 255)
         if context.get("thread_id") is not None:
             _token(context["thread_id"], 512)
         private = rsa.generate_private_key(public_exponent=65537, key_size=3072)
-        payload = {"version": 1, "requestId": str(uuid.uuid4()), "sessionKey": session_key,
-                   "profileId": profile_id, "backend": "bitwarden", "ownerUserId": owner_user_id,
-                   "requesterUserId": owner_user_id, "nonce": secrets.token_urlsafe(32),
+        payload = {"version": 2, "requestId": str(uuid.uuid4()), "sessionKey": session_key,
+                   "profileId": profile_id, "backend": "bitwarden",
+                   "requesterUserId": requester, "nonce": secrets.token_urlsafe(32),
                    "expiresAt": int(time.time() * 1000) + REQUEST_LIFETIME_S * 1000, "algorithm": ALGORITHM,
                    "publicKeySpkiB64": base64.b64encode(private.public_key().public_bytes(
                        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)).decode()}
-        aad = json.dumps([1, context["bot_id"], owner_user_id, owner_user_id, profile_id, session_key,
+        aad = json.dumps([2, context["bot_id"], requester, profile_id, session_key,
                           context["invocation_id"], context["conversation_id"], context.get("thread_id"),
                           payload["requestId"], "bitwarden", payload["nonce"], payload["expiresAt"]],
                          ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -137,7 +135,7 @@ class VaultUnlockBroker:
             if expiry <= now:
                 del self.tombstones[rid]
 
-    def resolve(self, payload, *, owner_user_id) -> bool:
+    def resolve(self, payload) -> bool:
         if (not isinstance(payload, dict) or set(payload) != {"type", "interaction"}
                 or payload["type"] != "thechat.hermes_platform.vault_unlock"):
             raise VaultUnlockError(status=400)
@@ -148,9 +146,9 @@ class VaultUnlockBroker:
         if (not isinstance(action, str) or action not in {"submit", "cancel"}
                 or set(item) != (_RELAY_FIELDS | (_CIPHER_FIELDS if action == "submit" else set()))):
             raise VaultUnlockError(status=400)
-        if type(item["version"]) is not int or item["version"] != 1 or type(item["expiresAt"]) is not int:
+        if type(item["version"]) is not int or item["version"] != 2 or type(item["expiresAt"]) is not int:
             raise VaultUnlockError(status=400)
-        for key in ("id", "requestId", "sessionKey", "profileId", "ownerUserId", "requesterUserId", "actorUserId", "nonce"):
+        for key in ("id", "requestId", "sessionKey", "profileId", "requesterUserId", "actorUserId", "nonce"):
             _token(item[key])
         for key in ("requestId", "invocationId", "conversationId"):
             _uuid(item[key])
@@ -159,7 +157,7 @@ class VaultUnlockBroker:
         if (item["backend"] != "bitwarden" or item["algorithm"] != ALGORITHM
                 or item["requestType"] != "vault.unlock.request"):
             raise VaultUnlockError(status=400)
-        if not owner_user_id or any(item[k] != owner_user_id for k in ("ownerUserId", "requesterUserId", "actorUserId")):
+        if item["actorUserId"] != item["requesterUserId"]:
             raise VaultUnlockError()
         cipher = tuple(_b64(item[k], lo, hi) for k, lo, hi in (
             ("wrappedKeyB64", 384, 384), ("ivB64", 12, 12), ("ciphertextB64", 17, 4112))) if action == "submit" else None

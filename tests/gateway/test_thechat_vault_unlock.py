@@ -30,7 +30,7 @@ def _relay(record, **overrides):
     body = {k: v for k, v in p.items() if k != "publicKeySpkiB64"}
     body.update(id="progress-event", requestType="vault.unlock.request", invocationId=record.context["invocation_id"],
                 conversationId=record.context["conversation_id"], threadId=record.context["thread_id"],
-                actorUserId="owner", action="submit", **_encrypt(record))
+                actorUserId=record.context["requester_user_id"], action="submit", **_encrypt(record))
     body.update(overrides)
     return {"type": "thechat.hermes_platform.vault_unlock", "interaction": body}
 
@@ -39,22 +39,24 @@ def test_hybrid_unlock_delivers_exact_utf8_only_to_memory_waiter():
     from gateway.platforms import thechat_vault
     broker = thechat_vault.VaultUnlockBroker()
     context = _context()
-    record = broker.create(context=context, owner_user_id="owner", profile_id="opaque-profile", session_key="session-key")
+    context["requester_user_id"] = "authorized-requester"
+    record = broker.create(context=context, profile_id="opaque-profile", session_key="session-key")
     p = record.payload
-    assert set(p) == {"version", "requestId", "sessionKey", "profileId", "backend", "ownerUserId", "requesterUserId",
+    assert set(p) == {"version", "requestId", "sessionKey", "profileId", "backend", "requesterUserId",
                       "nonce", "expiresAt", "algorithm", "publicKeySpkiB64"}
+    assert p["version"] == 2 and p["requesterUserId"] == context["requester_user_id"]
     assert p["backend"] == "bitwarden"
     assert p["algorithm"] == "RSA-OAEP-3072-SHA256+A256GCM"
     assert len(base64.urlsafe_b64decode(p["nonce"] + "=")) == 32
-    assert json.loads(record.aad) == [1, "bot-id", "owner", "owner", "opaque-profile", "session-key",
+    assert json.loads(record.aad) == [2, "bot-id", "authorized-requester", "opaque-profile", "session-key",
                                     context["invocation_id"], context["conversation_id"], None, p["requestId"],
                                     "bitwarden", p["nonce"], p["expiresAt"]]
     payload = _relay(record)
-    assert broker.resolve(payload, owner_user_id="owner") is False
+    assert broker.resolve(payload) is False
     assert record.take_response() == "  synthetic é master\n"
     assert record.take_response() == ""
     assert record.outcome == "submitted"
-    assert broker.resolve(payload, owner_user_id="owner") is True
+    assert broker.resolve(payload) is True
     assert p["requestId"] not in broker.pending
     assert "synthetic" not in repr(record) + repr(broker.tombstones)
 
@@ -130,7 +132,8 @@ def _turn(adapter, context, agent, *, sender="owner"):
 
 @pytest.mark.asyncio
 @pytest.mark.linux_only
-async def test_actual_executor_scope_native_tool_signed_relay_never_uses_inbox(tmp_path, monkeypatch):
+@pytest.mark.parametrize("owner_metadata", ["owner", ""])
+async def test_actual_executor_scope_native_tool_signed_relay_never_uses_inbox(tmp_path, monkeypatch, owner_metadata):
     from agent.vault_backends import unlock
     from agent.vault_backends.bitwarden import BitwardenLoginBackend
     from tools import browser_vault_tool  # registers the native tools
@@ -138,10 +141,28 @@ async def test_actual_executor_scope_native_tool_signed_relay_never_uses_inbox(t
     from tools.thread_context import propagate_context_to_thread
     from concurrent.futures import ThreadPoolExecutor
     adapter = _adapter()
-    adapter._owner_user_id = "owner"
+    adapter._owner_user_id = owner_metadata
     context = _context()
+    context["requester_user_id"] = "authorized-requester"
     executable = tmp_path / "bw"
-    executable.write_text("#!/usr/bin/env python3\nimport os,sys\nassert os.environ['HERMES_BW_MASTER'] == '  synthetic é master\\n'\nprint('synthetic-token')\n")
+    executable.write_text("""#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+if args[:2] == ['unlock', '--raw']:
+    assert os.environ['HERMES_BW_MASTER'] == '  synthetic é master\\n'
+    print('synthetic-token')
+else:
+    assert os.environ['BW_SESSION'] == 'synthetic-token'
+    if args[:2] == ['list', 'items']:
+        print(json.dumps([{'id': 'item', 'type': 1, 'name': 'Example', 'login': {
+            'username': 'synthetic@example.test', 'uris': [{'uri': 'https://example.test'}]}}]))
+    elif args[:2] == ['get', 'password']:
+        print('synthetic-login-password')
+    elif args[:2] == ['get', 'totp']:
+        print('123456')
+    else:
+        sys.exit(2)
+""", encoding="utf-8")
     executable.chmod(0o700)
     backend = BitwardenLoginBackend({"binary_path": str(executable)})
     monkeypatch.setattr("agent.vault_backends.enabled_backends", lambda: [backend])
@@ -154,7 +175,7 @@ async def test_actual_executor_scope_native_tool_signed_relay_never_uses_inbox(t
             with ThreadPoolExecutor(max_workers=1) as pool:
                 return json.loads(pool.submit(propagate_context_to_thread(lambda: registry.dispatch("browser_vault_unlock", {"backend": "bitwarden"}))).result())
     agent = Agent()
-    turn = _turn(adapter, context, agent)
+    turn = _turn(adapter, context, agent, sender=context["requester_user_id"])
     unlock.lock("bitwarden")
     old_prompt = lambda *_: "old callback must not run"
     def invoke():
@@ -169,8 +190,12 @@ async def test_actual_executor_scope_native_tool_signed_relay_never_uses_inbox(t
             unlock.set_unlock_prompt_callback(None)
             unlock.set_current_session_id(None)
     task = asyncio.create_task(asyncio.to_thread(invoke))
+    request_task = asyncio.create_task(adapter._client.request_ready.wait())
     try:
-        await asyncio.wait_for(adapter._client.request_ready.wait(), 3)
+        done, _ = await asyncio.wait((task, request_task), timeout=3, return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            assert task.result().get("success"), task.result()
+        assert request_task in done, "native requester never received the secure prompt"
         record = next(iter(adapter._vault_unlock.pending.values()))
         relay = _relay(record)
         response = await adapter._handle_webhook(_signed(adapter, relay))
@@ -188,15 +213,82 @@ async def test_actual_executor_scope_native_tool_signed_relay_never_uses_inbox(t
         unlock.release_session("unrelated-session")
         assert unlock.is_unlocked("bitwarden")
         unlock.release_session("hermes-session")
-        assert not unlock.is_unlocked("bitwarden")
+        assert unlock.is_unlocked("bitwarden"), "successful shared unlock must survive requester session release"
         assert observed and observed[0] is not old_prompt
         events = [p for _, p in adapter._client.posts if p.get("type", "").startswith("vault.unlock.")]
         assert [p["type"] for p in events] == ["vault.unlock.request", "vault.unlock.resolved"]
         assert events[0]["label"] == "Unlock Bitwarden" and events[0]["status"] == "waiting"
-        assert events[1]["payload"] == {"version": 1, "requestId": record.payload["requestId"],
+        assert events[1]["payload"] == {"version": 2, "requestId": record.payload["requestId"],
                                        "sessionKey": "session-key", "outcome": "submitted"}
         assert "synthetic é master" not in json.dumps(events) + json.dumps(result)
+
+        # Another admitted human, in a fresh invocation, uses the real manager child path
+        # after the initiating session is gone. Browser transport is the sole fake boundary.
+        from agent.vault_backends.onepassword import OnePasswordLoginBackend
+        from agent.secret_scope import is_multiplex_active, set_multiplex_active
+        from gateway.run import _profile_runtime_scope
+        other_context = _context()
+        other_context["requester_user_id"] = "authorized-other"
+        onepassword = OnePasswordLoginBackend()
+        onepassword._service_token = "synthetic-service-token"
+        monkeypatch.setattr("agent.vault_backends.enabled_backends", lambda: [backend, onepassword])
+        monkeypatch.setattr("agent.vault_backends.base.enabled_backends", lambda: [backend, onepassword])
+        monkeypatch.setattr(onepassword, "list_items", lambda: pytest.fail("shared Bitwarden widened 1Password"))
+        controls, fills = [], []
+        monkeypatch.setattr(browser_vault_tool, "_focus_bound_origin", lambda *_: "https://example.test")
+        monkeypatch.setattr(browser_vault_tool, "_current_page_origin", lambda *_: "https://example.test")
+        monkeypatch.setattr(browser_vault_tool, "_eval_js", lambda *_: {
+            "success": True, "result": json.dumps(controls)})
+        monkeypatch.setattr(browser_vault_tool, "_eval_js_secret", lambda _task, script: fills.append(script) or {
+            "success": True, "result": json.dumps({"filled": 1})})
+        class OtherAgent:
+            is_interrupted = False
+            def run_conversation(self, *_a, **_kw):
+                # Cached ownership may disappear/change without restricting Bitwarden.
+                adapter._owner_user_id = "changed-owner"
+                listed = json.loads(registry.dispatch("browser_vault_list", {}))
+                assert [item["handle"] for item in listed["items"]] == ["bw:item"]
+                assert listed["errors"][0]["backend"] == "onepassword"
+                assert json.loads(registry.dispatch("browser_vault_unlock", {"backend": "bitwarden"}))["already_unlocked"]
+                for name, args in (("browser_vault_unlock", {"backend": "onepassword"}),
+                                   ("browser_vault_fill", {"handle": "op:item"}),
+                                   ("browser_vault_enter_code", {"handle": "op:item"})):
+                    assert json.loads(registry.dispatch(name, args))["error_type"] == "external_vault_access_denied"
+                controls[:] = [{"tag": "input", "type": "password", "name": "password", "id": "pw",
+                                "autocomplete": "current-password", "visible": True}]
+                filled = json.loads(registry.dispatch("browser_vault_fill", {"handle": "bw:item"}))
+                assert filled["success"] and filled["backend"] == "bitwarden"
+                controls[:] = [{"tag": "input", "type": "text", "name": "otp", "id": "otp",
+                                "autocomplete": "one-time-code", "visible": True}]
+                coded = json.loads(registry.dispatch("browser_vault_enter_code", {"handle": "bw:item"}))
+                assert coded["success"] and coded["source"] == "bitwarden"
+                assert "synthetic-login-password" not in json.dumps([listed, filled, coded])
+                assert "123456" not in json.dumps(coded)
+                return {"shared": True}
+        other_agent = OtherAgent()
+        other_turn = _turn(adapter, other_context, other_agent, sender="authorized-other")
+        home = str(__import__("hermes_constants").get_hermes_home())
+        was_multiplex = is_multiplex_active()
+        set_multiplex_active(True)
+        try:
+            with _profile_runtime_scope(home):
+                assert await asyncio.to_thread(other_turn._run_conversation_with_approval,
+                                               other_agent, [], None, None, None) == {"shared": True}
+                assert len(fills) == 2 and "synthetic-login-password" in fills[0] and "123456" in fills[1]
+            with _profile_runtime_scope(str(tmp_path / "other-profile")):
+                assert not unlock.is_unlocked("bitwarden")
+                unlock.release_session("hermes-session")
+                unlock.lock("bitwarden")
+            with _profile_runtime_scope(home):
+                assert unlock.is_unlocked("bitwarden")
+                unlock.lock("bitwarden")
+                assert not unlock.is_unlocked("bitwarden")
+        finally:
+            set_multiplex_active(was_multiplex)
+        assert len(adapter._client.posts) == 2, "shared use must not create another prompt"
     finally:
+        request_task.cancel()
+        await asyncio.gather(request_task, return_exceptions=True)
         if not task.done():
             agent.is_interrupted = True
             await asyncio.wait_for(task, 5)
@@ -210,7 +302,7 @@ async def test_actual_executor_scope_native_tool_signed_relay_never_uses_inbox(t
     {"invocationId": "11111111-1111-4111-8111-111111111111"},
     {"conversationId": "11111111-1111-4111-8111-111111111111"}, {"threadId": "other-thread"},
     {"requestId": "11111111-1111-4111-8111-111111111111"}, {"nonce": "other-nonce"},
-    {"expiresAt": 1}, {"expiresAt": True}, {"version": True}, {"version": 2},
+    {"expiresAt": 1}, {"expiresAt": True}, {"version": True}, {"version": 1},
     {"algorithm": "RSA-OAEP"}, {"backend": "onepassword"}, {"requestType": "clarify.request"},
     {"password": "synthetic forbidden"}, {"response": "synthetic forbidden"}, {"privateKey": "synthetic forbidden"},
     {"wrappedKeyB64": base64.b64encode(b"x" * 383).decode()},
@@ -221,9 +313,9 @@ async def test_actual_executor_scope_native_tool_signed_relay_never_uses_inbox(t
 def test_relay_rejects_unknown_or_conflicting_context_and_wrong_lengths(mutation):
     from gateway.platforms.thechat_vault import VaultUnlockBroker, VaultUnlockError
     broker = VaultUnlockBroker()
-    record = broker.create(context=_context(), owner_user_id="owner", profile_id="profile-A", session_key="session-A")
+    record = broker.create(context=_context(), profile_id="profile-A", session_key="session-A")
     with pytest.raises(VaultUnlockError) as failure:
-        broker.resolve(_relay(record, **mutation), owner_user_id="owner")
+        broker.resolve(_relay(record, **mutation))
     assert str(failure.value) == "Invalid or stale vault unlock interaction"
     assert not record.event.is_set() and record.take_response() == ""
     assert record.payload["requestId"] in broker.pending
@@ -235,7 +327,7 @@ def test_relay_rejects_unknown_or_conflicting_context_and_wrong_lengths(mutation
 def test_crypto_tampering_cannot_deliver_password(attack):
     from gateway.platforms.thechat_vault import VaultUnlockBroker, VaultUnlockError
     broker = VaultUnlockBroker()
-    record = broker.create(context=_context(), owner_user_id="owner", profile_id="A", session_key="A")
+    record = broker.create(context=_context(), profile_id="A", session_key="A")
     relay = _relay(record)
     if attack == "oaep-label":
         relay["interaction"].update(_encrypt(record, aad=b"different-bound-context"))
@@ -252,7 +344,7 @@ def test_crypto_tampering_cannot_deliver_password(attack):
         relay["interaction"].update(wrappedKeyB64=base64.b64encode(wrapped).decode(), ivB64=base64.b64encode(iv).decode(),
                                      ciphertextB64=base64.b64encode(ciphertext).decode())
     with pytest.raises(VaultUnlockError):
-        broker.resolve(relay, owner_user_id="owner")
+        broker.resolve(relay)
     assert record.take_response() == "" and not record.event.is_set()
     broker.close()
 
@@ -260,35 +352,35 @@ def test_crypto_tampering_cannot_deliver_password(attack):
 def test_cancel_expiry_duplicates_and_tombstones_are_bounded(monkeypatch):
     from gateway.platforms import thechat_vault as vault
     broker = vault.VaultUnlockBroker()
-    record = broker.create(context=_context(), owner_user_id="owner", profile_id="A", session_key="A")
+    record = broker.create(context=_context(), profile_id="A", session_key="A")
     relay = _relay(record, action="cancel")
     for field in ("wrappedKeyB64", "ivB64", "ciphertextB64"):
         del relay["interaction"][field]
-    assert broker.resolve(relay, owner_user_id="owner") is False
+    assert broker.resolve(relay) is False
     assert record.outcome == "cancelled" and record.take_response() == ""
-    assert broker.resolve(relay, owner_user_id="owner") is True
+    assert broker.resolve(relay) is True
     changed = json.loads(json.dumps(relay))
     changed["interaction"]["id"] = "another-event"
     with pytest.raises(vault.VaultUnlockError):
-        broker.resolve(changed, owner_user_id="owner")
-    record2 = broker.create(context=_context(), owner_user_id="owner", profile_id="B", session_key="B")
+        broker.resolve(changed)
+    record2 = broker.create(context=_context(), profile_id="B", session_key="B")
     payload = _relay(record2)
     record2.deadline = time.monotonic() - 1
     with pytest.raises(vault.VaultUnlockError):
-        broker.resolve(payload, owner_user_id="owner")
+        broker.resolve(payload)
     assert record2.outcome == "expired" and record2._private_key is None
     monkeypatch.setattr(vault, "MAX_REQUESTS", 1)
     broker.release(record)
     broker.release(record2)
-    record3 = broker.create(context=_context(), owner_user_id="owner", profile_id="C", session_key="C")
-    broker.resolve(_relay(record3), owner_user_id="owner")
+    record3 = broker.create(context=_context(), profile_id="C", session_key="C")
+    broker.resolve(_relay(record3))
     assert len(broker.tombstones) == 1
     broker.close()
     assert not broker.pending and not broker._waiters
 
 
 @pytest.mark.asyncio
-async def test_health_owner_is_canonical_and_missing_owner_denies_access(monkeypatch):
+async def test_health_owner_is_canonical_and_missing_owner_still_denies_onepassword(monkeypatch):
     from gateway.platforms import thechat
     adapter = _adapter()
     client = adapter._client
@@ -302,7 +394,7 @@ async def test_health_owner_is_canonical_and_missing_owner_denies_access(monkeyp
     class Agent:
         is_interrupted = False
         def run_conversation(self, *_a, **_kw):
-            return json.loads(browser_vault_unlock("bitwarden"))
+            return json.loads(browser_vault_unlock("onepassword"))
     agent = Agent()
     turn = _turn(adapter, context, agent)
     result = await asyncio.to_thread(turn._run_conversation_with_approval, agent, [], None, None, None)
@@ -366,8 +458,8 @@ async def test_waiting_prompt_cancels_on_lifecycle_end_without_secret_or_token(e
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("sender,requester", [("nonowner", "owner"), ("owner", "nonowner"), ("nonowner", "nonowner")])
-async def test_native_registry_denies_nonowner_even_with_preexisting_tokens(sender, requester, monkeypatch):
+@pytest.mark.parametrize("sender,requester", [("nonowner", "owner"), ("owner", "nonowner")])
+async def test_native_registry_denies_mismatched_requester_even_with_preexisting_tokens(sender, requester, monkeypatch):
     from agent.vault_backends import unlock
     from agent.vault_backends.bitwarden import BitwardenLoginBackend
     from agent.vault_backends.onepassword import OnePasswordLoginBackend
@@ -412,7 +504,7 @@ async def test_native_registry_denies_nonowner_even_with_preexisting_tokens(send
 async def test_signature_precedes_memory_dispatch_and_errors_do_not_echo_ciphertext(monkeypatch, caplog):
     adapter = _adapter()
     adapter._owner_user_id = "owner"
-    record = adapter._vault_unlock.create(context=_context(), owner_user_id="owner", profile_id="A", session_key="A")
+    record = adapter._vault_unlock.create(context=_context(), profile_id="A", session_key="A")
     relay = _relay(record)
     monkeypatch.setattr("gateway.platforms.thechat.accept_inbound_event", lambda **kw: pytest.fail("unlock reached inbox"))
     request = _signed(adapter, relay)
@@ -432,7 +524,7 @@ def test_submit_cancel_race_has_one_winner_and_drops_private_key():
     import threading
     from gateway.platforms.thechat_vault import VaultUnlockBroker, VaultUnlockError
     broker = VaultUnlockBroker()
-    record = broker.create(context=_context(), owner_user_id="owner", profile_id="A", session_key="A")
+    record = broker.create(context=_context(), profile_id="A", session_key="A")
     submit = _relay(record)
     cancel = _relay(record, action="cancel")
     for key in ("wrappedKeyB64", "ivB64", "ciphertextB64"):
@@ -441,7 +533,7 @@ def test_submit_cancel_race_has_one_winner_and_drops_private_key():
     def resolve(payload):
         barrier.wait(timeout=5)
         try:
-            return broker.resolve(payload, owner_user_id="owner")
+            return broker.resolve(payload)
         except VaultUnlockError:
             return "conflict"
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -488,10 +580,10 @@ async def test_agent_failure_restores_callbacks_and_fences_escaped_prompt():
 def test_invalid_union_action_has_typed_safe_validation_error(action):
     from gateway.platforms.thechat_vault import VaultUnlockBroker, VaultUnlockError
     broker = VaultUnlockBroker()
-    record = broker.create(context=_context(), owner_user_id="owner", profile_id="A", session_key="A")
+    record = broker.create(context=_context(), profile_id="A", session_key="A")
     try:
         with pytest.raises(VaultUnlockError):
-            broker.resolve(_relay(record, action=action), owner_user_id="owner")
+            broker.resolve(_relay(record, action=action))
     finally:
         broker.close()
 
@@ -501,18 +593,42 @@ def test_utf8_byte_limit_and_wall_clock_expiry_are_enforced(monkeypatch):
     now = time.time()
     monkeypatch.setattr(vault.time, "time", lambda: now)
     broker = vault.VaultUnlockBroker()
-    record = broker.create(context=_context(), owner_user_id="owner", profile_id="A", session_key="A")
+    record = broker.create(context=_context(), profile_id="A", session_key="A")
     assert type(record.payload["expiresAt"]) is int
     assert record.payload["expiresAt"] == int(now * 1000) + 120_000
     relay = _relay(record)
     relay["interaction"].update(_encrypt(record, password="é" * 2048))
-    assert broker.resolve(relay, owner_user_id="owner") is False
+    assert broker.resolve(relay) is False
     assert record.take_response() == "é" * 2048
     broker.release(record)
-    expired = broker.create(context=_context(), owner_user_id="owner", profile_id="A", session_key="A")
+    expired = broker.create(context=_context(), profile_id="A", session_key="A")
     payload = _relay(expired)
     now += 121
     with pytest.raises(vault.VaultUnlockError):
-        broker.resolve(payload, owner_user_id="owner")
+        broker.resolve(payload)
     assert expired.outcome == "expired" and expired._private_key is None
     broker.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["submit", "cancel"])
+@pytest.mark.parametrize("actor,spoof_requester", [("owner", False), ("another-human", False), ("owner", True)])
+async def test_signed_relay_cannot_answer_another_requesters_prompt(action, actor, spoof_requester):
+    adapter = _adapter()
+    adapter._owner_user_id = "owner"
+    context = _context()
+    context["requester_user_id"] = "authorized-requester"
+    record = adapter._vault_unlock.create(context=context, profile_id="A", session_key="A")
+    relay = _relay(record, actorUserId=actor, action=action)
+    if spoof_requester:
+        relay["interaction"]["requesterUserId"] = actor
+    if action == "cancel":
+        for key in ("wrappedKeyB64", "ivB64", "ciphertextB64"):
+            del relay["interaction"][key]
+    try:
+        response = await adapter._handle_webhook(_signed(adapter, relay))
+        assert response.status == 409
+        assert not record.event.is_set() and record.take_response() == ""
+        assert record.payload["requestId"] in adapter._vault_unlock.pending
+    finally:
+        await adapter.disconnect()

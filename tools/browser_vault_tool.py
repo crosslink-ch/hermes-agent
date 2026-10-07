@@ -219,9 +219,10 @@ def _focus_bound_origin(task_id: str, origin: str, kind: str) -> Optional[str]:
 
 def _external_vault_denial(*, handle: str = "", backend: str = "") -> Optional[str]:
     from agent.vault_backends.unlock import external_access_allowed
-    if (backend in {"bitwarden", "onepassword"} or handle.startswith(("bw:", "op:"))) and not external_access_allowed():
+    name = backend or ("bitwarden" if handle.startswith("bw:") else "onepassword" if handle.startswith("op:") else "")
+    if name in {"bitwarden", "onepassword"} and not external_access_allowed(name):
         return json.dumps({"success": False, "error_type": "external_vault_access_denied",
-                           "error": "External password managers are available only to the bot owner in this invocation."})
+                           "error": "This invocation is not authorized to access that password manager."})
     return None
 
 
@@ -238,7 +239,7 @@ def browser_vault_list() -> str:
     for backend in enabled_backends():
         if _external_vault_denial(backend=backend.name):
             errors.append({"backend": backend.name, "error_type": "external_vault_access_denied",
-                           "error": "External manager access is restricted to the bot owner."})
+                           "error": "This invocation is not authorized to access that password manager."})
             continue
         if backend.needs_unlock and not backend.is_unlocked():
             locked.append({"backend": backend.name, "display_name": backend.display_name,
