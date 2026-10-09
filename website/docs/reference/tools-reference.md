@@ -119,6 +119,19 @@ Scoped to the Feishu document-comment handler. Drives comment read/write operati
 
 For local files, a full unredacted read (including all pages of the same file version) or a successful `write_file` supplies a whole-file baseline. Reading a smaller region afterward does not discard that baseline while the bytes remain unchanged. A changed file, an unread file, or a view with hidden/redacted or clamped content still needs a full current read before replacement; `patch` remains available for targeted edits. Writes made through terminal commands or `execute_code` do not establish a `write_file` baseline.
 
+### File execution targets
+
+`read_file`, `write_file`, and `patch` accept an optional static string `execution_target` selecting a configured `terminal.targets` entry. `search_files` preserves its existing `target="content"|"files"` argument and also uses `execution_target` for environment selection:
+
+```text
+read_file(path="README.md", execution_target="local")
+write_file(path="build.txt", content="ready\n", execution_target="devbox")
+patch(mode="replace", path="app.py", old_string="old", new_string="new", execution_target="devbox")
+search_files(pattern="TODO", target="content", execution_target="devbox")
+```
+
+Relative paths use the selected target's own session working directory and FileOperations adapter. Results include resolved `target` and `backend` metadata, plus `cwd` when available. See [Named Execution Targets](../user-guide/configuration.md#named-execution-targets) for configuration, default, and legacy behavior.
+
 ## `homeassistant` toolset
 
 | Tool | Description | Requires environment |
@@ -206,8 +219,8 @@ Granted only to sessions of the desktop setup profile (`role: setup` in its `pro
 
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
-| `process_manage` | Manage background processes started with terminal(background=true). Actions: 'list' (show all), 'poll' (check status + new output), 'log' (full output with pagination), 'wait' (block until done or timeout), 'kill' (terminate), 'write' (sen… | — |
-| `terminal` | Execute shell commands on a Linux environment. Filesystem persists between calls. Set `background=true` for long-running servers. Set `notify_on_complete=true` (with `background=true`) to get an automatic notification when the process finishes — no polling needed. Add `heartbeat=N` (seconds, min 60) to also receive a periodic notification carrying the output produced since the previous one — for long bounded jobs such as a merge train or a full test suite, so a failure is seen within N seconds instead of at exit. Do NOT use cat/head/tail — use read_file. Do NOT use grep/rg/find — use search_files. | — |
+| `process_manage` | Manage background processes started with terminal(background=true). Actions: list, poll, log, wait, kill, write, submit, close. | — |
+| `terminal` | Execute shell commands on the selected execution target (bash/Linux shell semantics). Filesystem persists between calls. Use `background=true` for long-running jobs and `notify_on_complete=true` for completion; `heartbeat=N` (minimum 60 seconds) gives periodic progress for bounded jobs. Use file/search tools instead of cat/head/tail/grep/find. | — |
 
 ## `desktop_ui` toolset
 
@@ -402,5 +415,4 @@ Registered only on the `hermes-yuanbao` platform toolset. Yuanbao is Tencent's c
 | `yb_send_dm` | Send a private/direct message to a user in a group, with optional media files. | Yuanbao credentials |
 | `yb_search_sticker` | Search the built-in Yuanbao sticker (TIM face) catalogue by keyword. | Yuanbao credentials |
 | `yb_send_sticker` | Send a built-in sticker to the current Yuanbao chat. | Yuanbao credentials |
-
 
