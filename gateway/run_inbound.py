@@ -1288,6 +1288,10 @@ class GatewayInboundMixin:
         if _admitted is None:
             return None
         event, source, is_internal = _admitted
+        control = getattr(event, "_background_task_control", None)
+        if control is not None:
+            from gateway.background_activity_control import stop_bound_task
+            return await stop_bound_task(self, source, control)
         # TERMINAL-DECLINE LATCH TEARDOWN. Deliberately placed AFTER admission,
         # not on the adapter's raw inbound: profile routing, the ignored-channel
         # guard, plugin hooks and user authorization all reject events above,

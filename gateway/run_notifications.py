@@ -1335,6 +1335,9 @@ class GatewayNotificationsMixin:
                 text=synth_text, message_type=MessageType.TEXT, source=source, internal=True,
                 message_id=str(evt.get("message_id") or "").strip() or None, metadata=metadata,
             )
+            resolver = getattr(type(adapter), "activity_tasks_for_completion", None)
+            if resolver is not None:
+                synth_event._background_activity_task_ids = adapter.activity_tasks_for_completion(evt)
             logger.info(
                 "Watch pattern notification — injecting for %s chat=%s thread=%s",
                 platform_name, source.chat_id, source.thread_id,
@@ -1676,7 +1679,7 @@ class GatewayNotificationsMixin:
             # sibling is never discarded with it.
             delivered = None
             for _text, candidate_evt, _future in entries:
-                delivered = await self._deliver_completion_notification(synth_text, candidate_evt)
+                delivered = await self._deliver_completion_notification(synth_text, {**candidate_evt, "_activity_completion_events": [evt for _text, evt, _future in entries]})
                 if delivered is not None:
                     break
             if delivered is True and len(entries) > 1:
@@ -1826,7 +1829,7 @@ class GatewayNotificationsMixin:
         )
         consolidated = "\n\n".join([header, *blocks])
         delivered = await self._deliver_completion_notification(
-            consolidated, primary_evt, sibling_claims=siblings,
+            consolidated, {**primary_evt, "_activity_completion_events": [primary_evt, *(evt for evt, _claim in siblings)]}, sibling_claims=siblings,
         )
         if delivered is None:
             # Primary dropped/owned elsewhere: retry the unadmitted siblings.

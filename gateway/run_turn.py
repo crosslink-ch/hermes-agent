@@ -2201,6 +2201,7 @@ class GatewayTurnMixin:
                 persist_user_display_metadata={
                     "gateway_input_owner": prepared.persistence_owner, **diagnostic_metadata(event)},
                 message_type=event.message_type,
+                background_activity_task_ids=getattr(event, "_background_activity_task_ids", ()),
                 scheduled_heartbeat=bool(getattr(event, "_heartbeat_session_id", None)),
             )
             _turn_seconds = time.monotonic() - _turn_started_monotonic
@@ -3903,6 +3904,7 @@ class GatewayTurnMixin:
                 persist_user_message=next_persist_message,
                 persist_user_display_kind=next_display_kind,
                 persist_user_display_metadata=diagnostic_metadata(pending_event) or None,
+                background_activity_task_ids=getattr(pending_event, "_background_activity_task_ids", ()),
             )
         except asyncio.CancelledError:
             await _run_followup_processing_hook(
@@ -4145,6 +4147,20 @@ class GatewayTurnMixin:
             and getattr(type(turn_ctx._status_adapter), "send_invocation_progress", BasePlatformAdapter.send_invocation_progress)
             is not BasePlatformAdapter.send_invocation_progress
         )
+        begin_activity = getattr(type(turn_ctx._status_adapter), "begin_activity_turn", None)
+        if begin_activity is not None:
+            adapter = turn_ctx._status_adapter
+            # Only the exact admitted event may establish a binding. Never borrow the
+            # latest conversation context for an internal completion/verification turn.
+            activity_event_id = turn_ctx.inbound_message_id or event_message_id
+            origin = adapter._event_contexts.get(str(activity_event_id or ""), {}).get("invocation_id")
+            turn_ctx._background_activity = adapter.begin_activity_turn(
+                home=self._resolve_profile_home_for_source(source), session_key=turn_ctx.session_key,
+                session_id=turn_ctx.session_id, origin_invocation_id=origin,
+                verification=bool(turn_ctx.background_activity_task_ids) or turn_ctx.persist_user_display_kind in {"async_delegation_complete", "process_complete"},
+                task_ids=turn_ctx.background_activity_task_ids,
+                event_message_id=activity_event_id,
+            )
         return _status_thread_metadata
 
     async def _run_agent_notify_long_running(
@@ -4231,6 +4247,7 @@ class GatewayTurnMixin:
         persist_user_message: Optional[Any] = None, persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None, message_type: Optional[str] = None,
         persist_user_display_metadata: Optional[dict] = None,
+        background_activity_task_ids: tuple[str, ...] = (),
         scheduled_heartbeat: bool = False,
     ) -> Dict[str, Any]:
         """Run the agent; returns the full run_conversation result dict.
@@ -4268,6 +4285,7 @@ class GatewayTurnMixin:
             persist_user_timestamp=persist_user_timestamp,
             persist_user_display_kind=persist_user_display_kind,
             persist_user_display_metadata=persist_user_display_metadata,
+            background_activity_task_ids=background_activity_task_ids,
             scheduled_heartbeat=scheduled_heartbeat,
         )
         _status_thread_metadata = self._run_agent_bind_turn_wiring(
@@ -4300,6 +4318,10 @@ class GatewayTurnMixin:
             worker = self._run_agent_start_turn_worker(turn_ctx, turn_runner.run_sync)
             _executor_task_holder[0] = worker.executor_task  # read late by _notify_long_running
             response = await self._run_agent_await_turn_worker(worker, turn_ctx, _interrupt_detected, interrupt_monitor)
+            activity = getattr(turn_ctx, "_background_activity", None)
+            if activity is not None:
+                outcome = response if isinstance(response, dict) else {}
+                activity.parent_returned(failed=bool(outcome.get("failed") or outcome.get("error")), stopped=bool(outcome.get("interrupted")))
             if isinstance(response, dict):
                 response["_notification_reply_muted"] = turn_ctx.mute_notification_reply
             self._run_agent_evict_on_fallback(turn_ctx)

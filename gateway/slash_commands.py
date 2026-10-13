@@ -445,6 +445,18 @@ class GatewaySlashCommandsMixin(
             await _stop(session_key, "stop_command_handler")
             return EphemeralReply(t("gateway.stop.stopped"))
 
+        # A durable conversation task may outlive its dispatching turn. Prefer the
+        # exact bound session over chat-wide fallback; never stop a sibling thread.
+        adapter = self._delivery_adapter_for(source)
+        if getattr(type(adapter), "interrupt_session_activity", None) is not None:
+            from agent.interrupt_compat import _accepts_keyword
+            scope = {"profile_home": self._resolve_profile_home_for_source(source)} if _accepts_keyword(adapter.interrupt_session_activity, "profile_home") else {}
+            requested = await adapter.interrupt_session_activity(session_key, source.chat_id, metadata=self._reply_metadata(event), **scope)
+            if requested:
+                from tools.async_delegation import interrupt_for_session
+                interrupt_for_session(session_key=session_key, reason="stop_command", parent_session_id=str(getattr(session_entry, "session_id", "") or ""), owner_home=scope.get("profile_home"))
+                return EphemeralReply("Stop requested. Waiting for the owned workers to stop.")
+
         # No run under the caller's own key: a live turn in THIS chat may still carry a differently
         # shaped key. One scan feeds both tiers; the chat tier is a superset of the thread-sibling
         # tier (a sibling needs the caller's own thread slot, which satisfies the chat predicate), so
@@ -471,8 +483,9 @@ class GatewaySlashCommandsMixin(
         # No running agent anywhere for this scope. Background delegations the session dispatched in an
         # earlier turn still count as "active": stop them; each returns as an interrupted completion.
         from tools.async_delegation import interrupt_for_session
+        owner_home = self._resolve_profile_home_for_source(source) if getattr(type(adapter), "begin_activity_turn", None) is not None else None
         if interrupt_for_session(session_key=session_key, reason="stop_command",
-                                 parent_session_id=str(getattr(session_entry, "session_id", "") or "")):
+                                 parent_session_id=str(getattr(session_entry, "session_id", "") or ""), owner_home=owner_home):
             return EphemeralReply(t("gateway.stop.stopped"))
         # A platform status indicator can still be stuck —
         # e.g. Slack's persistent assistant.threads.setStatus survives a gateway restart or a turn

@@ -10,6 +10,19 @@ logger = logging.getLogger("gateway.run")
 class StructuredProgressMixin:
     """Publish authoritative ID-bearing activity without chat-history noise."""
 
+    def activity_only_progress(self, event_type, tool_name=None, preview=None, args=None, **metadata):
+        activity = getattr(self._ctx, "_background_activity", None)
+        if activity is not None:
+            activity.event(event_type, tool_name, **metadata)
+
+    def activity_only_start(self, call_id, tool_name, args):
+        self.activity_only_progress("tool.started", tool_name, tool_call_id=call_id)
+
+    def activity_only_complete(self, call_id, tool_name, args, result):
+        from agent.display import _detect_tool_failure
+        is_error, _ = _detect_tool_failure(tool_name, result)
+        self.activity_only_progress("tool.completed", tool_name, tool_call_id=call_id, is_error=is_error)
+
     @staticmethod
     def _thechat_notice_event_shape(event_type: str) -> tuple[str, str]:
         """Map generic status callbacks onto TheChat's structured notice rail."""
@@ -58,6 +71,9 @@ class StructuredProgressMixin:
         **kwargs,
     ) -> None:
         ctx = self._ctx
+        activity = getattr(ctx, "_background_activity", None)
+        if activity is not None:
+            activity.event(event_type, tool_name, **kwargs)
         if not ctx._structured_progress_supported or not ctx._run_still_current():
             return
         if event_type == "tool.completed" and tool_name:
@@ -83,6 +99,7 @@ class StructuredProgressMixin:
         function_name: str,
         function_args: dict,
     ) -> None:
+        self.activity_only_start(tool_call_id, function_name, function_args)
         if not tool_call_id or not function_name or function_name.startswith("_"):
             return
         try:
@@ -110,6 +127,7 @@ class StructuredProgressMixin:
         function_args: dict,
         _function_result: Any,
     ) -> None:
+        self.activity_only_complete(tool_call_id, function_name, function_args, _function_result)
         if not tool_call_id or not function_name or function_name.startswith("_"):
             return
         ctx = self._ctx

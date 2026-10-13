@@ -15,6 +15,10 @@ logger = logging.getLogger("gateway.run")
 class GatewayTheChatMixin:
     """Apply trusted platform branch intents and publish scoped titles."""
 
+    async def _background_activity_watcher(self, interval=1.0, heartbeat_seconds=15.0):
+        from gateway.background_activity_runtime import watch_activity
+        await watch_activity(self, interval=interval, heartbeat_seconds=heartbeat_seconds)
+
     def _thechat_session_intent_for_event(self, event: MessageEvent) -> Dict[str, Any]:
         raw_message = getattr(event, "raw_message", None)
         if not isinstance(raw_message, dict):

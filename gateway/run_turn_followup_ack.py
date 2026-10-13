@@ -57,4 +57,11 @@ async def _run_followup_processing_hook(adapter, event: MessageEvent | None, hoo
     run_hook = getattr(adapter, "_run_processing_hook", None)
     if not callable(run_hook):
         return
-    await run_hook(hook_name, event, *args)
+    inband = hook_name == "on_processing_complete" and args and args[0] == ProcessingOutcome.SUCCESS
+    if inband:
+        event._background_activity_inband = True
+    try:
+        await run_hook(hook_name, event, *args)
+    finally:
+        if inband:
+            event._background_activity_inband = False

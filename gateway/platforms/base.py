@@ -3985,6 +3985,13 @@ class BasePlatformAdapter(ABC):
             logger.warning("Dropping internally routed event: expected session=%s derived=%s",
                            expected_session_key, session_key)
             return
+        # Authenticated task-bound control is not a conversation-wide /stop. Run the
+        # admitted handler inline and close only this command's invocation; never cancel
+        # or release whichever newer goal currently owns the conversation guard.
+        if event.source.platform == Platform.THECHAT and getattr(event, "_background_task_control", None) is not None:
+            await self._dispatch_inline_with_processing_lifecycle(event, session_key, "stop")
+            event._gateway_accepted = True
+            return
         # On-entry self-heal: clear a guard whose owner task already exited.
         if session_key in self._active_sessions:
             self._heal_stale_session_lock(session_key)

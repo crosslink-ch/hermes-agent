@@ -1282,6 +1282,7 @@ class TurnRunner(StructuredProgressMixin):
         agent._notification_platform = ctx.source.platform
         # ALWAYS attached (never gated to None): its body gates each event class, and subagent-
         # failure notices must fire even with tool_progress/thinking off.
+        agent._background_activity = getattr(ctx, "_background_activity", None)
         agent.tool_progress_callback = ctx.progress_callback
         # Discord's one-time voice ack and Slack's task cards both ride the authoritative start
         # callback, so neither infers identity from tool names.
@@ -1325,9 +1326,10 @@ class TurnRunner(StructuredProgressMixin):
         if ctx.mute_notification_reply:
             # Controls and operational event/step callbacks remain wired. These
             # presentation callbacks are rebound on every next turn.
-            agent.tool_progress_callback = None
-            agent.tool_start_callback = None
-            agent.tool_complete_callback = None
+            activity_enabled = getattr(ctx, "_background_activity", None) is not None
+            agent.tool_progress_callback = self.activity_only_progress if activity_enabled else None
+            agent.tool_start_callback = self.activity_only_start if activity_enabled else None
+            agent.tool_complete_callback = self.activity_only_complete if activity_enabled else None
             # Keep diagnostic observers installed; concrete sinks veto display.
             agent.stream_delta_callback = None
             agent.interim_assistant_callback = None

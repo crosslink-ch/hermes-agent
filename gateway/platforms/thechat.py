@@ -225,6 +225,98 @@ class TheChatAdapter(BasePlatformAdapter):
         from gateway.platforms.thechat_vault import VaultUnlockBroker
         self._vault_unlock = VaultUnlockBroker()
         self._owner_user_id = ""
+        self._activity_stores = {}
+        self._activity_turns = {}
+        self._activity_event_turns = {}
+        self._activity_deferred_turns = {}
+        from hermes_constants import get_hermes_home
+        self._activity_owner_home = get_hermes_home()
+
+    def restore_activity_home(self, home):
+        home = Path(home).resolve()
+        if str(home) not in self._activity_stores and (home / "background_activity.db").exists():
+            from gateway.background_activity import ActivityStore
+            key = hashlib.sha256((self.base_url + "\0" + self.token).encode()).hexdigest()
+            self._activity_stores[str(home)] = ActivityStore(home, key)
+
+    def activity_tasks_for_completion(self, event):
+        matches = []
+        events = event.get("_activity_completion_events") or [event]
+        for item in events:
+            links = [item.get("delegation_id") or item.get("session_id")]
+            for store in list(self._activity_stores.values()):
+                matches.extend(store.completion_tasks(item.get("session_key", ""), item.get("parent_session_id", ""), links))
+        return tuple(dict.fromkeys(matches))
+
+    def begin_activity_turn(self, *, home, session_key, session_id, origin_invocation_id=None, verification=False, event_message_id=None, task_ids=()):
+        from gateway.background_activity import ActivityStore
+        key = hashlib.sha256((self.base_url + "\0" + self.token).encode()).hexdigest()
+        home = str(Path(home).resolve())
+        store = self._activity_stores.get(home)
+        if store is None:
+            store = self._activity_stores[home] = ActivityStore(home, key)
+        if task_ids:
+            from gateway.background_activity_runtime import ActivityGroup
+            turns = [store.begin(session_key, session_id, verification=True, target_task_id=task_id) for task_id in task_ids]
+            turns = [turn for turn in turns if turn is not None]
+            turn = turns[0] if len(turns) == 1 else ActivityGroup(turns) if turns else None
+        else:
+            turn = store.begin(session_key, session_id, origin_invocation_id, verification)
+        if turn is not None:
+            turn.verification = verification
+            self._activity_turns[session_key] = turn
+            if event_message_id:
+                self._activity_event_turns[str(event_message_id)] = turn
+                context = self._event_contexts.get(str(event_message_id), {})
+                if not verification and context.get("conversation_id"):
+                    store.bind_route(turn.task_id, context["conversation_id"], context.get("thread_id"))
+        return turn
+
+    async def interrupt_session_activity(self, session_key, chat_id, metadata=None, profile_home=None):
+        from tools.process_registry import process_registry
+        from gateway.run import _async_profile_runtime_scope
+        from hermes_constants import get_hermes_home
+        home = str(Path(profile_home if profile_home is not None else get_hermes_home()).resolve())
+        requested = 0
+        for store in list(self._activity_stores.values()):
+            if str(store.home) != home:
+                continue
+            count, process_ids = store.request_stop(session_key)
+            requested += count
+            if not count:
+                continue
+            async with _async_profile_runtime_scope(store.home):
+                for process_id in process_ids:
+                    process = process_registry.get(process_id)
+                    if process is not None and process.session_key == session_key and not process.exited:
+                        await asyncio.to_thread(process_registry.kill_process, process_id, source="gateway_task_stop", consume_output=True)
+        return requested
+
+    async def publish_activity_once(self):
+        if self._client is None:
+            return False
+        delivered = True
+        self._activity_endpoint_unsupported = False
+        for store in list(self._activity_stores.values()):
+            for snapshot in store.pending():
+                try:
+                    response = await self._client.post("/hermes-platform/activity", json=snapshot)
+                    if response.status_code in {404, 405, 501}:
+                        self._activity_endpoint_unsupported = True
+                        return False
+                    response.raise_for_status()
+                    ack = response.json()
+                    if (isinstance(ack, dict) and ack.get("ok") is True
+                            and type(ack.get("sequence")) is int
+                            and ack == {"ok": True, "taskId": snapshot["taskId"], "sequence": snapshot["sequence"]}):
+                        store.acknowledge(snapshot)
+                    else:
+                        delivered = False
+                except (httpx.HTTPError, ValueError):
+                    delivered = False
+                    # Retain the full snapshot on ambiguous delivery and old receivers.
+                    logger.debug("TheChat activity delivery deferred")
+        return delivered
 
     def public_http_routes(self) -> list[dict]:
         if not self.webhook_url:
@@ -2046,6 +2138,24 @@ class TheChatAdapter(BasePlatformAdapter):
             # Startup only admitted the message. Keep its invocation/prompt routing until
             # the replayed turn finishes; a silent completion here rejects later unlock cards.
             return
+        activity = self._activity_event_turns.pop(str(event.message_id or ""), None)
+        if activity is None and self._activity_turns and getattr(event, "internal", False):
+            candidate = self._activity_turns.get(self._source_session_key(event.source))
+            if candidate is not None and getattr(candidate, "verification", False):
+                activity = candidate
+        if activity is not None:
+            key = self._source_session_key(event.source)
+            if getattr(event, "_background_activity_inband", False):
+                if activity is not None:
+                    self._activity_deferred_turns.setdefault(key, []).append(activity)
+            else:
+                turns = self._activity_deferred_turns.pop(key, [])
+                if activity is not None:
+                    turns.append(activity)
+                for turn in dict.fromkeys(turns):
+                    turn.finish(failed=outcome == ProcessingOutcome.FAILURE, stopped=outcome == ProcessingOutcome.CANCELLED)
+                    if self._activity_turns.get(key) is turn:
+                        self._activity_turns.pop(key, None)
         context = self._event_contexts.pop(str(event.message_id or ""), None)
         if not context:
             return
@@ -2156,7 +2266,7 @@ class TheChatAdapter(BasePlatformAdapter):
 
         commands, hidden_count = thechat_menu_commands()
         response = await self._client.post(
-            "/bots/me/commands", json={"commands": commands}
+            "/bots/me/commands", json={"commands": commands, "backgroundTaskControlVersion": 1}
         )
         response.raise_for_status()
         logger.info(
@@ -2863,6 +2973,14 @@ class TheChatAdapter(BasePlatformAdapter):
                 )
             ):
                 raise ValueError("TheChat event has an invalid sessionIntent")
+        control = item.get("taskControl")
+        if control is not None:
+            if not isinstance(control, dict) or set(control) != {"version", "action", "taskId", "sessionId"} or type(control.get("version")) is not int or control["version"] != 1 or control.get("action") != "stop" or item["text"] != "/stop":
+                raise ValueError("Invalid taskControl")
+            from gateway.background_activity import token
+            token(control["taskId"])
+            token(control["sessionId"])
+            uuid.UUID(control["taskId"])
         if not item["text"] and not item.get("attachments"):
             raise ValueError("TheChat event must contain text or attachments")
         return item
@@ -2998,4 +3116,6 @@ class TheChatAdapter(BasePlatformAdapter):
                 media_urls=media_urls,
                 media_types=media_types,
             )
+            if item.get("taskControl") is not None:
+                event._background_task_control = dict(item["taskControl"])
             await self.handle_message(event)

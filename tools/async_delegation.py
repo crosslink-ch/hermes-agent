@@ -698,6 +698,7 @@ def _dispatch_admitted(
         # The one stale-monitor thread serves every profile and starts with an empty Context;
         # a forced finalization runs under the dispatcher's so it settles the same state.db.
         "_context": contextvars.copy_context(),
+        "_owner_home": hermes_home_key(get_hermes_home()),
         # Stale-monitor bookkeeping (see _stale_monitor_loop).
         "_progress_token": None, "_progress_ts": dispatched_at, "_interrupted_at": None}
     with _records_lock:
@@ -1122,12 +1123,23 @@ def interrupt_all(reason: str = "shutdown") -> int:
     return _interrupt_records(targets, "interrupt_all", reason, "Interrupted %d async delegation(s) (%s)")
 
 
+def interrupt_for_bindings(delegation_ids, *, owner_home, reason="background_task_control"):
+    """Stop only explicitly bound units in the owning profile, never a whole session."""
+    home = hermes_home_key(owner_home)
+    with _records_lock:
+        targets = [record for identity, record in _records.items() if identity in delegation_ids and record.get("status") in _ACTIVE_STATES and record.get("_owner_home") == home]
+    return _interrupt_records(targets, "interrupt_for_bindings", reason, "Interrupted %d task-owned async delegation(s) (%s)")
+
+
 def interrupt_for_session(
-    session_key: str = "", origin_ui_session_id: str = "", parent_session_id: str = "", reason: str = "session_end",
+    session_key: str = "", origin_ui_session_id: str = "", parent_session_id: str = "", reason: str = "session_end", owner_home=None,
 ) -> int:
     """Signal running async delegations owned by ONE ending session to stop (any
     selector matches, see ``_session_records``). Returns how many."""
     targets = _session_records(_ACTIVE_STATES, session_key, origin_ui_session_id, parent_session_id)
+    if owner_home is not None:
+        home = hermes_home_key(owner_home)
+        targets = [record for record in targets if record.get("_owner_home") == home]
     return _interrupt_records(
         targets, "interrupt_for_session", reason, "Interrupted %d async delegation(s) for ending session (%s)")
 

@@ -119,14 +119,15 @@ _LEGACY_EVENT_MAP: Dict[str, DelegateEvent] = {
 # Event → _ChildProgressRelay method name. Lifecycle strings are emitted by the orchestrator itself (not
 # DelegateEvent). Any other DelegateEvent (TASK_TOOL_STARTED and the reserved TASK_* values) takes the tool-started
 # path; None means "recognised but ignored".
-_LIFECYCLE_EVENTS = frozenset({"subagent.start", "subagent.complete", "subagent.text"})
+_LIFECYCLE_EVENTS = frozenset({"subagent.spawn_requested", "subagent.start", "subagent.complete", "subagent.text", "process.started", "process.completed", "subagent.tool", "subagent.tool.completed"})
 _EVENT_HANDLERS: Dict[Any, Optional[str]] = {
+    "subagent.spawn_requested": "_on_spawn_requested",
     "subagent.start": "_on_start",
     "subagent.complete": "_on_complete",
     "subagent.text": "_on_text",
     DelegateEvent.TASK_THINKING: "_on_thinking",
     DelegateEvent.TASK_PROGRESS: "_on_progress",
-    DelegateEvent.TASK_TOOL_COMPLETED: None,
+    DelegateEvent.TASK_TOOL_COMPLETED: "_on_tool_completed",
 }
 
 def _normalize_event(event_type: Any) -> Any:
@@ -345,6 +346,9 @@ class _ChildProgressRelay:
             self.batch.clear()
 
     # ── Lifecycle events emitted by the orchestrator itself ──
+    def _on_spawn_requested(self, tool_name, preview, args, kwargs):
+        self._relay("subagent.spawn_requested", **kwargs)
+
     def _on_start(self, tool_name, preview, args, kwargs):
         if self.goal_label:
             self._tree_line(f"🔀 {_short(self.goal_label, 55)}")
@@ -404,13 +408,19 @@ class _ChildProgressRelay:
             short = _short(preview, 35) if preview else ""
             self._tree_line(f'{line}  "{short}"' if short else line)
         if self.parent_cb:
-            self._relay("subagent.tool", tool_name, preview, args)
+            self._relay("subagent.tool", tool_name, preview, args, **kwargs)
             self.batch.append(tool_name or "")
             if len(self.batch) >= self._BATCH_SIZE:
                 self._flush()
 
+    def _on_tool_completed(self, tool_name, preview, args, kwargs):
+        self._relay("subagent.tool.completed", tool_name, **kwargs)
+
     def __call__(self, event_type, tool_name: str = None, preview: str = None, args=None, **kwargs):
         key = _normalize_event(event_type)
+        if key in {"process.started", "process.completed", "subagent.tool", "subagent.tool.completed"}:
+            self._relay(event_type, tool_name, preview, args, **kwargs)
+            return
         method = None if key is None else _EVENT_HANDLERS.get(key, "_on_tool_started")
         if method is not None:
             getattr(self, method)(tool_name, preview, args, kwargs)

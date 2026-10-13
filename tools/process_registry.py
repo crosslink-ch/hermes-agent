@@ -1592,6 +1592,9 @@ class ProcessRegistry(ProcessCheckpointMixin):
                 save_completed_result(session)
                 self._running.pop(session.id)
             self._finished[session.id] = session
+            if was_running:
+                from tools.process_activity import observe_process_finish
+                observe_process_finish(session)
         # Release the retained Popen/PTY handles now: otherwise every
         # finished-but-unpruned session keeps its stdout pipe (or PTY master)
         # FD open until FINISHED_TTL_SECONDS elapses, and heavy background
@@ -2096,6 +2099,7 @@ class ProcessRegistry(ProcessCheckpointMixin):
             if consume_output:
                 self._completion_consumed.add(session_id)
             return result
+        session._activity_stop_requested = True
         try:
             early = self._signal_kill(session, session_id, consume_output)
             if early is not None:
