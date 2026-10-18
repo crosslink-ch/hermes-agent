@@ -159,7 +159,7 @@ def _platform_item(
             "id": CONVERSATION_ID,
             "type": "direct",
             "name": "Hermes DM",
-            "workspaceId": "workspace-1",
+            "workspaceId": None,  # Tokenless personal contract; workspace epochs have dedicated tests.
         },
     }
 
@@ -1110,6 +1110,7 @@ async def test_gateway_thechat_auto_title_callback_sends_after_context_cleanup()
     context = _context("invocation-title")
     context["thread_id"] = "thread-1"
     adapter._contexts[adapter._context_key(CONVERSATION_ID, "thread-1")] = context
+    adapter._event_contexts["message-1"] = context  # Real ingress binds the exact message, not just its thread.
     runner.adapters = {Platform.THECHAT: adapter}
 
     source = SessionSource(
