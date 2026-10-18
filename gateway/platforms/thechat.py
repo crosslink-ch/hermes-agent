@@ -178,6 +178,13 @@ class TheChatAdapter(BasePlatformAdapter):
 
     SUPPORTS_MESSAGE_EDITING = False
 
+    @classmethod
+    def supports_exec_approval_buttons(cls) -> bool:
+        """TheChat renders approvals natively (inbox request, or a legacy progress card on older
+        servers) through its own ``send_exec_approval``, not the base prompt hook the default
+        probe looks for. Without this the runner sends the plain-text ``/approve`` prompt."""
+        return True
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.THECHAT)
         self.config.extra.setdefault("group_sessions_per_user", False)
@@ -225,6 +232,9 @@ class TheChatAdapter(BasePlatformAdapter):
         from gateway.platforms.thechat_vault import VaultUnlockBroker
         self._vault_unlock = VaultUnlockBroker()
         self._owner_user_id = ""
+        from gateway.platforms.thechat_requests import BotRequestBridge
+        # Approvals/clarify as durable TheChat inbox requests when the server supports them.
+        self._bot_requests = BotRequestBridge(self, redact=self._redact_interaction_value)
 
     def public_http_routes(self) -> list[dict]:
         if not self.webhook_url:
@@ -251,7 +261,9 @@ class TheChatAdapter(BasePlatformAdapter):
         try:
             response = await self._client.get("/hermes-platform/health")
             response.raise_for_status()
-            self._capture_vault_owner(response.json())
+            health = response.json()
+            self._capture_vault_owner(health)
+            self._bot_requests.capture_capabilities(health)
         except Exception:
             await self._client.aclose()
             self._client = None
@@ -277,7 +289,9 @@ class TheChatAdapter(BasePlatformAdapter):
         try:
             response = await self._client.get("/hermes-platform/health")
             response.raise_for_status()
-            self._capture_vault_owner(response.json())
+            health = response.json()
+            self._capture_vault_owner(health)
+            self._bot_requests.capture_capabilities(health)
             from gateway.platforms.thechat_vault import VaultUnlockBroker
             if self._vault_unlock.closed:
                 self._vault_unlock = VaultUnlockBroker()
@@ -291,6 +305,9 @@ class TheChatAdapter(BasePlatformAdapter):
             return False
 
         self._mark_connected()
+        # Close requests a previous process left open; in webhook mode also sweep for answers
+        # whose push failed (polling mode receives them with every poll).
+        self._bot_requests.start(sweep_answers=bool(self.webhook_url))
         if self.webhook_url:
             self._webhook_recovery_task = asyncio.create_task(
                 self._webhook_recovery_loop()
@@ -321,6 +338,7 @@ class TheChatAdapter(BasePlatformAdapter):
     async def disconnect(self) -> None:
         self._running = False
         self._vault_unlock.close()
+        await self._bot_requests.stop()
         self._owner_user_id = ""
         if self._webhook_recovery_task:
             self._webhook_recovery_task.cancel()
@@ -1711,6 +1729,17 @@ class TheChatAdapter(BasePlatformAdapter):
         ):
             return SendResult(success=False, error="TheChat clarify request is too large")
         context = self._context_for_send(chat_id, metadata=metadata)
+        if self._bot_requests.enabled:
+            return await self._bot_requests.send_clarify(
+                chat_id=chat_id,
+                question=question,
+                choices=choices,
+                clarify_id=clarify_id,
+                session_key=session_key,
+                multi_select=multi_select,
+                context=context,
+                thread_id=self._metadata_thread_id(metadata),
+            )
         if not context:
             return SendResult(
                 success=False,
@@ -1789,6 +1818,17 @@ class TheChatAdapter(BasePlatformAdapter):
                 choices.append("always")
             choices.append("deny")
         context = self._context_for_send(chat_id, metadata=metadata)
+        if self._bot_requests.enabled:
+            return await self._bot_requests.send_exec_approval(
+                chat_id=chat_id,
+                command=command,
+                description=description,
+                session_key=session_key,
+                request_id=request_id,
+                choices=choices,
+                context=context,
+                thread_id=self._metadata_thread_id(metadata),
+            )
         if context:
             self._remember_interaction_request(
                 request_type="approval.request",
@@ -1837,7 +1877,14 @@ class TheChatAdapter(BasePlatformAdapter):
         TheChat resolves approval cards oldest-first per ``sessionKey``,
         mirroring ``resolve_gateway_approval``; ``resolveAll`` collapses every
         pending card for the session at once.
+
+        With bot requests the card is withdrawn instead ("Allowed once in the
+        conversation."); without exact ids the approval's settle hook closes it.
         """
+        if self._bot_requests.enabled:
+            ids = [request_id] if request_id is not None else list(request_ids or [])
+            await self._bot_requests.approvals_resolved_in_chat(ids, choice)
+            return SendResult(success=True)
         records: list[Dict[str, Any]] = []
         if request_id is not None:
             target_request_ids = [request_id]
@@ -1941,6 +1988,11 @@ class TheChatAdapter(BasePlatformAdapter):
         _forget_request: bool = True,
     ) -> SendResult:
         """Publish clarify.resolved to the invocation that asked the question."""
+        if self._bot_requests.enabled:
+            from gateway.platforms.thechat_requests import ANSWERED_IN_CHAT_REASON
+
+            await self._bot_requests.clarify_closed(request_id, ANSWERED_IN_CHAT_REASON)
+            return SendResult(success=True)
         record = self._interaction_requests.get(request_id)
         if (
             record is None
@@ -1980,6 +2032,26 @@ class TheChatAdapter(BasePlatformAdapter):
         finally:
             if _forget_request:
                 self._forget_interaction_request(request_id)
+
+    async def retire_clarify_card(self, clarify_id: str, notice: str) -> None:
+        """Withdraw a clarify request that ended without an inbox answer (timeout, /new, run end,
+        superseding prose). Legacy progress cards have no persistent state to retire."""
+        if not self._bot_requests.enabled:
+            return
+        from gateway.platforms.thechat_requests import ANSWERED_IN_CHAT_REASON
+
+        reason = str(notice or "").lstrip("\u23f3\u21a9\ufe0f\u2705 ").strip()
+        if reason.lower().startswith("answered"):
+            # Never echo the typed answer onto a card other participants can see.
+            reason = ANSWERED_IN_CHAT_REASON
+        await self._bot_requests.clarify_closed(clarify_id, reason)
+
+    @staticmethod
+    def _metadata_thread_id(metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not metadata:
+            return None
+        thread_id = metadata.get("thread_id") or metadata.get("message_thread_id")
+        return str(thread_id) if thread_id else None
 
     def _context_from_platform_event(
         self,
@@ -2736,6 +2808,10 @@ class TheChatAdapter(BasePlatformAdapter):
                     return web.json_response({"error": "Invalid or stale vault unlock interaction"}, status=exc.status)
                 except Exception:
                     return web.json_response({"error": "Vault unlock interaction failed"}, status=409)
+            if isinstance(payload, dict) and payload.get("type") == "thechat.bot_request.answered":
+                # Answers are durable in TheChat; a lost reply is simply pushed again, and the
+                # adapter applies each answer once. ``applied`` in the reply is the ack.
+                return web.json_response(self._bot_requests.handle_webhook(payload))
             if (
                 isinstance(payload, dict)
                 and payload.get("type")
@@ -2876,6 +2952,15 @@ class TheChatAdapter(BasePlatformAdapter):
                 )
                 response.raise_for_status()
                 payload = response.json()
+                try:
+                    # Answers first: they unblock runs that are already waiting.
+                    await self._bot_requests.handle_polled_answers(
+                        payload.get("requestAnswers")
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("TheChat: applying bot request answers failed", exc_info=True)
                 for item in payload.get("events", []):
                     await self._handle_platform_event(item)
             except asyncio.CancelledError:
