@@ -208,13 +208,26 @@ def list_gateway_approvals(session_key: str) -> list[dict]:
         return [dict(entry.data) for entry in _gateway_queues.get(session_key, [])]
 
 
+def _chain_settle(first, second):
+    """Run both hooks once, in registration order; one failing never skips the other."""
+    def settle(reason: str) -> None:
+        for hook in (first, second):
+            try:
+                hook(reason)
+            except Exception:
+                logger.debug("approval settle hook failed", exc_info=True)
+    return settle
+
+
 def register_gateway_settle(session_key: str, request_id: str, settle) -> bool:
     """Attach ``settle(reason)`` to one pending approval; it runs once when that wait ends by any path.
-    False when the request is no longer pending (the surface should withdraw its prompt itself)."""
+    Several surfaces may attach (a platform card and the gateway's timeout notice): hooks chain, none
+    replaces another. False when the request is no longer pending (the surface should withdraw its
+    prompt itself)."""
     with _lock:
         for entry in _gateway_queues.get(session_key, []):
             if entry.data.get("request_id") == request_id:
-                entry.settle = settle
+                entry.settle = settle if entry.settle is None else _chain_settle(entry.settle, settle)
                 return True
     return False
 
