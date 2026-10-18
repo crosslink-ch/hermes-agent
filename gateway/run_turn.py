@@ -3644,6 +3644,13 @@ class GatewayTurnMixin:
         from gateway.run import (
             _build_media_placeholder, _dequeue_pending_event, _is_control_interrupt_message
         )
+        if adapter is not None and source.platform == Platform.THECHAT:
+            from gateway.platforms.thechat_work import defer_workspace_followups
+            if defer_workspace_followups(adapter, session_key):
+                # A workspace epoch owns one cancellable adapter task. Recursive
+                # drains reuse the old task/run generation and would let revoking
+                # the prior invocation kill its successor (or revive expired work).
+                return None, None
         pending_event = None
         pending = None
         if result and adapter and session_key:

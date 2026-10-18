@@ -162,7 +162,7 @@ def _platform_event(
             "id": CONVERSATION_ID,
             "type": "direct",
             "name": "Hermes DM",
-            "workspaceId": "workspace-1",
+            "workspaceId": None,  # Tokenless personal contract; workspace epochs have dedicated tests.
         },
     }
 

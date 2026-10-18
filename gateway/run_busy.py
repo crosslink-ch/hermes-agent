@@ -800,6 +800,13 @@ class GatewayBusySessionMixin:
         adapter = self._delivery_adapter_for(event.source)
         if not adapter:
             return False  # let default path handle it
+        if event.source.platform == Platform.THECHAT and not event.get_command():
+            context = adapter._event_contexts.get(str(event.message_id or "")) or {}
+            if context.get("work_lease"):
+                # Keep epochs separate, but only AFTER native authorization and
+                # blocking-approval resolution. A yes/no must never deadlock in FIFO.
+                self._enqueue_fifo(session_key, event, adapter)
+                return True
         # Internal synthetic events (delegation / background completions) must never interrupt or
         # steer; they surface as a NEW turn when idle. Plugin events carry untrusted payload text, so
         # queue them through the FIFO (security metadata kept apart).

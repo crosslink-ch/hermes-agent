@@ -55,6 +55,7 @@ from gateway.inbound_event_ledger import (
 )
 from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome, SendResult, cache_media_bytes, get_inbound_media_max_bytes
 from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms.thechat_work import TheChatWorkMixin, WorkAuthority, WorkLease, WorkLeaseLost, bound_work_context, post_work, work_payload, validate_work_token, work_is_queued
 from gateway.otel import start_span
 from tools.url_safety import async_is_safe_url, create_ssrf_safe_async_client
 
@@ -173,7 +174,7 @@ def check_thechat_requirements() -> bool:
     return True
 
 
-class TheChatAdapter(BasePlatformAdapter):
+class TheChatAdapter(TheChatWorkMixin, BasePlatformAdapter):
     """Receive pending TheChat Hermes bot messages by polling or webhook."""
 
     SUPPORTS_MESSAGE_EDITING = False
@@ -225,6 +226,9 @@ class TheChatAdapter(BasePlatformAdapter):
         from gateway.platforms.thechat_vault import VaultUnlockBroker
         self._vault_unlock = VaultUnlockBroker()
         self._owner_user_id = ""
+        self._work_leases: set[WorkLease] = set()
+        self._work_admission_lanes = {}
+        self._legacy_completed_messages: Dict[str, None] = {}
 
     def public_http_routes(self) -> list[dict]:
         if not self.webhook_url:
@@ -320,6 +324,10 @@ class TheChatAdapter(BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         self._running = False
+        lease_tasks = [lease.task for lease in self._work_leases if lease.task is not None]
+        for lease in list(self._work_leases):
+            lease.lose("adapter disconnected")
+        await asyncio.gather(*lease_tasks, return_exceptions=True)
         self._vault_unlock.close()
         self._owner_user_id = ""
         if self._webhook_recovery_task:
@@ -393,9 +401,7 @@ class TheChatAdapter(BasePlatformAdapter):
             },
         ) as span:
             try:
-                response = await self._client.post(
-                    "/hermes-platform/messages", json=payload
-                )
+                response = await post_work(self, target, "/hermes-platform/messages", payload)
                 status_code = getattr(response, "status_code", None)
                 if status_code is not None:
                     span.set_attribute("http.status_code", status_code)
@@ -411,7 +417,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 )
             except Exception as exc:
                 logger.error("TheChat: failed to send response: %s", exc)
-                return SendResult(success=False, error=str(exc), retryable=True)
+                return SendResult(success=False, error=str(exc), retryable=not isinstance(exc, WorkLeaseLost))
 
     def _resolve_send_target(
         self,
@@ -427,6 +433,9 @@ class TheChatAdapter(BasePlatformAdapter):
         context = self._context_for_send(
             chat_id, reply_to=reply_to, metadata=metadata
         )
+        anchors = [reply_to, (metadata or {}).get("message_id"), (metadata or {}).get("reply_to_message_id")]
+        if context is None and any(anchors) and not any(anchor in self._legacy_completed_messages for anchor in anchors):
+            return None, {}, SendResult(success=False, error="TheChat invocation context is no longer active", retryable=False)
         if context is not None and self._is_current_chat_id(chat_id):
             context_conversation_id = str(context.get("conversation_id") or "")
             if context_conversation_id != str(uuid.UUID(str(chat_id))):
@@ -483,7 +492,7 @@ class TheChatAdapter(BasePlatformAdapter):
             payload["platformMessageId"] = platform_message_id
         if target.get("thread_id"):
             payload["threadId"] = str(target["thread_id"])
-        return payload
+        return work_payload(target, payload)
 
     @staticmethod
     def _inbound_attachment_size_limit() -> int:
@@ -1064,7 +1073,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 platform_message_id=platform_message_id,
             )
             stage = "message"
-            response = await self._post_attachment_message(payload)
+            response = await self._post_attachment_message(payload, context=target)
             data = response.json()
             if context is not None:
                 context["delivered"] = True
@@ -1144,15 +1153,14 @@ class TheChatAdapter(BasePlatformAdapter):
     async def _post_attachment_message(
         self,
         payload: Dict[str, Any],
+        *,
+        context: Optional[Dict[str, Any]] = None,
     ) -> httpx.Response:
         assert self._client is not None
         last_error: Optional[Exception] = None
         for attempt in range(_ATTACHMENT_SEND_MAX_ATTEMPTS):
             try:
-                response = await self._client.post(
-                    "/hermes-platform/messages",
-                    json=payload,
-                )
+                response = await post_work(self, context or {}, "/hermes-platform/messages", payload, raise_status=False)
                 status = int(getattr(response, "status_code", 0))
                 retryable_status = status in {408, 429} or status >= 500
                 if retryable_status and attempt + 1 < _ATTACHMENT_SEND_MAX_ATTEMPTS:
@@ -1438,6 +1446,10 @@ class TheChatAdapter(BasePlatformAdapter):
             context = self._event_contexts.get(str(candidate))
             if context:
                 return context
+        if any(candidate is not None for candidate in candidate_ids):
+            return None
+        if context := bound_work_context(self, chat_id, metadata):
+            return context
         if metadata:
             thread_id = metadata.get("thread_id") or metadata.get("message_thread_id")
             if thread_id:
@@ -1479,7 +1491,7 @@ class TheChatAdapter(BasePlatformAdapter):
             }
             if context.get("thread_id"):
                 payload["threadId"] = context["thread_id"]
-            await self._client.post("/hermes-platform/typing", json=payload)
+            await post_work(self, context, "/hermes-platform/typing", payload)
         except Exception:
             logger.debug("TheChat: typing update failed", exc_info=True)
 
@@ -1522,9 +1534,9 @@ class TheChatAdapter(BasePlatformAdapter):
             },
         ) as span:
             try:
-                response = await self._client.post(
-                    f"/hermes-platform/invocations/{context['invocation_id']}/progress",
-                    json=payload,
+                response = await post_work(
+                    self, context, f"/hermes-platform/invocations/{context['invocation_id']}/progress",
+                    payload,
                 )
                 status_code = getattr(response, "status_code", None)
                 if status_code is not None:
@@ -1533,10 +1545,10 @@ class TheChatAdapter(BasePlatformAdapter):
                 return SendResult(success=True, raw_response=response.json())
             except Exception as exc:
                 logger.debug("TheChat: failed to send invocation progress", exc_info=True)
-                retryable = not isinstance(exc, httpx.HTTPStatusError) or (
+                retryable = not isinstance(exc, WorkLeaseLost) and (not isinstance(exc, httpx.HTTPStatusError) or (
                     exc.response.status_code == 429
                     or exc.response.status_code >= 500
-                )
+                ))
                 return SendResult(
                     success=False,
                     error=str(exc),
@@ -2004,6 +2016,8 @@ class TheChatAdapter(BasePlatformAdapter):
             "thread_id": thread_id,
         }
         sender = item.get("sender")
+        if item.get("workToken"):
+            context["work_authority"] = WorkAuthority(str(invocation_id), item["workToken"])
         context["requester_user_id"] = sender.get("id") if isinstance(sender, dict) else None
         if isinstance(session_intent, dict):
             context["sessionIntent"] = session_intent
@@ -2027,10 +2041,19 @@ class TheChatAdapter(BasePlatformAdapter):
             # Rehydrate the context from raw_message so the deferred response and
             # tool-progress still route to the original TheChat task/thread.
             context = self._context_from_platform_event(event.raw_message)
+            if context and context.get("work_authority"):
+                raise asyncio.CancelledError("TheChat cannot replay terminal or unknown work")
             if context and event_key:
                 self._event_contexts[event_key] = context
         if context:
             context["event"] = event
+            if lease := context.get("work_lease"):
+                try:
+                    lease.ensure_live()
+                except WorkLeaseLost:
+                    raise asyncio.CancelledError("TheChat work authority lost") from None
+                lease.run_task = asyncio.current_task()
+                lease.event = event
             self._contexts[
                 self._context_key(event.source.chat_id, event.source.thread_id)
             ] = context
@@ -2038,6 +2061,10 @@ class TheChatAdapter(BasePlatformAdapter):
     async def on_processing_complete(
         self, event: MessageEvent, outcome: ProcessingOutcome
     ) -> None:
+        pending_context = self._event_contexts.get(str(event.message_id or ""))
+        if outcome == ProcessingOutcome.SUCCESS and work_is_queued(self, event, pending_context):
+            pending_context["work_lease"].run_task = None
+            return
         if (
             outcome == ProcessingOutcome.SUCCESS
             and getattr(event, "_hermes_startup_restore_queued", False)
@@ -2049,6 +2076,10 @@ class TheChatAdapter(BasePlatformAdapter):
         context = self._event_contexts.pop(str(event.message_id or ""), None)
         if not context:
             return
+        if not context.get("work_authority"):
+            self._legacy_completed_messages[str(event.message_id or "")] = None
+            if len(self._legacy_completed_messages) > 1024:
+                self._legacy_completed_messages.pop(next(iter(self._legacy_completed_messages)))
         self._vault_unlock.cancel_invocation(context["invocation_id"])
         context_key = self._context_key(event.source.chat_id, event.source.thread_id)
         active_context = self._contexts.get(context_key)
@@ -2061,9 +2092,9 @@ class TheChatAdapter(BasePlatformAdapter):
                 payload: Dict[str, Any] = {
                     "error": "Hermes gateway failed to process the message"
                 }
-                await self._client.post(
-                    f"/hermes-platform/invocations/{context['invocation_id']}/failed",
-                    json=payload,
+                await post_work(
+                    self, context, f"/hermes-platform/invocations/{context['invocation_id']}/failed",
+                    payload,
                 )
             except Exception:
                 logger.debug(
@@ -2072,9 +2103,9 @@ class TheChatAdapter(BasePlatformAdapter):
         elif outcome == ProcessingOutcome.CANCELLED:
             try:
                 payload = {"reason": "Hermes gateway cancelled the message"}
-                await self._client.post(
-                    f"/hermes-platform/invocations/{context['invocation_id']}/cancelled",
-                    json=payload,
+                await post_work(
+                    self, context, f"/hermes-platform/invocations/{context['invocation_id']}/cancelled",
+                    payload,
                 )
             except Exception:
                 logger.debug(
@@ -2087,14 +2118,16 @@ class TheChatAdapter(BasePlatformAdapter):
                     if context.get("delivered")
                     else "Hermes gateway completed without a chat response"
                 }
-                await self._client.post(
-                    f"/hermes-platform/invocations/{context['invocation_id']}/completed",
-                    json=payload,
+                await post_work(
+                    self, context, f"/hermes-platform/invocations/{context['invocation_id']}/completed",
+                    payload,
                 )
             except Exception:
                 logger.debug(
                     "TheChat: failed to report completion", exc_info=True
                 )
+        if lease := context.get("work_lease"):
+            lease.close()
 
     def _normalize_webhook_path(self, path: str) -> str:
         normalized = path.strip() or _DEFAULT_WEBHOOK_PATH
@@ -2317,6 +2350,11 @@ class TheChatAdapter(BasePlatformAdapter):
                 "TheChat interaction is stale or has no waiting request",
                 status=409,
             )
+        if lease := record["context"].get("work_lease"):
+            try:
+                lease.ensure_live()
+            except WorkLeaseLost:
+                raise _DirectInteractionError("TheChat interaction authority expired", status=409) from None
         expected = {
             "request_type": interaction["requestType"],
             "request_id": request_id,
@@ -2847,6 +2885,7 @@ class TheChatAdapter(BasePlatformAdapter):
         expected_chat_type = "dm" if conversation["type"] == "direct" else "group"
         if conversation["type"] not in {"direct", "group"} or item["chatType"] != expected_chat_type:
             raise ValueError("TheChat event chatType does not match conversation.type")
+        validate_work_token(item, legacy=self.config.extra.get("workspace_work_lease_mode") == "legacy")
         session_intent = item.get("sessionIntent")
         if session_intent is not None:
             if (
@@ -2876,8 +2915,11 @@ class TheChatAdapter(BasePlatformAdapter):
                 )
                 response.raise_for_status()
                 payload = response.json()
-                for item in payload.get("events", []):
-                    await self._handle_platform_event(item)
+                # All events in this bounded batch are already remotely claimed.
+                # ACK/renew concurrently; per-session admission lanes preserve
+                # delivery order even when the first event downloads attachments.
+                await asyncio.gather(*(self._handle_platform_event_safely(item)
+                                       for item in payload.get("events", [])))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -2890,6 +2932,9 @@ class TheChatAdapter(BasePlatformAdapter):
             return True
         except asyncio.CancelledError:
             raise
+        except WorkLeaseLost:
+            logger.warning("TheChat refused invocation without acknowledged work authority")
+            return True
         except Exception as exc:
             logger.exception("TheChat: failed to process platform event")
             invocation_id = item.get("invocationId")
@@ -2897,9 +2942,9 @@ class TheChatAdapter(BasePlatformAdapter):
                 try:
                     await self._client.post(
                         f"/hermes-platform/invocations/{invocation_id}/failed",
-                        json={
+                        json=work_payload(self._event_contexts.get(str(item.get("messageId"))) or self._context_from_platform_event(item) or {}, {
                             "error": f"Hermes gateway failed to process platform event: {exc}"
-                        },
+                        }),
                     )
                 except Exception:
                     logger.debug(
@@ -2908,14 +2953,24 @@ class TheChatAdapter(BasePlatformAdapter):
                     )
             return False
 
-    async def _handle_platform_event(self, item: Dict[str, Any]) -> None:
-        item = self._validate_platform_event(item)
+    def _source_from_platform_event(self, item, context):
+        return self.build_source(
+            chat_id=str(item["chatId"]),
+            chat_name=item["conversation"].get("name") or context["bot_name"],
+            chat_type="dm" if item["chatType"] == "dm" else "group",
+            user_id=str(item["sender"]["id"]),
+            user_name=str(item["sender"]["name"]),
+            guild_id=str(item["conversation"]["workspaceId"] or "") or None,
+            thread_id=str(item.get("threadId") or "") or None,
+            message_id=str(item["messageId"]),
+        )
+
+    async def _deliver_platform_event(self, item: Dict[str, Any], context: Dict[str, Any]) -> None:
         chat_id = str(item["chatId"])
         invocation_id = str(item["invocationId"])
         thread_id = str(item.get("threadId") or "") or None
         bot = item["bot"]
         conversation = item["conversation"]
-        sender = item["sender"]
         message_id = str(item["messageId"])
         session_intent = item.get("sessionIntent")
         session_intent_type = (
@@ -2937,9 +2992,6 @@ class TheChatAdapter(BasePlatformAdapter):
                 "thechat.session_intent.type": session_intent_type,
             },
         ) as span:
-            context = self._context_from_platform_event(item)
-            if context is None:
-                raise ValueError("TheChat event missing invocation context")
             self._contexts[self._context_key(chat_id, thread_id)] = context
             if thread_id is None:
                 self._contexts[chat_id] = context
@@ -2967,16 +3019,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 "thechat.attachment.cached_count",
                 len(media_urls),
             )
-            source = self.build_source(
-                chat_id=chat_id,
-                chat_name=conversation.get("name") or context["bot_name"],
-                chat_type="dm" if item["chatType"] == "dm" else "group",
-                user_id=str(sender["id"]),
-                user_name=str(sender["name"]),
-                guild_id=str(conversation["workspaceId"] or "") or None,
-                thread_id=thread_id,
-                message_id=message_id,
-            )
+            source = context["source"]
             if text.startswith("/"):
                 message_type = MessageType.COMMAND
             elif "image" in media_kinds:

@@ -106,7 +106,7 @@ def thechat_event(*, invocation_id: str, text: str, message_id: str) -> dict[str
             "id": CONVERSATION_ID,
             "type": "direct",
             "name": "Koda DM",
-            "workspaceId": "workspace-1",
+            "workspaceId": None,  # Legacy/personal queue acknowledgements still complete immediately.
         },
     }
 

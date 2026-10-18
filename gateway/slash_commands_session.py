@@ -171,7 +171,15 @@ class GatewaySessionCommandsMixin:
         self._evict_cached_agent(session_key)
         # Conversation boundary: ALL conversation-scoped per-session state + security state in one
         # funnel call (see _CONVERSATION_SCOPED_STATE in gateway/run.py).
+        discarded = list(self._overflow_queue(session_key) or ())
         self._clear_conversation_scope(session_key, reason="session_reset")
+        adapter = self._delivery_adapter_for(source)
+        if adapter is not None and discarded:
+            from gateway.platforms.base import ProcessingOutcome
+            for queued_event in discarded:
+                await adapter._run_processing_hook(
+                    "on_processing_complete", queued_event, ProcessingOutcome.CANCELLED,
+                )
         # In-flight async delegations end WITH the conversation: once the id rotates their
         # completions have no live owner. Expire by durable id, routing key as legacy fallback.
         with contextlib.suppress(Exception):

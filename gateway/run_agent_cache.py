@@ -542,6 +542,13 @@ class GatewayAgentCacheMixin:
                     overflow.remove(wake)
             if wake is not None:
                 adapter._pending_messages[session_key] = wake
+            if parked is not None and parked is not wake:
+                # The removed head will never reach the normal processing tail.
+                # Close its invocation resources, not the running turn or FIFO siblings.
+                from gateway.platforms.base import ProcessingOutcome
+                await adapter._run_processing_hook(
+                    "on_processing_complete", parked, ProcessingOutcome.CANCELLED,
+                )
         if state is not None:
             state.persistent.pending_command_text = None
         if release_running_state:
