@@ -501,6 +501,85 @@ def test_settle_hooks_chain_instead_of_replacing_each_other():
     assert calls == [("card", "timeout"), ("notice", "timeout")]
 
 
+@pytest.mark.asyncio
+async def test_named_target_inbox_approval_is_scoped_to_that_target(monkeypatch):
+    """Named execution targets: the card says which target, and Always allow covers only that one."""
+    from tools import approval_context
+
+    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
+    monkeypatch.setattr(wait_mod._ctx, "_get_approval_timeout", lambda: 30)
+    monkeypatch.setattr(wait_mod._ctx, "_fire_approval_hook", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "tools.tirith_security.check_command_security",
+        lambda *_a, **_k: {"action": "allow", "findings": [], "summary": ""},
+    )
+    monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
+    monkeypatch.setenv("HERMES_EXEC_ASK", "1")
+    api = _TheChat()
+    adapter = await _adapter(api)
+    loop = asyncio.get_running_loop()
+    command = "rm -rf /tmp/hermes-thechat-target-scope"
+
+    def notify(data):
+        # What the gateway runner sends for a button-capable adapter.
+        asyncio.run_coroutine_threadsafe(
+            adapter.send_exec_approval(
+                CONVERSATION_ID, data["command"], SESSION_KEY, description=data["description"],
+                allow_permanent=data["allow_permanent"], allow_session=data["allow_session"],
+                request_id=data["request_id"],
+            ),
+            loop,
+        ).result(timeout=5)
+
+    def guard(target):
+        token = approval_context.set_current_session_key(SESSION_KEY)
+        try:
+            return approval_mod.check_all_command_guards(
+                command, "ssh", execution_target=target, execution_backend="ssh",
+                execution_target_named=True, execution_target_scope=f"{target}-scope",
+            )
+        finally:
+            approval_context.reset_current_session_key(token)
+
+    async def open_request(count):
+        for _ in range(500):
+            if len(api.requests) == count:
+                return list(api.requests.values())[-1]
+            await asyncio.sleep(0.01)
+        raise AssertionError(f"expected {count} TheChat request(s), got {len(api.requests)}")
+
+    approval_mod.register_gateway_notify(SESSION_KEY, notify)
+    try:
+        devbox_wait = asyncio.ensure_future(asyncio.to_thread(guard, "devbox"))
+        devbox = await open_request(1)
+        assert "execution target: 'devbox'; backend: ssh" in devbox["body"]["body"]
+        assert devbox["body"]["details"] == {"command": command}
+        assert devbox["body"]["response"]["choices"] == ["once", "session", "always", "deny"]
+        await adapter._bot_requests.handle_polled_answers([api.answer(devbox["clientKey"], {"choice": "always"})])
+        assert (await asyncio.wait_for(devbox_wait, 10))["approved"] is True
+        assert devbox["status"] == "delivered" and devbox["deliveryApplied"] is True
+        with approval_mod._lock:
+            permanent = set(approval_mod._permanent_set())
+        assert any(key.startswith("target:devbox-scope:") for key in permanent), permanent
+
+        # The same target is now allowed without a new card.
+        assert (await asyncio.to_thread(guard, "devbox"))["approved"] is True
+        assert len(api.requests) == 1
+
+        # A sibling target is not covered by that answer: TheChat asks again.
+        prod_wait = asyncio.ensure_future(asyncio.to_thread(guard, "prod"))
+        prod = await open_request(2)
+        assert "execution target: 'prod'; backend: ssh" in prod["body"]["body"]
+        await adapter._bot_requests.handle_polled_answers([api.answer(prod["clientKey"], {"choice": "deny"})])
+        assert (await asyncio.wait_for(prod_wait, 10))["approved"] is False
+        assert prod["status"] == "delivered" and prod["deliveryApplied"] is True
+    finally:
+        approval_mod.unregister_gateway_notify(SESSION_KEY)
+        with approval_mod._lock:
+            approval_mod._session_approved.pop(SESSION_KEY, None)
+            approval_mod._permanent_approved.clear()
+
+
 # -- clarify ---------------------------------------------------------------------------------
 
 
