@@ -15,6 +15,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextvars import ContextVar
+from contextlib import contextmanager
 
 from utils import env_var_enabled
 
@@ -29,6 +30,96 @@ _sudo_password_cache_lock = threading.Lock()
 
 # Only populated while invoking a UI callback; preserve the zero-argument callback API.
 _sudo_prompt_command: ContextVar[str] = ContextVar("sudo_prompt_command", default="")
+_UNSET_PROMPT = object()
+_sudo_prompt_override = ContextVar("sudo_prompt_override", default=_UNSET_PROMPT)
+_sudo_prompt_current = ContextVar("sudo_prompt_current", default=None)
+
+
+@contextmanager
+def sudo_prompt_scope(callback, *, is_current=None):
+    """Native gateway prompts are one-shot, never cached or borrowed from another surface."""
+    token = _sudo_prompt_override.set(callback)
+    current_token = _sudo_prompt_current.set(is_current)
+    try:
+        yield
+    finally:
+        _sudo_prompt_current.reset(current_token)
+        _sudo_prompt_override.reset(token)
+
+
+class NativeSudoRefused(RuntimeError):
+    """Fixed public failure; never include credentials or subprocess diagnostics."""
+
+
+def native_sudo_is_current() -> bool:
+    from tools.interrupt import is_interrupted, is_thread_interrupted
+    check = _sudo_prompt_current.get()
+    return bool(callable(_sudo_prompt_override.get()) and (check is None or check())
+                and not is_interrupted() and not is_thread_interrupted(threading.get_ident()))
+
+
+def _native_sudo_binary() -> str:
+    # Ignore PATH/shell aliases/functions: the credential recipient must be system sudo.
+    from pathlib import Path
+    from hermes_platform.resolver.core import LookupContext, locate_command
+    command = locate_command("sudo", LookupContext(path=os.defpath)).command
+    if command:
+        path = Path(command[0]).resolve()
+        if all(p.stat().st_uid == 0 and not p.stat().st_mode & 0o022
+               for p in (path, *path.parents)):
+            return str(path)
+    raise NativeSudoRefused("Native sudo requires a root-owned system sudo executable.")
+
+
+def prepare_native_sudo(command: str, *, supported: bool):
+    """Return (auth argv, command argv), or None for the untouched legacy path.
+
+    A bounded literal-argv subset, not a shell parser: no compound commands,
+    expansions, redirections, env assignments, wrappers or sudo mode flags.
+    The same explicit run-as user/group goes to validation and execution.
+    """
+    from agent.secret_scope import get_secret, UnscopedSecretError
+    if _sudo_prompt_override.get() is _UNSET_PROMPT or not _count_real_sudo_invocations(command):
+        return None
+    try:
+        if get_secret("SUDO_PASSWORD") is not None:
+            return None  # explicit operator configuration keeps legacy behavior
+    except UnscopedSecretError:
+        raise NativeSudoRefused("Native sudo requires an active credential scope.") from None
+    if not supported or not native_sudo_is_current() or _in_delegated_child_context():
+        raise NativeSudoRefused("Native sudo capture is unavailable for this execution context.")
+    if (any(c in command for c in "\n\r\x00;|&()<>$`*?[]{}~")
+            or any(kind == "comment" for kind, *_ in _scan_shell(command))):
+        raise NativeSudoRefused("Native sudo requires one literal command without shell syntax.")
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        raise NativeSudoRefused("Native sudo requires a complete literal command.") from None
+    binary = _native_sudo_binary()
+    if not words or words[0] not in {"sudo", binary}:
+        raise NativeSudoRefused("Native sudo requires the system sudo command without wrappers.")
+    options = []
+    seen = set()
+    i = 1
+    names = {"-u": "-u", "--user": "-u", "-g": "-g", "--group": "-g"}
+    while i < len(words) and words[i] in names:
+        flag = names[words[i]]
+        if (flag in seen or i + 1 >= len(words)
+                or not re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_.-]*|#[0-9]+)", words[i + 1])):
+            raise NativeSudoRefused("Native sudo requires an explicit valid user/group operand.")
+        seen.add(flag)
+        options.extend((flag, words[i + 1]))
+        i += 2
+    if i < len(words) and words[i] == "--":
+        i += 1
+    if i >= len(words) or words[i].startswith("-") or "=" in words[i]:
+        raise NativeSudoRefused("Native sudo supports only -u/--user and -g/--group, then a command.")
+    return [binary, "-S", "-p", "", *options, "-v"], [binary, "-n", *options, "--", *words[i:]]
+
+
+def scoped_sudo_callback(fallback):
+    override = _sudo_prompt_override.get()
+    return fallback if override is _UNSET_PROMPT else override
 
 
 def get_sudo_prompt_command() -> str:
@@ -54,6 +145,8 @@ def _get_sudo_password_cache_scope() -> str:
 
 def _get_cached_sudo_password() -> str:
     """Return the cached sudo password for the current scope."""
+    if _sudo_prompt_override.get() is not _UNSET_PROMPT:
+        return ""
     scope = _get_sudo_password_cache_scope()
     with _sudo_password_cache_lock:
         return _sudo_password_cache.get(scope, "")
@@ -61,6 +154,8 @@ def _get_cached_sudo_password() -> str:
 
 def _set_cached_sudo_password(password: str) -> None:
     """Persist a sudo password for the current scope ("" drops the entry)."""
+    if _sudo_prompt_override.get() is not _UNSET_PROMPT:
+        return
     scope = _get_sudo_password_cache_scope()
     with _sudo_password_cache_lock:
         if password:
@@ -432,18 +527,16 @@ def _rewrite_compound_background(command: str) -> str:
 def _transform_sudo_command(
     command: str | None,
     sudo_nopasswd_check: Callable[[], bool] | None = None,
+    *, allow_native_prompt: bool = True,
 ) -> tuple[str | None, str | None]:
-    """Rewrite command-position ``sudo`` executables to ``sudo -S -p ''`` when a password is available (shared by every
-    execution environment). Returns ``(command, sudo_stdin)``: ``sudo_stdin`` is one password
-    line per sudo invocation that the caller must PREPEND to the process stdin (sudo -S consumes
-    exactly one line and passes the rest through, so it's safe alongside the caller's own
-    stdin_data). Backends that can't pipe stdin (modal, daytona, vercel_sandbox) embed the
-    password in the command string themselves. With no password available the command is
-    returned unchanged and ``sudo_stdin`` is None, so it fails gracefully with "sudo: a password
-    is required". Password sources, in order: configured SUDO_PASSWORD, the session cache, then
-    an interactive prompt (45s timeout, cached on success) when a UI is reachable.
-    ``sudo_nopasswd_check`` (supplied by ``BaseEnvironment``) runs ``sudo -n true`` inside the
-    selected backend; a True result skips the prompt and the ``-S`` rewrite entirely."""
+    """Legacy CLI/Desktop/configured-password rewrite (not native masked capture).
+
+    Returns ``(command, sudo_stdin)``; legacy callers prepend password lines to
+    command stdin. That inherited mechanism cannot safely isolate a password from
+    arbitrary stdin consumers or cached sudo. Native turns instead use
+    ``prepare_native_sudo`` and the dedicated authentication-only subprocess.
+    Preconfigured SUDO_PASSWORD keeps its historical behavior on every backend.
+    """
     from tools.terminal_tool import _get_sudo_password_callback
     if command is None:
         return None, None
@@ -451,22 +544,27 @@ def _transform_sudo_command(
     if sudo_count == 0:
         return command, None
 
-    # Scope-aware read: under multiplex the process env may hold another profile's SUDO_PASSWORD;
-    # unscoped callers (UnscopedSecretError) keep the os.environ read.
+    # A missing multiplex scope must never borrow the launch profile's SUDO_PASSWORD.
+    from agent.secret_scope import get_secret, UnscopedSecretError
     try:
-        from agent.secret_scope import get_secret
         _configured_password = get_secret("SUDO_PASSWORD")
-    except Exception:
-        _configured_password = os.environ.get("SUDO_PASSWORD")
+    except UnscopedSecretError:
+        return command, None
     has_configured_password = _configured_password is not None
+    # Native capture is NEVER returned as whole-command stdin. Only the isolated
+    # local authentication path may invoke it. CLI/Desktop/configured behavior stays legacy.
+    if not has_configured_password and _sudo_prompt_override.get() is not _UNSET_PROMPT:
+        return command, None
     sudo_password = _configured_password if has_configured_password else _get_cached_sudo_password()
 
     # delegate_task children inherit HERMES_INTERACTIVE=1 (and possibly a stale thread-local
     # callback on a recycled worker) but have no user on the other side — always headless;
     # configured password and session cache still apply.
     should_prompt_for_sudo = (
-        env_var_enabled("HERMES_INTERACTIVE") or _get_sudo_password_callback() is not None
-    ) and not _in_delegated_child_context()
+        (env_var_enabled("HERMES_INTERACTIVE") and _sudo_prompt_override.get() is _UNSET_PROMPT)
+        or _get_sudo_password_callback() is not None
+    ) and not _in_delegated_child_context() and (
+        allow_native_prompt or _sudo_prompt_override.get() is _UNSET_PROMPT)
     if not has_configured_password and not sudo_password and should_prompt_for_sudo:
         # sudoers NOPASSWD must not be forced through the prompt or the -S pipe. The probe is
         # a round trip on the selected backend (an ssh exec for SSH), so it only runs when a

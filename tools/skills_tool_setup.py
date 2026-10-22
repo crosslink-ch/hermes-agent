@@ -4,6 +4,8 @@
 
 import logging
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import Enum
 from typing import Any, Dict, List
 
@@ -13,6 +15,19 @@ from utils import env_var_enabled
 logger = logging.getLogger("tools.skills_tool")
 
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_UNSET_CAPTURE = object()
+_capture_override = ContextVar("skill_secret_capture", default=_UNSET_CAPTURE)
+
+
+@contextmanager
+def secret_capture_scope(callback):
+    """Turn-local override; explicit None forbids borrowing CLI/Desktop globals."""
+    token = _capture_override.set(callback)
+    try:
+        yield
+    finally:
+        _capture_override.reset(token)
+
 _REMOTE_ENV_BACKENDS = frozenset({"docker", "singularity", "modal", "ssh", "daytona", "vercel_sandbox"})
 
 
@@ -94,14 +109,17 @@ def _capture_required_environment_variables(
     # Messaging-platform gateway surfaces can't prompt for a secret, so they get the "unsupported"
     # hint. Interactive gateway surfaces (desktop app / TUI) set HERMES_INTERACTIVE (same flag
     # tools/approval.py uses) and register a callback routing to a secure secret.request overlay.
-    if _is_gateway_surface() and not env_var_enabled("HERMES_INTERACTIVE"):
+    override = _capture_override.get()
+    if (override is None or (override is _UNSET_CAPTURE and _is_gateway_surface()
+                            and not env_var_enabled("HERMES_INTERACTIVE"))):
         try:
             from gateway.platforms.base import GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE as hint
         except Exception:
             hint = (f"Secure secret entry is not available. Load this skill in the local CLI to be "
                     f"prompted, or add the key to {display_hermes_home()}/.env manually.")
         return _capture_result(missing_names, gateway_setup_hint=hint)
-    if (callback := _st._secret_capture_callback) is None:
+    callback = _st._secret_capture_callback if override is _UNSET_CAPTURE else override
+    if callback is None:
         return _capture_result(missing_names)
     remaining_names: List[str] = []
     for entry in missing_entries:
@@ -109,7 +127,7 @@ def _capture_required_environment_variables(
         try:
             callback_result = callback(entry["name"], entry["prompt"], metadata)
         except Exception:
-            logger.warning(f"Secret capture callback failed for {entry['name']}", exc_info=True)
+            logger.warning("Secret capture callback failed")
             callback_result = {"success": False, "stored_as": entry["name"], "validated": False, "skipped": True}
         ok = isinstance(callback_result, dict) and callback_result.get("success")
         if not (ok and not callback_result.get("skipped")):
