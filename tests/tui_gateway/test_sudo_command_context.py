@@ -2,6 +2,7 @@
 
 import sys
 import threading
+from contextvars import ContextVar
 
 
 def test_sudo_request_preserves_command_without_leaking_prompt_context(monkeypatch):
@@ -22,7 +23,7 @@ def test_sudo_request_preserves_command_without_leaking_prompt_context(monkeypat
     # Restore the real registrations, including unrelated callbacks wired by the gateway.
     monkeypatch.setattr(terminal_tool, "_callback_tls", threading.local())
     monkeypatch.setattr(unlock, "_callback_tls", threading.local())
-    monkeypatch.setattr(unlock, "_current_session_tls", threading.local())
+    monkeypatch.setattr(unlock, "_current_session", ContextVar("test_vault_session", default=None))
     monkeypatch.setattr(project_tools, "_workspace_callback", None)
     monkeypatch.setattr(skills_tool, "_secret_capture_callback", None)
     monkeypatch.setattr(terminal_tool_sudo, "_sudo_password_cache", {})

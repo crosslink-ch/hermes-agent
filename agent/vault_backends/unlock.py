@@ -44,6 +44,24 @@ def get_unlock_prompt_callback() -> Optional[UnlockPrompt]:
 
 # (site, hint) -> the one-time code the user reads off their phone/email/app, "" when declined.
 CodePrompt = Callable[[str, str], str]
+_exact_code_values = contextvars.ContextVar("vault_exact_code_values", default=False)
+_prompt_backends = contextvars.ContextVar("vault_prompt_backends", default=None)
+
+
+@contextmanager
+def native_prompt_scope(unlock_backends):
+    """Structured surfaces declare backend support and preserve exact recovery-code values."""
+    token = _exact_code_values.set(True)
+    backends = _prompt_backends.set(frozenset(unlock_backends))
+    try:
+        yield
+    finally:
+        _prompt_backends.reset(backends)
+        _exact_code_values.reset(token)
+
+
+def code_values_are_exact() -> bool:
+    return _exact_code_values.get()
 
 
 def set_code_prompt_callback(cb: Optional[CodePrompt]) -> None:
@@ -246,7 +264,7 @@ def is_unlocked(backend: str) -> bool:
     return _live(backend, touch=False) is not None
 
 
-def can_prompt_here() -> bool:
+def can_prompt_here(backend: str = "") -> bool:
     """False in contexts where no human can answer (cron, webhook, api_server, -q)."""
     from tools.approval_context import (
         _is_cron_approval_context,
@@ -254,5 +272,8 @@ def can_prompt_here() -> bool:
         _is_unattended_platform_approval_context,
     )
     if _is_cron_approval_context() or _is_unattended_platform_approval_context() or _is_single_query_approval_context():
+        return False
+    supported = _prompt_backends.get()
+    if backend and supported is not None and backend not in supported:
         return False
     return get_unlock_prompt_callback() is not None

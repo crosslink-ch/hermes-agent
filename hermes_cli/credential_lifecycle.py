@@ -160,7 +160,7 @@ def purge_env_credential_references(
     return {"pool_pruned": pruned, "providers": providers}
 
 
-def save_provider_env_credential(env_var: str, value: str) -> Dict[str, Any]:
+def save_provider_env_credential(env_var: str, value: str, *, preserve_exact: bool = False) -> Dict[str, Any]:
     """Save/update a credential in ``.env`` and reconcile every mirror.
 
     config.yaml mirrors of the PREVIOUS value are updated so a stale higher-precedence copy cannot
@@ -179,7 +179,10 @@ def save_provider_env_credential(env_var: str, value: str) -> Dict[str, Any]:
     from hermes_cli.config import load_env, save_env_value
 
     old_value = load_env().get(env_var)
-    save_env_value(env_var, value)
+    if preserve_exact:
+        save_env_value(env_var, value, preserve_exact=True)
+    else:
+        save_env_value(env_var, value)
 
     config_updates: List[str] = []
     if value and old_value and old_value != value:

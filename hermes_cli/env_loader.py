@@ -51,6 +51,10 @@ _SECRET_SOURCE_CACHE_LOCK = threading.RLock()
 # One process-wide record (not per home/project scope): the environ is process-wide, so alternating
 # callers (gateway with a project .env, cron without; home A then B) must peel each other's output too.
 _DOTENV_PUBLISHED: dict[str, tuple[str | None, str, int]] = {}
+# Only the current marked publication is exempt from startup normalization.
+# An unmarked replacement removes the exemption; an external change must match
+# our last published value to qualify. This never changes legacy assignments.
+_DOTENV_EXACT_KEYS: set[str] = set()
 _DOTENV_PASSES = itertools.count()
 _DOTENV_LOCK = threading.RLock()
 
@@ -241,6 +245,9 @@ def _sanitize_loaded_credentials() -> None:
             continue
         if value.isascii():
             continue
+        published = _DOTENV_PUBLISHED.get(key)
+        if key in _DOTENV_EXACT_KEYS and published is not None and published[1] == value:
+            continue
         cleaned = value.encode("ascii", errors="ignore").decode("ascii")
         os.environ[key] = cleaned
         if key in _WARNED_KEYS:
@@ -281,10 +288,13 @@ def _load_dotenv_with_fallback(path: Path, *, override: bool, load_pass: int | N
         text = raw.decode("latin-1")
     # Imported here, not at module level: gateway tests stub ``sys.modules["dotenv"]`` with a bare module
     # exposing only ``load_dotenv``, and ``gateway.run`` imports this module at import time.
-    from dotenv.main import DotEnv
+    from dotenv.main import with_warn_for_invalid_lines
+    from dotenv.parser import parse_stream
     from dotenv.variables import parse_variables
+    from agent.secret_scope import parse_exact_env_value
 
-    assignments = list(DotEnv(dotenv_path=None, stream=io.StringIO(text), interpolate=False).parse())
+    assignments = [binding for binding in with_warn_for_invalid_lines(parse_stream(io.StringIO(text)))
+                   if binding.key is not None]
 
     with _DOTENV_LOCK:
         if load_pass is None:
@@ -297,10 +307,18 @@ def _load_dotenv_with_fallback(path: Path, *, override: bool, load_pass: int | N
                 else:
                     lookup_env[name] = baseline
         resolved: dict[str, str | None] = {}
-        for name, value in assignments:
-            if value is not None:  # mirrors dotenv.main.resolve_variables, minus the live os.environ
-                lookup = {**lookup_env, **resolved} if override else {**resolved, **lookup_env}
-                value = "".join(atom.resolve(lookup) for atom in parse_variables(value))
+        exact_keys: set[str] = set()
+        for binding in assignments:
+            name, value = binding.key, binding.value
+            exact = parse_exact_env_value(binding.original.string.partition("=")[2])
+            if exact is not None:
+                value = exact
+                exact_keys.add(name)
+            else:
+                exact_keys.discard(name)
+                if value is not None:  # mirrors dotenv.main.resolve_variables, minus the live os.environ
+                    lookup = {**lookup_env, **resolved} if override else {**resolved, **lookup_env}
+                    value = "".join(atom.resolve(lookup) for atom in parse_variables(value))
             resolved[name] = value
         for name, value in resolved.items():
             if value is None or (not override and name in os.environ):
@@ -314,6 +332,10 @@ def _load_dotenv_with_fallback(path: Path, *, override: bool, load_pass: int | N
             baseline = record[0] if ours else current
             os.environ[name] = value
             _DOTENV_PUBLISHED[name] = (baseline, value, load_pass)
+            if name in exact_keys:
+                _DOTENV_EXACT_KEYS.add(name)
+            else:
+                _DOTENV_EXACT_KEYS.discard(name)
     _sanitize_loaded_credentials()  # httpx encodes headers as ASCII
 
 

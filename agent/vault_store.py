@@ -335,7 +335,7 @@ class VaultStore:
                 raise VaultError(
                     f"identifier_type must be one of {LOGIN_IDENTIFIER_TYPES}"
                 )
-            identifier = str(secret.pop("identifier", "") or "").strip()
+            identifier = str(secret.pop("identifier", "") or "")
             if not identifier or not secret.get("password"):
                 raise VaultError("login items require identifier and password")
             identifier_type = str(id_type)
