@@ -1124,7 +1124,8 @@ def _contains_unsafe_gateway_action(
 
     for script_path, candidate_executed in candidates:
         # Do not touch a FileProvider path even to discover whether the file is hydrated.
-        if _on_cloud_path(script_path):
+        if (_is_cloud_placeholder_path(script_path) if read_remote_script is not None
+                else _on_cloud_path(script_path)):
             if candidate_executed:
                 return _refuse_unreadable(
                     budget, script_path,
@@ -1132,7 +1133,7 @@ def _contains_unsafe_gateway_action(
                     "~/Library/CloudStorage) that the guard refuses to open",
                 )
             continue
-        resolved = _resolve_lenient(script_path)
+        resolved = script_path if read_remote_script is not None else _resolve_lenient(script_path)
         if resolved in visited:
             continue
         if not budget.charge_path():
@@ -1140,22 +1141,27 @@ def _contains_unsafe_gateway_action(
                 return _budget_exhausted(budget, "paths", depth)
             break  # remaining candidates are all mentions
         visited.add(resolved)
-        # Never read more than the walk can still afford to tokenize; a file larger than the
-        # remainder fails closed exactly like an oversized one.
-        script_text, unsafe = _read_referenced_script(script_path, max_bytes=budget.bytes_remaining)
-        if unsafe:
-            if candidate_executed:
-                return _refuse_unreadable(budget, script_path, _unreadable_reason(script_path))
-            continue
-        if script_text is None and read_remote_script is not None:
-            # Local path missing; the remote backend's output crosses the same trust boundary as a
-            # local read — sanitize identically (binary skip + size fail-closed).
+        # A selected backend is authoritative: a matching host path must not
+        # shadow the script executed by the remote target. Both paths share the
+        # same bounded scan and executed-vs-inert-mention refusal policy.
+        if read_remote_script is not None:
             if not budget.charge_remote_read():
                 if candidate_executed:
                     return _budget_exhausted(budget, "remote reads", depth)
                 break
+            remote_result = read_remote_script(str(script_path))
+            if isinstance(remote_result, tuple):
+                remote_text, remote_unsafe = remote_result
+                if remote_unsafe:
+                    if candidate_executed:
+                        return _refuse_unreadable(
+                            budget, script_path, f"`{script_path}` could not be scanned on the selected backend",
+                        )
+                    continue
+            else:
+                remote_text = remote_result
             script_text, unsafe = _sanitize_remote_script_text(
-                read_remote_script(str(script_path)), max_bytes=budget.bytes_remaining
+                remote_text, max_bytes=budget.bytes_remaining,
             )
             if unsafe:
                 if candidate_executed:
@@ -1165,10 +1171,20 @@ def _contains_unsafe_gateway_action(
                         f"({_MAX_REFERENCED_SCRIPT_BYTES} bytes) or the remaining walk budget",
                     )
                 continue
+        else:
+            # Never read more than the walk can still afford to tokenize.
+            script_text, unsafe = _read_referenced_script(
+                script_path, max_bytes=budget.bytes_remaining,
+            )
+            if unsafe:
+                if candidate_executed:
+                    return _refuse_unreadable(budget, script_path, _unreadable_reason(script_path))
+                continue
         if not script_text:
             continue
         # Relative references inside a script resolve against that script's directory, not the cwd.
-        if recurse(script_text, _resolve_script_directory(str(resolved)) or cwd, candidate_executed):
+        if recurse(script_text, (str(script_path.parent) if read_remote_script is not None
+                                 else _resolve_script_directory(str(resolved))) or cwd, candidate_executed):
             return True
     return False
 

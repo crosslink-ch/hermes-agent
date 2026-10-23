@@ -17,7 +17,9 @@ import tools.terminal_tool as terminal_module
 
 
 def _plan(timeout: float = 0.05) -> SimpleNamespace:
+    from tools.execution_targets import resolve_execution_target
     return SimpleNamespace(
+        resolution=resolve_execution_target(None),
         config={},
         env_type="local",
         effective_task_id="pre-guard-deadline-test",

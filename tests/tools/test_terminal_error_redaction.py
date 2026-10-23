@@ -30,7 +30,11 @@ def _patch_common(monkeypatch, env):
     monkeypatch.setattr(terminal_tool, "_task_env_overrides", {})
     monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: _minimal_terminal_config())
     monkeypatch.setattr(terminal_tool, "_start_cleanup_thread", lambda: None)
-    monkeypatch.setattr(terminal_tool, "_resolve_container_task_id", lambda value: value or "default")
+    monkeypatch.setattr(
+        terminal_tool,
+        "_resolve_container_task_id",
+        lambda value, **_kwargs: value or "default",
+    )
     monkeypatch.setattr(
         terminal_tool,
         "_check_all_guards",
@@ -107,7 +111,7 @@ def test_environment_creation_import_error_redacts_exception_text(monkeypatch):
     def fail_create_environment(**kwargs):
         raise ImportError(f"backend import failed with {SECRET}")
 
-    monkeypatch.setattr("tools.terminal_tool_backends._create_environment", fail_create_environment)
+    monkeypatch.setattr(terminal_tool, "_create_environment", fail_create_environment)
 
     result = json.loads(terminal_tool.terminal_tool(command="echo ok"))
 
