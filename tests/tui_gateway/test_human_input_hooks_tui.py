@@ -21,7 +21,8 @@ def test_tui_sudo_request_fires_human_input_hooks(monkeypatch):
 
     monkeypatch.setattr(terminal_tool, "_callback_tls", threading.local())
     monkeypatch.setattr(unlock, "_callback_tls", threading.local())
-    monkeypatch.setattr(unlock, "_current_session_tls", threading.local())
+    from contextvars import ContextVar
+    monkeypatch.setattr(unlock, "_current_session", ContextVar("vault_owner_session", default=None))
     monkeypatch.setattr(project_tools, "_workspace_callback", None)
     monkeypatch.setattr(skills_tool, "_secret_capture_callback", None)
     monkeypatch.setattr(terminal_tool_sudo, "_sudo_password_cache", {})
