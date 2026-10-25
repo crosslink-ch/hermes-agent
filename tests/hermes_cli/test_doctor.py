@@ -1094,6 +1094,8 @@ class TestGitHubTokenCheck:
                 return types.SimpleNamespace(returncode=1, stdout=b"", stderr=b"unknown JSON field")
             return types.SimpleNamespace(returncode=0, stdout=b"", stderr=b"Logged in to github.com")
 
+        # The gh process is simulated; do not require a host installation as well.
+        monkeypatch.setattr("hermes_cli.doctor_tools._safe_which", lambda name: "gh" if name == "gh" else None)
         monkeypatch.setattr(subprocess, "run", gh_2_98)
         assert doctor_state._gh_authenticated() is True
 
