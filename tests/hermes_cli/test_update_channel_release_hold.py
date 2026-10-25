@@ -32,6 +32,8 @@ def git(root, *args):
 @pytest.fixture
 def source(tmp_path, monkeypatch):
     """An install on a post-runtime ``main`` commit; the release sits beside it, before the runtime."""
+    # Exercise the generic upstream release protocol, not Crosslink's branch-only policy.
+    monkeypatch.setattr(source_releases, "OFFICIAL_REPOSITORY", "NousResearch/hermes-agent")
     home, origin, checkout = (tmp_path / name for name in ("home", "origin", "checkout"))
     home.mkdir()
     origin.mkdir()

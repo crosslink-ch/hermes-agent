@@ -95,7 +95,7 @@ class TestClassifyFetchFailure:
         (damaged / ".git").mkdir(parents=True)
         update_cmd_git._print_fetch_failure(fetch(damaged, "origin"), git_cmd=["git"], root=damaged)
         out = capsys.readouterr().out
-        assert "damaged" in out and "hermes-agent.nousresearch.com/install." in out
+        assert "damaged" in out and "share.kihub.ch/hermes/install." in out
         assert str(damaged) in out  # the repair targets THIS checkout, not the default directory
 
         healthy, remote = tmp_path / "healthy", tmp_path / "remote"

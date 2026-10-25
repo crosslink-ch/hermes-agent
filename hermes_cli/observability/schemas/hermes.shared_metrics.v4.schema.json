@@ -3644,6 +3644,7 @@
                 "hermes-slack",
                 "hermes-sms",
                 "hermes-telegram",
+                "hermes-thechat",
                 "hermes-webhook",
                 "hermes-wecom",
                 "hermes-wecom-callback",

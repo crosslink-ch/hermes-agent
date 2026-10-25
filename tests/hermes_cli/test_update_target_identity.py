@@ -92,6 +92,8 @@ def _publish_stable(monkeypatch, t):
     """stable = the latest published GitHub release; its resolver pins t.wanted (v1.1.0)."""
     from hermes_cli import source_releases
 
+    # This fixture explicitly selects upstream's release protocol.
+    monkeypatch.setattr(source_releases, 'OFFICIAL_REPOSITORY', 'NousResearch/hermes-agent')
     monkeypatch.setattr(source_releases, '_resolve_stable', lambda repository, *_: source_releases.SourceTarget(
         'stable', 'stable', repository, commit=t.wanted, version='1.1.0'))
 

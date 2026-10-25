@@ -261,25 +261,26 @@ def test_startup_hint_installs_into_the_profile_that_printed_it(tmp_path, monkey
 
 def test_missing_catalog_provider_recovery_names_the_profile_install_command(tmp_path, monkeypatch, capsys):
     """Offline, lazy installs off, or a failed migration: every surface a user turns to (doctor,
-    ``memory status``, ``memory setup honcho``, ``hermes honcho``) names the one command that installs
-    the catalog plugin into THIS profile. Real in-tree catalog, nothing installed."""
+    ``memory status``, ``memory setup hindsight``, ``hermes hindsight``) names the one command that installs
+    the catalog plugin into THIS profile. Real in-tree catalog, nothing installed.
+    Honcho is retained in the Crosslink bundle, so it is not a missing-provider fixture."""
     from types import SimpleNamespace
     from hermes_cli import doctor_state, memory_setup
     from hermes_cli._parser import build_top_level_parser
 
     home = tmp_path / "profiles" / "work"
     home.mkdir(parents=True)
-    (home / "config.yaml").write_text("memory:\n  provider: honcho\n", encoding="utf-8")
+    (home / "config.yaml").write_text("memory:\n  provider: hindsight\n", encoding="utf-8")
     monkeypatch.setenv("HERMES_HOME", str(home))
-    want = "hermes -p work plugins install honcho"
+    want = "hermes -p work plugins install hindsight"
 
-    doctor_state._memory_provider_generic("honcho")
+    doctor_state._memory_provider_generic("hindsight")
     memory_setup.cmd_status(SimpleNamespace())
-    memory_setup.cmd_setup_provider("honcho")
+    memory_setup.cmd_setup_provider("hindsight")
     assert capsys.readouterr().out.count(want) == 3
     parser, _subparsers, _chat = build_top_level_parser()
     with pytest.raises(SystemExit):
-        parser.parse_args(["honcho", "status"])
+        parser.parse_args(["hindsight", "status"])
     assert want in capsys.readouterr().err
 
 
