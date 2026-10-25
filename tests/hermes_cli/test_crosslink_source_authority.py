@@ -31,5 +31,5 @@ def test_source_release_migration_is_not_implicitly_enabled(channel, monkeypatch
     assert calls == []
     if channel in {"stable", "canary"}:
         assert source_releases.resolve_source_release(
-            channel, repository="crosslink-ch/hermes-agent") is None
+            channel, repository="crosslink-ch/hermes-agent") == (None, None)
     assert calls == []

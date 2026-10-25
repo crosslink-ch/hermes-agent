@@ -98,4 +98,7 @@ class PendingControls:
             # an exact request ID can never consume the next FIFO approval.
             resolved = resolve_gateway_approval(route, response['choice'], request_id=prompt_id)
             self.snapshot(session_id, generation)
+            if not resolved and prompt_id in self.pending:
+                raise RuntimeStoreError('invalid_params', field='prompt_id',
+                                        detail='An earlier approval must be answered first')
             return {'status': 'resolved' if resolved else 'already_resolved', 'prompt_id': prompt_id}

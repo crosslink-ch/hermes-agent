@@ -645,7 +645,8 @@ class TestStripYamlFrontmatter:
 
 class TestPlatformHints:
     def test_platform_hints_thechat_latex_math(self):
-        hint = PLATFORM_HINTS["thechat"]
+        from agent.system_prompt import _default_platform_hint
+        hint = _default_platform_hint("thechat")
         assert "TheChat renders LaTeX math in markdown" in hint
         assert "double-dollar delimiters" in hint
         assert "$$E = mc^2$$" in hint

@@ -88,13 +88,18 @@ async def exercise_control_boundaries(tmp_path, monkeypatch):
         await authority.detach(actor, snap.subscription_id)
         assert len(list_gateway_approvals(live.route)) == 2
         await authority.attach(actor, ref)
-        # Resolve second first: no FIFO consumption by a stale/native response.
+        # Crosslink preserves approval FIFO across attached and native surfaces.
+        # Refusing a later ID must neither consume the head nor claim it was resolved.
+        with pytest.raises(RuntimeStoreError) as exc:
+            await authority.respond(actor, ref, row['generation'], prompts[1]['prompt_id'], {'choice': 'once'})
+        assert exc.value.reason == 'invalid_params'
+        assert len((await authority.attach(actor, ref)).prompts) == 2
+        assert not tasks[0].done() and not tasks[1].done()
+        resolve_gateway_approval(live.route, 'deny', request_id=prompts[0]['prompt_id'])
+        assert (await tasks[0])['choice'] == 'deny'
         response = await authority.respond(actor, ref, row['generation'], prompts[1]['prompt_id'], {'choice': 'once'})
         assert response['status'] == 'resolved'
         assert (await tasks[1])['choice'] == 'once'
-        assert not tasks[0].done()
-        resolve_gateway_approval(live.route, 'deny', request_id=prompts[0]['prompt_id'])
-        assert (await tasks[0])['choice'] == 'deny'
         assert not (await authority.attach(actor, ref)).prompts
         replay = live.event_stream.since(live.event_stream.epoch, 0)
         assert 'PRIVATE_SUDO_ANSWER' not in json.dumps(replay)

@@ -22,6 +22,18 @@ def register(ctx):
     ctx.register_platform(
         name="thechat", label="TheChat", adapter_factory=TheChatAdapter,
         check_fn=check_thechat_requirements,
+        platform_hint=(
+            "You are in TheChat, a workspace chat app. Respond conversationally in "
+            "plain markdown. In channels, users may address different Hermes bots "
+            "by name; only answer for the bot/session that received this message. "
+            "TheChat renders LaTeX math in markdown. For inline math, use "
+            "double-dollar delimiters with no spaces inside, like `$$E = mc^2$$`. "
+            "Do not use single-dollar inline math such as `$x$`; single dollars "
+            "are treated as normal text to avoid conflicts with currency and shell "
+            "variables. For block math, use a standalone `$$` block or a fenced "
+            "`math` code block. Escape literal dollar signs as `\\$` when needed. "
+            "Keep LaTeX out of code fences unless you intentionally want a math block."
+        ),
         is_connected=lambda config: bool(config.token and config.extra.get("base_url")),
         config_connected_fn=lambda config: bool(config.token and config.extra.get("base_url")),
         required_env=list(ENV_ENABLE_CREDENTIALS), env_enable_credentials=ENV_ENABLE_CREDENTIALS,
