@@ -574,23 +574,23 @@ def _setup_identity_mapping(cfg: dict, hermes_host: dict, current_peer: str, new
 def _ensure_sdk_installed() -> bool:
     """Check honcho-ai is importable; offer to install if not. Returns True if ready."""
     try:
-        import honcho  # noqa: F401
+        import honcho
         return True
     except ImportError:
         pass
     print("  honcho-ai is not installed.")
     if not _yes(_prompt("Install it now? (honcho-ai==2.2.0)", default="y")):
-        print("  Skipping install. Run: pip install 'honcho-ai==2.2.0'\n")
+        print("  Skipping install. Run: hermes pm install --extra honcho\n")
         return False
     print("  Installing honcho-ai...", flush=True)
-    from tools.lazy_deps import install_specs  # env-aware: sealed hosted venvs redirect to the data volume
-    result = install_specs(["honcho-ai==2.2.0"])
-    if result.ok:
-        print("  Installed.\n")
-        return True
-    print(f"  Cannot install: {result.reason}\n" if result.blocked else
-          f"  Install failed:\n{(result.stderr or '').strip()}\n  Run manually: uv pip install 'honcho-ai==2.2.0'\n")
-    return False
+    from pm import InstallError, sync_venv
+    try:
+        sync_venv(["honcho"], explicit=True)
+    except InstallError as exc:
+        print(f"  Cannot install: {exc}\n")
+        return False
+    print("  Installed. Restart Hermes to use the selected environment.\n")
+    return True
 
 
 def _device_login_available() -> bool:
@@ -949,7 +949,7 @@ def cmd_status(args) -> None:
         _cmd_status_all()
         return
     try:
-        import honcho  # noqa: F401
+        import honcho
     except ImportError:
         print("  honcho-ai is not installed. Run: hermes honcho setup\n")
         return

@@ -144,7 +144,7 @@ async def test_thread_prose_not_swallowed_by_native_multi_choice_clarify():
         entry = cm._entries.get("cl-native")
     assert entry is not None
     assert entry.event.is_set()
-    assert entry.response == ""
+    assert entry.response == cm.CANCELLED
     _clear_clarify_state()
 
 
@@ -289,7 +289,7 @@ async def test_native_multi_select_prose_releases_clarify_before_routing():
         entry = cm._entries.get("cl-ms-prose")
     assert entry is not None
     assert entry.event.is_set()
-    assert entry.response == ""
+    assert entry.response == cm.CANCELLED
     _clear_clarify_state()
 
 

@@ -31,7 +31,7 @@ class StructuredProgressMixin:
         except Exception:
             return str(value)
 
-    def _schedule_structured_progress(self, event: Dict[str, Any]) -> None:
+    def _schedule_structured_progress(self, event: dict[str, Any]) -> None:
         ctx = self._ctx
         if (
             not ctx._structured_progress_adapter
@@ -53,8 +53,8 @@ class StructuredProgressMixin:
     def _record_structured_tool_progress(
         self,
         event_type: str,
-        tool_name: str = None,
-        preview: str = None,
+        tool_name: str | None = None,
+        preview: str | None = None,
         **kwargs,
     ) -> None:
         ctx = self._ctx
@@ -138,21 +138,3 @@ class StructuredProgressMixin:
         if self._ctx._structured_progress_supported:
             self._structured_tool_start_callback_sync(call_id, tool_name, args)
         self.voice_ack_callback(call_id, tool_name, args)
-
-    def combined_tool_complete_callback(self, call_id, tool_name, args, result):
-        """Compose structured and native task-card completion consumers."""
-        ctx = self._ctx
-        if ctx._structured_progress_supported:
-            self._structured_tool_complete_callback_sync(
-                call_id, tool_name, args, result
-            )
-        if ctx._native_slack_task_cards:
-            self.native_tool_complete_callback(call_id, tool_name, args, result)
-
-
-
-
-
-
-
-

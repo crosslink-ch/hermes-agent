@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import agent.title_generator as title_generator
+from agent import title_generator
 import gateway.run as gateway_run
 from gateway.config import Platform
 from gateway.session import SessionSource
@@ -148,7 +148,7 @@ def _configure_runtime(monkeypatch, tmp_path):
         },
     )
 
-    import hermes_cli.tools_config as tools_config
+    from hermes_cli import tools_config
 
     monkeypatch.setattr(
         tools_config,

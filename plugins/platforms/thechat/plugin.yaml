@@ -1,0 +1,20 @@
+name: thechat-platform
+label: TheChat
+kind: platform
+version: 1.0.0
+description: Crosslink TheChat bot transport, approvals, attachments and notifications.
+author: Crosslink
+requires_env:
+  - name: THECHAT_BASE_URL
+    description: TheChat platform API URL
+    password: false
+  - name: THECHAT_BOT_TOKEN
+    description: TheChat bot credential
+    password: true
+optional_env:
+  - name: THECHAT_ALLOWED_USERS
+    description: Admitted TheChat user IDs
+    password: false
+  - name: THECHAT_HOME_CHANNEL
+    description: Default conversation UUID for notifications
+    password: false

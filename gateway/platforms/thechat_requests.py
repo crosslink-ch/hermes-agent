@@ -26,7 +26,7 @@ import json
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, UTC
 from typing import Any, Callable, Dict, Optional
 
 import httpx
@@ -99,7 +99,7 @@ class _Pending:
     local_id: str
     session_key: str
     chat_id: str
-    create_body: Dict[str, Any]
+    create_body: dict[str, Any]
     choices: list[str] = field(default_factory=list)
     multi_select: bool = False
     remote_id: Optional[str] = None
@@ -122,7 +122,7 @@ def _expires_at(timeout_seconds: Any) -> Optional[str]:
     if seconds <= 0:
         return None
     seconds = min(seconds + _EXPIRY_GRACE_SECONDS, _MAX_EXPIRY_SECONDS)
-    moment = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    moment = datetime.now(UTC) + timedelta(seconds=seconds)
     return moment.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
@@ -168,10 +168,10 @@ class BotRequestBridge:
         self._adapter = adapter
         self._redact = redact
         self.enabled = False
-        self._pending: Dict[str, _Pending] = {}
+        self._pending: dict[str, _Pending] = {}
         # TheChat request id -> (applied, note); answers can arrive twice (poll + ack lost, or
         # a webhook retry) and must be acknowledged identically, never applied twice.
-        self._outcomes: "OrderedDict[str, tuple[bool, Optional[str]]]" = OrderedDict()
+        self._outcomes: OrderedDict[str, tuple[bool, Optional[str]]] = OrderedDict()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._tasks: set[asyncio.Task] = set()
         self._sweep_task: Optional[asyncio.Task] = None
@@ -226,9 +226,9 @@ class BotRequestBridge:
     # -- create --------------------------------------------------------------------------------
 
     @staticmethod
-    def _target(chat_id: str, context: Optional[Dict[str, Any]], thread_id: Optional[str]) -> Dict[str, Any]:
+    def _target(chat_id: str, context: Optional[dict[str, Any]], thread_id: Optional[str]) -> dict[str, Any]:
         if context:
-            target: Dict[str, Any] = {
+            target: dict[str, Any] = {
                 "invocationId": str(context["invocation_id"]),
                 "conversationId": str(context["conversation_id"]),
             }
@@ -258,7 +258,7 @@ class BotRequestBridge:
         session_key: str,
         request_id: str,
         choices: list[str],
-        context: Optional[Dict[str, Any]],
+        context: Optional[dict[str, Any]],
         thread_id: Optional[str],
     ) -> SendResult:
         from gateway.platforms.base_exec_approval import approval_timeout_seconds
@@ -270,7 +270,7 @@ class BotRequestBridge:
         if len(json.dumps(details, ensure_ascii=False).encode("utf-8")) > _DETAILS_MAX_BYTES:
             return SendResult(success=False, error="TheChat approval request is too large")
         key = client_key("approval", request_id)
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "clientKey": key,
             "kind": "approval",
             "title": APPROVAL_TITLE,
@@ -317,7 +317,7 @@ class BotRequestBridge:
         clarify_id: str,
         session_key: str,
         multi_select: bool,
-        context: Optional[Dict[str, Any]],
+        context: Optional[dict[str, Any]],
         thread_id: Optional[str],
     ) -> SendResult:
         from tools import clarify_gateway
@@ -345,7 +345,7 @@ class BotRequestBridge:
             # Non-retryable: the gateway falls back to the plain-text prompt.
             return SendResult(success=False, error="TheChat clarify request cannot be shown as a card")
         title, long_body = _title_and_body(safe_question)
-        response: Dict[str, Any] = (
+        response: dict[str, Any] = (
             {"type": "choice", "choices": safe_choices, "multiple": bool(multi_select), "allowText": True}
             if safe_choices
             else {"type": "text"}
@@ -353,7 +353,7 @@ class BotRequestBridge:
         if labels:
             response["labels"] = labels
         key = client_key("clarify", clarify_id)
-        body: Dict[str, Any] = {
+        body: dict[str, Any] = {
             "clientKey": key,
             "kind": "question",
             "title": title,
@@ -418,7 +418,7 @@ class BotRequestBridge:
 
     # -- answers -------------------------------------------------------------------------------
 
-    def apply_answer(self, request: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+    def apply_answer(self, request: dict[str, Any]) -> tuple[bool, Optional[str]]:
         """Wake the waiter for an answered request; returns the ``(applied, note)`` to ack."""
         remote_id = str(request["id"])
         cached = self._outcomes.get(remote_id)
@@ -485,7 +485,7 @@ class BotRequestBridge:
             applied, note = self.apply_answer(item)
             await self.ack(str(item["id"]), applied, note)
 
-    def handle_webhook(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def handle_webhook(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Answer pushed by TheChat's outbox; a 2xx reply with ``applied`` is the acknowledgement."""
         request = payload.get("request")
         if not isinstance(request, dict) or not isinstance(request.get("id"), str):
@@ -493,13 +493,13 @@ class BotRequestBridge:
         if not self.enabled or not _is_hermes_request(request) or request.get("status") != "answered":
             return {"ok": True}
         applied, note = self.apply_answer(request)
-        body: Dict[str, Any] = {"ok": True, "applied": applied}
+        body: dict[str, Any] = {"ok": True, "applied": applied}
         if note:
             body["note"] = note
         return body
 
     async def ack(self, remote_id: str, applied: bool, note: Optional[str]) -> bool:
-        body: Dict[str, Any] = {"applied": bool(applied)}
+        body: dict[str, Any] = {"applied": bool(applied)}
         if note:
             body["note"] = _bounded(note, _REASON_MAX)
         return await self._post_with_retry(f"/bot-requests/{remote_id}/ack", body, "acknowledge")
@@ -558,7 +558,7 @@ class BotRequestBridge:
                 await asyncio.sleep(_RETRY_BASE_SECONDS * (2**attempt))
         logger.warning("TheChat: could not withdraw bot request %s", remote_id)
 
-    async def _post_with_retry(self, path: str, body: Dict[str, Any], what: str) -> bool:
+    async def _post_with_retry(self, path: str, body: dict[str, Any], what: str) -> bool:
         client = self._client
         if client is None:
             return False
@@ -592,7 +592,7 @@ class BotRequestBridge:
 
     # -- recovery ------------------------------------------------------------------------------
 
-    async def _list(self, status: str) -> list[Dict[str, Any]]:
+    async def _list(self, status: str) -> list[dict[str, Any]]:
         client = self._client
         if client is None:
             return []

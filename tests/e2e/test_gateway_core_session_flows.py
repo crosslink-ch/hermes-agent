@@ -101,7 +101,7 @@ def make_runner_and_adapter(monkeypatch: pytest.MonkeyPatch, platform: Platform 
         GatewayConfig(platforms={platform: PlatformConfig(enabled=True, token="e2e-test-token")})
     )
     assert runner._session_db is not None
-    setattr(runner, "_is_user_authorized", lambda source: True)
+    runner._is_user_authorized = lambda source: True
     runner._post_turn_goal_continuation = AsyncMock()
 
     async def fake_run_agent(**kwargs):
@@ -127,7 +127,7 @@ def make_runner_and_adapter(monkeypatch: pytest.MonkeyPatch, platform: Platform 
             "model": "e2e-test-model",
         }
 
-    setattr(runner, "_run_agent", fake_run_agent)
+    runner._run_agent = fake_run_agent
 
     adapter = RecordingAdapter(platform)
     adapter.set_message_handler(runner._handle_message)

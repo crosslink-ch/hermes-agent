@@ -7,10 +7,8 @@ name: auto-fix lint issues & formatting
 # auto-corrected on merge so PRs aren't blocked by them. The PR-time eslint
 # check in typecheck.yml fails only when un-fixable errors remain.
 #
-# NOTE: GitHub App and AUTOFIX_BOT_PAT pushes trigger further workflow runs
-# (unlike secrets.GITHUB_TOKEN). Crosslink repositories fall back to the PAT
-# and then github.token when App credentials are not configured. The concurrency
-# group (ts-autofix-${{ github.ref }})
+# NOTE: App token pushes DO trigger further workflow runs (unlike
+# secrets.GITHUB_TOKEN). The concurrency group (ts-autofix-${{ github.ref }})
 # with cancel-in-progress: true prevents an infinite loop — a re-triggered
 # run cancels the in-flight one, and since the second run finds no new fixes
 # (the first run already applied them), it exits with an empty patch.
@@ -59,22 +57,19 @@ concurrency:
 jobs:
   generate-patch:
     name: Generate eslint --fix patch
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
     outputs:
       has-fixes: ${{ steps.produce-patch.outputs.has-fixes }}
     # No permissions override → inherits workflow-level contents: read.
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Set up locked Node and npm
+        id: node
+        uses: ./.github/actions/setup-pm
         with:
-          node-version: 26
-          cache: npm
-
-      - name: grab npm 12
-        run: |
-          npm i -g npm@12
+          toolchain: node
 
       # --ignore-scripts: eslint only needs TS sources + eslint packages.
       - uses: ./.github/actions/retry
@@ -138,17 +133,15 @@ jobs:
     needs: generate-patch
     # Skip entirely when generate-patch found no fixes — saves a runner,
     # avoids a redundant checkout/download, and keeps the job graph honest.
-    if: needs.generate-patch.outputs.has-fixes == 'true' && github.ref == 'refs/heads/main' && github.ref_protected == true && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    if: needs.generate-patch.outputs.has-fixes == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     environment: trusted-automation
     permissions:
       contents: write # needed to push to bot/js-autofix
       pull-requests: write # needed for PR creation + auto-merge
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
+      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a  # v1
 
       - name: Get GitHub App token
         id: app-token
@@ -158,7 +151,7 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
       - name: Download patch
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: js-fix-patch
           # ${{ runner.temp }} expands in with: params (shell-style $VAR does not).
@@ -169,7 +162,6 @@ jobs:
 
       - name: Apply patch and push to bot branch
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.has_app == 'true' && steps.app-token.outputs.token || secrets.AUTOFIX_BOT_PAT || github.token }}
           BOT_BRANCH: bot/js-autofix
         run: |
           set -euo pipefail
@@ -195,17 +187,12 @@ jobs:
           # Push to the dedicated bot branch. Force-push is safe here:
           # bot/js-autofix is a bot-only branch that gets rewritten each run.
           # If the branch was deleted after a previous PR merge, this
-          # recreates it. Explicitly configure git for the selected App/PAT/
-          # built-in token because checkout credentials are not persisted.
-          gh auth setup-git
+          # recreates it.
           git push --force origin HEAD:"$BOT_BRANCH"
 
       - name: Create/update PR and enable auto-merge
         env:
-          # Prefer the protected App token. Crosslink forks can use their
-          # existing PAT and ultimately the built-in token when App credentials
-          # are absent.
-          GH_TOKEN: ${{ steps.app-token.outputs.has_app == 'true' && steps.app-token.outputs.token || secrets.AUTOFIX_BOT_PAT || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BOT_BRANCH: bot/js-autofix
         run: |
           set -euo pipefail
@@ -228,7 +215,7 @@ jobs:
 
       - name: Wait for merge, auto-close on failure or stale
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.has_app == 'true' && steps.app-token.outputs.token || secrets.AUTOFIX_BOT_PAT || github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           START_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail

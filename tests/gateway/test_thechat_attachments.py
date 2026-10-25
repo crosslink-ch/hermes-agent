@@ -45,10 +45,10 @@ class _StreamResponse:
         self.status_code = status_code
         self.headers = headers or {}
 
-    async def __aenter__(self) -> "_StreamResponse":
+    async def __aenter__(self) -> _StreamResponse:
         return self
 
-    async def __aexit__(self, *_args: Any) -> None:
+    async def __aexit__(self, *_args: object) -> None:
         return None
 
     async def aiter_bytes(self, chunk_size: int | None = None):
@@ -71,10 +71,10 @@ class _ObjectStoreClient:
         self.stream_calls: list[str] = []
         self.put_calls: list[dict[str, Any]] = []
 
-    async def __aenter__(self) -> "_ObjectStoreClient":
+    async def __aenter__(self) -> _ObjectStoreClient:
         return self
 
-    async def __aexit__(self, *_args: Any) -> None:
+    async def __aexit__(self, *_args: object) -> None:
         return None
 
     def stream(self, method: str, url: str) -> _StreamResponse:

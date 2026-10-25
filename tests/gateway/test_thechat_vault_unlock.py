@@ -9,6 +9,11 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
+def _dispatch(name, args):
+    from tools.registry import registry
+    return registry.dispatch("browser_vault", {"action": name.removeprefix("browser_vault_"), **args})
+
+
 def _context():
     return {"invocation_id": str(uuid.uuid4()), "bot_id": "bot-id", "conversation_id": str(uuid.uuid4()),
             "thread_id": None, "requester_user_id": "owner"}
@@ -131,7 +136,7 @@ def _turn(adapter, context, agent, *, sender="owner"):
 
 
 @pytest.mark.asyncio
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("owner_metadata", ["owner", ""])
 async def test_actual_executor_scope_native_tool_signed_relay_never_uses_inbox(tmp_path, monkeypatch, owner_metadata):
     from agent.vault_backends import unlock
@@ -173,7 +178,7 @@ else:
         def run_conversation(self, *_a, **_kw):
             observed.append(unlock.get_unlock_prompt_callback())
             with ThreadPoolExecutor(max_workers=1) as pool:
-                return json.loads(pool.submit(propagate_context_to_thread(lambda: registry.dispatch("browser_vault_unlock", {"backend": "bitwarden"}))).result())
+                return json.loads(pool.submit(propagate_context_to_thread(lambda: _dispatch("browser_vault_unlock", {"backend": "bitwarden"}))).result())
     agent = Agent()
     turn = _turn(adapter, context, agent, sender=context["requester_user_id"])
     unlock.lock("bitwarden")
@@ -246,21 +251,21 @@ else:
             def run_conversation(self, *_a, **_kw):
                 # Cached ownership may disappear/change without restricting Bitwarden.
                 adapter._owner_user_id = "changed-owner"
-                listed = json.loads(registry.dispatch("browser_vault_list", {}))
+                listed = json.loads(_dispatch("browser_vault_list", {}))
                 assert [item["handle"] for item in listed["items"]] == ["bw:item"]
                 assert listed["errors"][0]["backend"] == "onepassword"
-                assert json.loads(registry.dispatch("browser_vault_unlock", {"backend": "bitwarden"}))["already_unlocked"]
+                assert json.loads(_dispatch("browser_vault_unlock", {"backend": "bitwarden"}))["already_unlocked"]
                 for name, args in (("browser_vault_unlock", {"backend": "onepassword"}),
                                    ("browser_vault_fill", {"handle": "op:item"}),
                                    ("browser_vault_enter_code", {"handle": "op:item"})):
-                    assert json.loads(registry.dispatch(name, args))["error_type"] == "external_vault_access_denied"
+                    assert json.loads(_dispatch(name, args))["error_type"] == "external_vault_access_denied"
                 controls[:] = [{"tag": "input", "type": "password", "name": "password", "id": "pw",
                                 "autocomplete": "current-password", "visible": True}]
-                filled = json.loads(registry.dispatch("browser_vault_fill", {"handle": "bw:item"}))
+                filled = json.loads(_dispatch("browser_vault_fill", {"handle": "bw:item"}))
                 assert filled["success"] and filled["backend"] == "bitwarden"
                 controls[:] = [{"tag": "input", "type": "text", "name": "otp", "id": "otp",
                                 "autocomplete": "one-time-code", "visible": True}]
-                coded = json.loads(registry.dispatch("browser_vault_enter_code", {"handle": "bw:item"}))
+                coded = json.loads(_dispatch("browser_vault_enter_code", {"handle": "bw:item"}))
                 assert coded["success"] and coded["source"] == "bitwarden"
                 assert "synthetic-login-password" not in json.dumps([listed, filled, coded])
                 assert "123456" not in json.dumps(coded)
@@ -480,13 +485,13 @@ async def test_native_registry_denies_mismatched_requester_even_with_preexisting
     class Agent:
         is_interrupted = False
         def run_conversation(self, *_a, **_kw):
-            listed = json.loads(registry.dispatch("browser_vault_list", {}))
+            listed = json.loads(_dispatch("browser_vault_list", {}))
             assert not listed["items"]
             for backend in backends:
                 for name, args in (("browser_vault_unlock", {"backend": backend.name}),
                                    ("browser_vault_fill", {"handle": backend.prefix + "item"}),
                                    ("browser_vault_enter_code", {"handle": backend.prefix + "item"})):
-                    result = json.loads(registry.dispatch(name, args))
+                    result = json.loads(_dispatch(name, args))
                     assert result["error_type"] == "external_vault_access_denied"
             return {"denied": True}
     agent = Agent()

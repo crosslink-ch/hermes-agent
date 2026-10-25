@@ -79,5 +79,5 @@ reloaded = importlib.reload(config)
 assert callable(reloaded.get_custom_provider_api_mode)
 assert sys.modules['hermes_cli.config_providers'] is not config_providers
 """
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr

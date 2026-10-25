@@ -176,4 +176,3 @@ async def _send_thechat(pconfig, chat_id: str, content: str, *, thread_id=None):
                 }
         except Exception as exc:
             return {"error": f"TheChat send failed: {exc}"}
-

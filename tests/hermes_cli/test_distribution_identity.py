@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from hermes_cli import banner
+from hermes_cli import banner, source_check, source_releases
 from hermes_cli.distribution import (
     INSTALLER_BASE_URL,
     RELEASE_URL_BASE,
@@ -55,8 +55,7 @@ def test_distribution_endpoints_drive_banner_and_releases() -> None:
     assert (
         RELEASE_URL_BASE == "https://github.com/crosslink-ch/hermes-agent/releases/tag"
     )
-    assert banner._UPSTREAM_REPO_URL == REPOSITORY_HTTPS_URL
-    assert banner._OFFICIAL_REPO_CANONICAL == REPOSITORY_CANONICAL
+    assert source_releases.OFFICIAL_REPOSITORY == "crosslink-ch/hermes-agent"
     assert banner._RELEASE_URL_BASE == RELEASE_URL_BASE
 
 
@@ -72,9 +71,9 @@ def test_passive_compare_uses_distribution_repository(monkeypatch):
         return io.BytesIO(json.dumps({"ahead_by": 2}).encode())
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(banner, "_compare_payload_cache", {})
+
     current, target = "a" * 40, "b" * 40
-    assert banner._github_compare_behind(current, target) == 2
+    assert source_check._github_compare_behind(current, target) == 2
     assert seen == [
         f"https://api.github.com/repos/crosslink-ch/hermes-agent/compare/{current}...{target}"
     ]

@@ -42,6 +42,9 @@ def _managed_checkout(tmp_path: Path, origin: str) -> Path:
     (repo / "README.md").write_text("managed\n", encoding="utf-8")
     _git("add", "README.md", cwd=repo)
     _git("commit", "-m", "seed", cwd=repo)
+    # The network boundary below is stubbed; seed the remote-tracking ref the
+    # PM installer now fast-forwards instead of invoking `git pull`.
+    _git("update-ref", "refs/remotes/origin/main", "HEAD", cwd=repo)
     _git("remote", "add", "origin", origin, cwd=repo)
     return repo
 
@@ -96,7 +99,7 @@ def _run_repository_stage(
         "HERMES_HOME": str(home / ".hermes"),
         "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
     })
-    return subprocess.run(args, env=env, capture_output=True, text=True)
+    return subprocess.run(args, env=env, capture_output=True, text=True, check=False)
 
 
 @pytest.mark.parametrize(
@@ -188,56 +191,29 @@ def test_distribution_critical_surfaces_do_not_point_installers_upstream() -> No
     assert not offenders, f"upstream installer URLs remain in: {sorted(set(offenders))}"
 
 
-def test_distribution_critical_sources_use_crosslink_and_hosted_urls() -> None:
-    install_ps1 = (REPO_ROOT / "scripts" / "install.ps1").read_text(encoding="ascii")
-    install_sh = INSTALL_SH.read_text(encoding="utf-8")
-    install_cmd = (REPO_ROOT / "scripts" / "install.cmd").read_text(encoding="utf-8")
-    dev_sandbox = (REPO_ROOT / "tests" / "install" / "installer-script-e2e.sh").read_text(
-        encoding="utf-8"
-    )
-    update_cmd = (REPO_ROOT / "hermes_cli" / "update_cmd_zip.py").read_text(
-        encoding="utf-8"
-    )
-    desktop_bootstrap = (
-        REPO_ROOT / "apps" / "desktop" / "electron" / "bootstrap-runner.ts"
-    ).read_text(encoding="utf-8")
-    desktop_about = (
-        REPO_ROOT
-        / "apps"
-        / "desktop"
-        / "src"
-        / "app"
-        / "settings"
-        / "about-settings.tsx"
-    ).read_text(encoding="utf-8")
-    native_bootstrap = (
-        REPO_ROOT
-        / "apps"
-        / "bootstrap-installer"
-        / "src-tauri"
-        / "src"
-        / "install_script.rs"
-    ).read_text(encoding="utf-8")
-
-    assert 'RepoSlug = "crosslink-ch/hermes-agent"' in install_ps1
-    assert 'REPO_SLUG="crosslink-ch/hermes-agent"' in install_sh
-    assert HOSTED_INSTALLER_BASE in install_cmd
-    assert "https://github.com/crosslink-ch/hermes-agent.git" in dev_sandbox
-    assert "flags+=(--migrate-legacy-origin)" in dev_sandbox
-    assert "ARCHIVE_BASE_URL" in update_cmd
-    assert "raw.githubusercontent.com/crosslink-ch/hermes-agent" in desktop_bootstrap
-    assert "https://github.com/crosslink-ch/hermes-agent/releases" in desktop_about
-    assert "raw.githubusercontent.com/crosslink-ch/hermes-agent" in native_bootstrap
-    assert "MigrateLegacyOrigin" in desktop_bootstrap
+def test_default_clone_follows_distribution_without_release_lookup(tmp_path):
+    origin = _managed_checkout(tmp_path, CROSSLINK_HTTPS)
+    dest = tmp_path / "fresh"
+    home = tmp_path / "home"
+    home.mkdir()
+    env = dict(os.environ, HOME=str(home), HERMES_HOME=str(home / ".hermes"),
+               GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0=f"url.{origin.as_uri()}.insteadOf",
+               GIT_CONFIG_VALUE_0=CROSSLINK_HTTPS)
+    env.pop("HERMES_REPO_URL", None)
+    result = subprocess.run(["bash", str(INSTALL_SH), "--stage", "repository",
+                             "--non-interactive", "--dir", str(dest)],
+                            env=env, capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _git("config", "--get", "remote.origin.url", cwd=dest).stdout.strip() == CROSSLINK_HTTPS
+    assert _git("rev-parse", "HEAD", cwd=dest).stdout == _git("rev-parse", "HEAD", cwd=origin).stdout
+    assert _git("status", "--porcelain", cwd=dest).stdout == ""
 
 
-def test_public_installers_prefer_https_clone_before_ssh_fallback() -> None:
-    shell = INSTALL_SH.read_text(encoding="utf-8")
-    powershell = (REPO_ROOT / "scripts" / "install.ps1").read_text(encoding="ascii")
-
-    assert shell.index('log_info "Trying HTTPS clone..."') < shell.index(
-        'log_info "HTTPS failed, trying SSH..."'
-    )
-    assert powershell.index('Write-Info "Trying HTTPS clone..."') < powershell.index(
-        'Write-Info "HTTPS failed, trying SSH..."'
-    )
+def test_unsupported_source_channel_stops_before_clone(tmp_path):
+    dest = tmp_path / "fresh"
+    result = subprocess.run(["bash", str(INSTALL_SH), "--stage", "repository", "--channel", "stable",
+                             "--non-interactive", "--dir", str(dest)],
+                            capture_output=True, text=True, timeout=10, check=False)
+    assert result.returncode != 0
+    assert "Crosslink source installs currently support main only" in result.stderr
+    assert not dest.exists()

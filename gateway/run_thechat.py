@@ -15,7 +15,7 @@ logger = logging.getLogger("gateway.run")
 class GatewayTheChatMixin:
     """Apply trusted platform branch intents and publish scoped titles."""
 
-    def _thechat_session_intent_for_event(self, event: MessageEvent) -> Dict[str, Any]:
+    def _thechat_session_intent_for_event(self, event: MessageEvent) -> dict[str, Any]:
         raw_message = getattr(event, "raw_message", None)
         if not isinstance(raw_message, dict):
             return {}
@@ -24,7 +24,7 @@ class GatewayTheChatMixin:
 
     def _thechat_session_intent_text(
         self,
-        session_intent: Dict[str, Any],
+        session_intent: dict[str, Any],
         key: str,
     ) -> Optional[str]:
         value = session_intent.get(key)
@@ -248,7 +248,7 @@ class GatewayTheChatMixin:
         ) or {}
         metadata = dict(metadata)
 
-        context_snapshot: Optional[Dict[str, Any]] = None
+        context_snapshot: Optional[dict[str, Any]] = None
         context_provider = getattr(adapter, "_context_for_send", None)
         if callable(context_provider):
             try:
@@ -278,8 +278,8 @@ class GatewayTheChatMixin:
         source: SessionSource,
         title: str,
         *,
-        metadata: Optional[Dict[str, Any]] = None,
-        context: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        context: Optional[dict[str, Any]] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
         adapter: Optional[Any] = None,
     ) -> None:
@@ -332,12 +332,3 @@ class GatewayTheChatMixin:
                 logger.debug("TheChat session title update failed", exc_info=True)
 
         future.add_done_callback(_log_title_update_failure)
-
-
-
-
-
-
-
-
-

@@ -219,16 +219,16 @@ class TheChatAdapter(BasePlatformAdapter):
         self._webhook_recovery_task: Optional[asyncio.Task] = None
         self._webhook_lease_owner = f"{os.getpid()}:{uuid.uuid4().hex}"
         self._webhook_secret = ""
-        self._contexts: Dict[str, Dict[str, Any]] = {}
-        self._event_contexts: Dict[str, Dict[str, Any]] = {}
+        self._contexts: dict[str, dict[str, Any]] = {}
+        self._event_contexts: dict[str, dict[str, Any]] = {}
         # session_key -> context of the invocation that requested an exec
         # approval; lets approval.resolved reach the original invocation.
-        self._approval_contexts: Dict[str, Dict[str, Any]] = {}
+        self._approval_contexts: dict[str, dict[str, Any]] = {}
         # Opaque request id -> immutable snapshot of the invocation/request
         # context that produced a blocking approval or clarify prompt.
-        self._interaction_requests: Dict[str, Dict[str, Any]] = {}
+        self._interaction_requests: dict[str, dict[str, Any]] = {}
         # Typed /approve remains FIFO and may resolve all pending requests.
-        self._approval_request_ids: Dict[str, list[str]] = {}
+        self._approval_request_ids: dict[str, list[str]] = {}
         from gateway.platforms.thechat_vault import VaultUnlockBroker
         self._vault_unlock = VaultUnlockBroker()
         self._owner_user_id = ""
@@ -375,7 +375,7 @@ class TheChatAdapter(BasePlatformAdapter):
         chat_id: str,
         content: str,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         if not self._client:
             return SendResult(
@@ -436,10 +436,10 @@ class TheChatAdapter(BasePlatformAdapter):
         chat_id: str,
         *,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> tuple[
-        Optional[Dict[str, Any]],
-        Dict[str, Any],
+        Optional[dict[str, Any]],
+        dict[str, Any],
         Optional[SendResult],
     ]:
         context = self._context_for_send(
@@ -481,13 +481,13 @@ class TheChatAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _platform_message_payload(
-        target: Dict[str, Any],
+        target: dict[str, Any],
         *,
         text: Optional[str] = None,
         attachment_ids: Optional[list[str]] = None,
         platform_message_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "conversationId": str(target["conversation_id"]),
             "attachmentIds": list(attachment_ids or []),
         }
@@ -540,7 +540,7 @@ class TheChatAdapter(BasePlatformAdapter):
     def _parse_attachment_descriptor(
         self,
         raw: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if not isinstance(raw, dict):
             raise _AttachmentError("Attachment descriptor must be an object")
 
@@ -674,7 +674,7 @@ class TheChatAdapter(BasePlatformAdapter):
 
     async def _download_attachment_bytes(
         self,
-        descriptor: Dict[str, Any],
+        descriptor: dict[str, Any],
     ) -> bytes:
         try:
             async with asyncio.timeout(self.attachment_transfer_timeout_seconds):
@@ -687,7 +687,7 @@ class TheChatAdapter(BasePlatformAdapter):
 
     async def _download_attachment_bytes_impl(
         self,
-        descriptor: Dict[str, Any],
+        descriptor: dict[str, Any],
     ) -> bytes:
         if not self._client:
             raise _AttachmentError("TheChat client is not connected")
@@ -870,7 +870,7 @@ class TheChatAdapter(BasePlatformAdapter):
         image_path: str,
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
         **_kwargs: Any,
     ) -> SendResult:
         media_type = mimetypes.guess_type(image_path)[0] or "image/png"
@@ -891,7 +891,7 @@ class TheChatAdapter(BasePlatformAdapter):
         caption: Optional[str] = None,
         file_name: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
         **_kwargs: Any,
     ) -> SendResult:
         display_name = file_name or Path(file_path).name
@@ -916,7 +916,7 @@ class TheChatAdapter(BasePlatformAdapter):
         audio_path: str,
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
         **_kwargs: Any,
     ) -> SendResult:
         media_type = mimetypes.guess_type(audio_path)[0] or "audio/mpeg"
@@ -936,7 +936,7 @@ class TheChatAdapter(BasePlatformAdapter):
         video_path: str,
         caption: Optional[str] = None,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
         **_kwargs: Any,
     ) -> SendResult:
         media_type = mimetypes.guess_type(video_path)[0] or "video/mp4"
@@ -959,7 +959,7 @@ class TheChatAdapter(BasePlatformAdapter):
         media_type: str,
         caption: Optional[str],
         reply_to: Optional[str],
-        metadata: Optional[Dict[str, Any]],
+        metadata: Optional[dict[str, Any]],
     ) -> SendResult:
         result: SendResult | None = None
         for attempt in range(_ATTACHMENT_SEND_MAX_ATTEMPTS):
@@ -999,7 +999,7 @@ class TheChatAdapter(BasePlatformAdapter):
         media_type: str,
         caption: Optional[str],
         reply_to: Optional[str],
-        metadata: Optional[Dict[str, Any]],
+        metadata: Optional[dict[str, Any]],
     ) -> SendResult:
         if not self._client:
             return SendResult(
@@ -1135,8 +1135,8 @@ class TheChatAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _attachment_platform_message_id(
-        context: Optional[Dict[str, Any]],
-        target: Dict[str, Any],
+        context: Optional[dict[str, Any]],
+        target: dict[str, Any],
         *,
         checksum: str,
         file_name: str,
@@ -1161,7 +1161,7 @@ class TheChatAdapter(BasePlatformAdapter):
 
     async def _post_attachment_message(
         self,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
     ) -> httpx.Response:
         assert self._client is not None
         last_error: Optional[Exception] = None
@@ -1217,13 +1217,13 @@ class TheChatAdapter(BasePlatformAdapter):
 
     async def _reserve_attachment(
         self,
-        target: Dict[str, Any],
+        target: dict[str, Any],
         *,
         file_name: str,
         media_type: str,
         size_bytes: int,
         checksum: str,
-    ) -> tuple[str, Dict[str, Any]]:
+    ) -> tuple[str, dict[str, Any]]:
         assert self._client is not None
         response = await self._client.post(
             "/attachments",
@@ -1258,7 +1258,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 raise _AttachmentError("TheChat returned invalid upload instructions")
             await self._validate_object_store_url(upload_url)
 
-            normalized_headers: Dict[str, str] = {}
+            normalized_headers: dict[str, str] = {}
             for key, value in headers.items():
                 if (
                     not isinstance(key, str)
@@ -1354,7 +1354,7 @@ class TheChatAdapter(BasePlatformAdapter):
         path: Path,
         *,
         size_bytes: int,
-        upload: Dict[str, Any],
+        upload: dict[str, Any],
     ) -> None:
         headers = dict(upload["headers"])
         if not any(key.lower() == "content-length" for key in headers):
@@ -1388,7 +1388,7 @@ class TheChatAdapter(BasePlatformAdapter):
     async def _complete_and_wait_for_attachment(
         self,
         attachment_id: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         assert self._client is not None
         complete_response = await self._client.post(
             f"/attachments/{quote(attachment_id, safe='')}/complete"
@@ -1440,8 +1440,8 @@ class TheChatAdapter(BasePlatformAdapter):
         chat_id: str,
         *,
         reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> Optional[Dict[str, Any]]:
+        metadata: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
         candidate_ids = [reply_to]
         if metadata:
             candidate_ids.extend(
@@ -1504,10 +1504,10 @@ class TheChatAdapter(BasePlatformAdapter):
     async def send_invocation_progress(
         self,
         chat_id: str,
-        event: Dict[str, Any],
-        metadata: Optional[Dict[str, Any]] = None,
+        event: dict[str, Any],
+        metadata: Optional[dict[str, Any]] = None,
         *,
-        context: Optional[Dict[str, Any]] = None,
+        context: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         context = context or self._context_for_send(chat_id, metadata=metadata)
         if not context:
@@ -1565,9 +1565,9 @@ class TheChatAdapter(BasePlatformAdapter):
         self,
         chat_id: str,
         title: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
         *,
-        context: Optional[Dict[str, Any]] = None,
+        context: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         """Publish an auto-generated Hermes session title to TheChat.
 
@@ -1582,7 +1582,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 error="TheChat session title update requires title",
             )
 
-        event_payload: Dict[str, Any] = {"title": normalized_title}
+        event_payload: dict[str, Any] = {"title": normalized_title}
 
         return await self.send_invocation_progress(
             chat_id,
@@ -1636,16 +1636,16 @@ class TheChatAdapter(BasePlatformAdapter):
         request_type: str,
         request_id: str,
         session_key: str,
-        context: Dict[str, Any],
+        context: dict[str, Any],
         choices: Optional[list[str]],
         multi_select: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         self._prune_expired_interaction_requests()
         if request_id in self._interaction_requests:
             raise ValueError(f"Duplicate pending interaction request id: {request_id}")
         if len(self._interaction_requests) >= _INTERACTION_REQUEST_MAX_COUNT:
             raise RuntimeError("Too many pending TheChat interaction requests")
-        record: Dict[str, Any] = {
+        record: dict[str, Any] = {
             "request_type": request_type,
             "request_id": request_id,
             "session_key": session_key,
@@ -1668,10 +1668,10 @@ class TheChatAdapter(BasePlatformAdapter):
     async def _send_interaction_request_progress(
         self,
         chat_id: str,
-        event: Dict[str, Any],
+        event: dict[str, Any],
         *,
-        metadata: Optional[Dict[str, Any]],
-        context: Optional[Dict[str, Any]],
+        metadata: Optional[dict[str, Any]],
+        context: Optional[dict[str, Any]],
     ) -> SendResult:
         """Retry ambiguous request publication without changing its stable id."""
         result = SendResult(success=False, error="Interaction progress was not sent")
@@ -1697,7 +1697,7 @@ class TheChatAdapter(BasePlatformAdapter):
         choices: Optional[list],
         clarify_id: str,
         session_key: str,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> SendResult:
         """Publish a structured clarify request on the original invocation."""
         from tools import clarify_gateway
@@ -1787,7 +1787,7 @@ class TheChatAdapter(BasePlatformAdapter):
         command: str,
         session_key: str,
         description: str = "dangerous command",
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
         allow_permanent: bool = True,
         allow_session: bool = True,
         smart_denied: bool = False,
@@ -1867,7 +1867,7 @@ class TheChatAdapter(BasePlatformAdapter):
         choice: str,
         resolved_count: int = 1,
         resolve_all: bool = False,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
         request_id: Optional[str] = None,
         request_ids: Optional[list[str]] = None,
         _forget_request: bool = True,
@@ -1885,7 +1885,7 @@ class TheChatAdapter(BasePlatformAdapter):
             ids = [request_id] if request_id is not None else list(request_ids or [])
             await self._bot_requests.approvals_resolved_in_chat(ids, choice)
             return SendResult(success=True)
-        records: list[Dict[str, Any]] = []
+        records: list[dict[str, Any]] = []
         if request_id is not None:
             target_request_ids = [request_id]
         elif request_ids is not None:
@@ -2047,7 +2047,7 @@ class TheChatAdapter(BasePlatformAdapter):
         await self._bot_requests.clarify_closed(clarify_id, reason)
 
     @staticmethod
-    def _metadata_thread_id(metadata: Optional[Dict[str, Any]]) -> Optional[str]:
+    def _metadata_thread_id(metadata: Optional[dict[str, Any]]) -> Optional[str]:
         if not metadata:
             return None
         thread_id = metadata.get("thread_id") or metadata.get("message_thread_id")
@@ -2056,7 +2056,7 @@ class TheChatAdapter(BasePlatformAdapter):
     def _context_from_platform_event(
         self,
         item: Any,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[dict[str, Any]]:
         if not isinstance(item, dict):
             return None
         invocation_id = item.get("invocationId")
@@ -2066,7 +2066,7 @@ class TheChatAdapter(BasePlatformAdapter):
         conversation = item["conversation"]
         thread_id = str(item.get("threadId") or "") or None
         session_intent = item.get("sessionIntent")
-        context: Dict[str, Any] = {
+        context: dict[str, Any] = {
             "invocation_id": str(invocation_id),
             "bot_id": str(bot["id"]),
             "bot_name": str(bot["name"]),
@@ -2081,7 +2081,7 @@ class TheChatAdapter(BasePlatformAdapter):
             context["sessionIntent"] = session_intent
         return context
 
-    async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
+    async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         context = self._contexts.get(chat_id) or {}
         return {
             "name": context.get("conversation_name")
@@ -2130,7 +2130,7 @@ class TheChatAdapter(BasePlatformAdapter):
             return
         if outcome == ProcessingOutcome.FAILURE:
             try:
-                payload: Dict[str, Any] = {
+                payload: dict[str, Any] = {
                     "error": "Hermes gateway failed to process the message"
                 }
                 await self._client.post(
@@ -2287,7 +2287,7 @@ class TheChatAdapter(BasePlatformAdapter):
             raise ValueError(f"TheChat interaction has an invalid {field}")
         return value
 
-    def _extract_webhook_interaction(self, payload: Any) -> Dict[str, Any]:
+    def _extract_webhook_interaction(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Webhook payload must be a JSON object")
         if payload.get("type") != "thechat.hermes_platform.interaction":
@@ -2297,7 +2297,7 @@ class TheChatAdapter(BasePlatformAdapter):
         interaction = payload.get("interaction")
         return self._validate_direct_interaction(interaction)
 
-    def _validate_direct_interaction(self, item: Any) -> Dict[str, Any]:
+    def _validate_direct_interaction(self, item: Any) -> dict[str, Any]:
         """Validate the signed direct-interaction wire contract and bounds."""
         if not isinstance(item, dict):
             raise ValueError("TheChat interaction must be a JSON object")
@@ -2381,7 +2381,7 @@ class TheChatAdapter(BasePlatformAdapter):
             raise ValueError("TheChat clarify interaction has an invalid response")
         return item
 
-    def _match_interaction_request(self, interaction: Dict[str, Any]) -> Dict[str, Any]:
+    def _match_interaction_request(self, interaction: dict[str, Any]) -> dict[str, Any]:
         request_id = interaction["requestId"]
         record = self._interaction_requests.get(request_id)
         if record is None:
@@ -2423,8 +2423,8 @@ class TheChatAdapter(BasePlatformAdapter):
 
     async def _resolve_direct_interaction(
         self,
-        interaction: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        interaction: dict[str, Any],
+    ) -> dict[str, Any]:
         record = self._match_interaction_request(interaction)
         request_id = str(record["request_id"])
         session_key = str(record["session_key"])
@@ -2469,8 +2469,8 @@ class TheChatAdapter(BasePlatformAdapter):
 
     async def _publish_direct_interaction_resolution(
         self,
-        interaction: Dict[str, Any],
-        record: Dict[str, Any],
+        interaction: dict[str, Any],
+        record: dict[str, Any],
     ) -> None:
         """Publish the card transition off the webhook response critical path."""
         request_id = str(record["request_id"])
@@ -2518,8 +2518,8 @@ class TheChatAdapter(BasePlatformAdapter):
 
     def _schedule_direct_interaction_resolution(
         self,
-        interaction: Dict[str, Any],
-        record: Dict[str, Any],
+        interaction: dict[str, Any],
+        record: dict[str, Any],
     ) -> None:
         task = asyncio.create_task(
             self._publish_direct_interaction_resolution(interaction, record),
@@ -2573,7 +2573,7 @@ class TheChatAdapter(BasePlatformAdapter):
 
     async def _handle_direct_interaction_webhook(
         self,
-        interaction: Dict[str, Any],
+        interaction: dict[str, Any],
         body_bytes: bytes,
     ):
         source = self._inbound_interaction_source()
@@ -2866,7 +2866,7 @@ class TheChatAdapter(BasePlatformAdapter):
             {"ok": True, "duplicate": acceptance.status == "pending"}
         )
 
-    def _extract_webhook_event(self, payload: Any) -> Dict[str, Any]:
+    def _extract_webhook_event(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("Webhook payload must be a JSON object")
         if payload.get("type") != "thechat.hermes_platform.event":
@@ -2876,7 +2876,7 @@ class TheChatAdapter(BasePlatformAdapter):
             raise ValueError("Webhook payload does not contain a TheChat event")
         return self._validate_platform_event(event)
 
-    def _validate_platform_event(self, item: Any) -> Dict[str, Any]:
+    def _validate_platform_event(self, item: Any) -> dict[str, Any]:
         """Validate the current TheChat ``HermesPlatformEvent`` contract."""
         if not isinstance(item, dict):
             raise ValueError("TheChat event must be a JSON object")
@@ -2969,7 +2969,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 logger.warning("TheChat: polling failed: %s", exc)
             await asyncio.sleep(self.poll_interval)
 
-    async def _handle_platform_event_safely(self, item: Dict[str, Any]) -> bool:
+    async def _handle_platform_event_safely(self, item: dict[str, Any]) -> bool:
         try:
             await self._handle_platform_event(item)
             return True
@@ -2993,7 +2993,7 @@ class TheChatAdapter(BasePlatformAdapter):
                     )
             return False
 
-    async def _handle_platform_event(self, item: Dict[str, Any]) -> None:
+    async def _handle_platform_event(self, item: dict[str, Any]) -> None:
         item = self._validate_platform_event(item)
         chat_id = str(item["chatId"])
         invocation_id = str(item["invocationId"])
