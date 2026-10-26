@@ -161,7 +161,7 @@ def purge_env_credential_references(
     return {"pool_pruned": pruned, "providers": providers}
 
 
-def save_provider_env_credential(env_var: str, value: str) -> dict[str, Any]:
+def save_provider_env_credential(env_var: str, value: str, *, preserve_exact: bool = False) -> dict[str, Any]:
     """Save/update a credential in ``.env`` and reconcile every mirror.
 
     config.yaml mirrors of the PREVIOUS value are updated so a stale higher-precedence copy cannot
@@ -183,7 +183,10 @@ def save_provider_env_credential(env_var: str, value: str) -> dict[str, Any]:
     # scrub below would still move the new value into config.yaml.
     require_env_writable(env_var, "set")
     old_value = load_env().get(env_var)
-    save_env_value(env_var, value)
+    if preserve_exact:
+        save_env_value(env_var, value, preserve_exact=True)
+    else:
+        save_env_value(env_var, value)
 
     config_updates: list[str] = []
     if value and old_value and old_value != value:

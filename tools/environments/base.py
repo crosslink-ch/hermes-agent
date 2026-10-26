@@ -663,7 +663,26 @@ class BaseEnvironment(ABC):
         """
         self._before_execute()
 
-        exec_command, sudo_stdin = self._prepare_command(command)
+        from tools.terminal_tool_sudo import (
+            NativeSudoRefused, prepare_native_sudo, _prompt_for_sudo_password,
+        )
+        from tools.environments.local import LocalEnvironment
+        from tools.environments import native_sudo
+        effective_timeout = timeout or self.timeout
+        effective_cwd = cwd or self.cwd
+        try:
+            native_plan = prepare_native_sudo(
+                command, supported=type(self) is LocalEnvironment and os.name == "posix")
+            if native_plan:
+                password = _prompt_for_sudo_password(command=command)
+                try:
+                    native_sudo.authenticate(self, native_plan[0], password, effective_cwd, effective_timeout)
+                finally:
+                    password = ""
+        except NativeSudoRefused as exc:
+            return {"output": str(exc), "returncode": 1}
+
+        exec_command, sudo_stdin = (command, None) if native_plan else self._prepare_command(command)
         # Guard against the `A && B &` subshell-wait trap by default; callers
         # that already produce shell-safe wrappers (spawn_via_env) pass False.
         if rewrite_compound_background:
@@ -698,7 +717,13 @@ class BaseEnvironment(ABC):
                 return {"output": "[host is exiting: command not started]", "returncode": 130}
             spawned = None
             try:
-                spawned = self._run_bash(wrapped, login=login, timeout=effective_timeout, stdin_data=effective_stdin)
+                if native_plan:
+                    try:
+                        spawned = native_sudo.spawn(self, native_plan[1], effective_cwd, stdin_data)
+                    except NativeSudoRefused as exc:
+                        return {"output": str(exc), "returncode": 130}
+                else:
+                    spawned = self._run_bash(wrapped, login=login, timeout=effective_timeout, stdin_data=effective_stdin)
             finally:
                 fenced = _leave_foreground_spawn(self, spawned)
             proc_holder.append(spawned)
@@ -787,10 +812,12 @@ class BaseEnvironment(ABC):
         """
         from tools.terminal_tool_macos_open import _transform_macos_open_command
         from tools.terminal_tool_sudo import _transform_sudo_command
-        return _transform_sudo_command(
-            _transform_macos_open_command(command),
-            sudo_nopasswd_check=self._sudo_nopasswd_works,
-        )
+        command = _transform_macos_open_command(command)
+        if self._stdin_mode != "pipe":
+            # Native masked values must never be serialized into a command/heredoc transport.
+            return _transform_sudo_command(command, sudo_nopasswd_check=self._sudo_nopasswd_works,
+                                           allow_native_prompt=False)
+        return _transform_sudo_command(command, sudo_nopasswd_check=self._sudo_nopasswd_works)
 
     _SUDO_PROBE_TIMEOUT_S = 3
 

@@ -73,6 +73,10 @@ _SECRET_SOURCE_CACHE_LOCK = threading.RLock()
 # One process-wide record (not per home/project scope): the environ is process-wide, so alternating
 # callers (gateway with a project .env, cron without; home A then B) must peel each other's output too.
 _DOTENV_PUBLISHED: dict[str, tuple[str | None, str, int]] = {}
+# Only the current marked publication is exempt from startup normalization.
+# An unmarked replacement removes the exemption; an external change must match
+# our last published value to qualify. This never changes legacy assignments.
+_DOTENV_EXACT_KEYS: set[str] = set()
 _DOTENV_PASSES = itertools.count()
 _DOTENV_LOCK = threading.RLock()
 
@@ -304,6 +308,9 @@ def _sanitize_loaded_credentials() -> None:
             continue
         if value.isascii():
             continue
+        published = _DOTENV_PUBLISHED.get(key)
+        if key in _DOTENV_EXACT_KEYS and published is not None and published[1] == value:
+            continue
         cleaned = value.encode("ascii", errors="ignore").decode("ascii")
         os.environ[key] = cleaned
         if key in _WARNED_KEYS:
@@ -325,8 +332,8 @@ def _sanitize_loaded_credentials() -> None:
         )
 
 
-def _parse_dotenv_file(path: Path) -> list[tuple[str, str | None]]:
-    """``(name, raw value)`` assignments of one dotenv file, uninterpolated, in file order."""
+def _parse_dotenv_file(path: Path) -> list[tuple[str, str | None, bool]]:
+    """``(name, raw value, exact)`` assignments of one dotenv file, uninterpolated, in file order."""
     raw = path.read_bytes()
     try:
         # utf-8-sig strips a leading BOM (PowerShell 5.1 / Notepad); plain utf-8 would keep U+FEFF on the
@@ -337,9 +344,20 @@ def _parse_dotenv_file(path: Path) -> list[tuple[str, str | None]]:
         text = raw.decode("latin-1")
     # Imported here, not at module level: gateway tests stub ``sys.modules["dotenv"]`` with a bare module
     # exposing only ``load_dotenv``, and ``gateway.run`` imports this module at import time.
-    from dotenv.main import DotEnv
+    from dotenv.main import with_warn_for_invalid_lines
+    from dotenv.parser import parse_stream
 
-    return list(DotEnv(dotenv_path=None, stream=io.StringIO(text), interpolate=False).parse())
+    from agent.secret_scope import parse_exact_env_value
+
+    # Same bindings as ``DotEnv.parse``; a ``# hermes:exact:v1`` value is decoded verbatim and flagged so
+    # ``${VAR}`` expansion never touches it.
+    assignments: list[tuple[str, str | None, bool]] = []
+    for binding in with_warn_for_invalid_lines(parse_stream(io.StringIO(text))):
+        if binding.key is None:
+            continue
+        exact = parse_exact_env_value(binding.original.string.partition("=")[2])
+        assignments.append((binding.key, binding.value if exact is None else exact, exact is not None))
+    return assignments
 
 
 def _dotenv_lookup_env(load_pass: int | None) -> dict[str, str]:
@@ -356,7 +374,7 @@ def _dotenv_lookup_env(load_pass: int | None) -> dict[str, str]:
 
 
 def _resolve_dotenv_assignments(
-    assignments: list[tuple[str, str | None]], lookup_env: dict[str, str], *, override: bool,
+    assignments: list[tuple[str, str | None, bool]], lookup_env: dict[str, str], *, override: bool,
 ) -> dict[str, str | None]:
     """Expand ``${VAR}`` / ``${VAR:-default}`` like ``dotenv.main.resolve_variables``, minus the live
     ``os.environ``: a line sees *lookup_env* and the file's earlier lines (earlier lines win under
@@ -364,8 +382,8 @@ def _resolve_dotenv_assignments(
     from dotenv.variables import parse_variables
 
     resolved: dict[str, str | None] = {}
-    for name, value in assignments:
-        if value is not None:
+    for name, value, exact in assignments:
+        if value is not None and not exact:
             lookup = {**lookup_env, **resolved} if override else {**resolved, **lookup_env}
             value = "".join(atom.resolve(lookup) for atom in parse_variables(value))
         resolved[name] = value
@@ -406,6 +424,8 @@ def _load_dotenv_with_fallback(
     (project, managed) still sees the earlier layer's output, as it always did; only OTHER passes' output
     is peeled. A bare call (``hermes send``'s direct reload) is its own pass."""
     assignments = _parse_dotenv_file(path)
+    last_exact = {name: exact for name, _value, exact in assignments}  # last assignment wins
+    exact_keys = {name for name, exact in last_exact.items() if exact}
     with _DOTENV_LOCK:
         if load_pass is None:
             load_pass = next(_DOTENV_PASSES)
@@ -422,10 +442,14 @@ def _load_dotenv_with_fallback(
             baseline = record[0] if ours else current
             os.environ[name] = value
             _DOTENV_PUBLISHED[name] = (baseline, value, load_pass)
+            if name in exact_keys:
+                _DOTENV_EXACT_KEYS.add(name)
+            else:
+                _DOTENV_EXACT_KEYS.discard(name)
     # Every key this file defines, for the launch-residue strip: dotenv never unsets, so a key later
     # removed from the launch .env stays in os.environ and a re-parse of the file no longer names it.
     # Managed keys are recorded separately: they are administrator policy, not launch-profile residue.
-    (_MANAGED_DOTENV_KEYS if managed else _LOADED_DOTENV_KEYS).update(name for name, _value in assignments)
+    (_MANAGED_DOTENV_KEYS if managed else _LOADED_DOTENV_KEYS).update(name for name, _value, _exact in assignments)
     _sanitize_loaded_credentials()  # httpx encodes headers as ASCII
 
 
