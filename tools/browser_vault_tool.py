@@ -243,7 +243,7 @@ def browser_vault_list() -> str:
             continue
         if backend.needs_unlock and not backend.is_unlocked():
             locked.append({"backend": backend.name, "display_name": backend.display_name,
-                           "unlock": "browser_vault_unlock" if can_prompt_here() else "unavailable_in_this_session"})
+                           "unlock": "browser_vault_unlock" if can_prompt_here(backend.name) else "unavailable_in_this_session"})
             continue
         try:
             metas = backend.list_items()
@@ -284,7 +284,7 @@ def browser_vault_unlock(backend_name: str) -> str:
         return json.dumps({"success": False, "error": f"No unlockable vault backend named {backend_name!r}."})
     if backend.is_unlocked():
         return json.dumps({"success": True, "backend": backend.name, "already_unlocked": True})
-    if not can_prompt_here():
+    if not can_prompt_here(backend.name):
         return json.dumps({"success": False, "error_type": "unlock_unavailable",
                            "error": (f"{backend.display_name} is locked and this session cannot prompt for the "
                                      "master password (headless/cron/API). Unlock it from an interactive Hermes "
@@ -312,9 +312,13 @@ def browser_vault_unlock(backend_name: str) -> str:
 def browser_vault_save_login(label: str = "", task_id: Optional[str] = None) -> str:
     """Ask the user (masked prompt on their surface) for the login of the CURRENT page, store it in the local
     vault bound to that origin, and fill the password at once. The values never enter the conversation."""
-    from agent.vault_backends.unlock import can_prompt_here, get_save_login_prompt_callback
+    from agent.vault_backends.unlock import can_prompt_here, get_save_login_prompt_callback, external_access_allowed
     from agent.vault_store import get_vault_store
 
+    denied = {"success": False, "error_type": "save_not_authorized",
+              "error": "This invocation is not authorized to save a login."}
+    if not external_access_allowed():
+        return json.dumps(denied)
     effective_task_id = task_id or "default"
     # The supervisor's default page session is whatever tab it attached to first (on Browser Use that is
     # the daemon's blank tab); the login form lives in the tab with a password field, so focus that one.
@@ -329,17 +333,27 @@ def browser_vault_save_login(label: str = "", task_id: Optional[str] = None) -> 
                                      f"`hermes vault add` or use Desktop → Settings → Passwords & Logins for {origin}.")})
     host = origin.split("://", 1)[-1]
     site = label.strip() or host
-    answer = prompt(origin, host)  # the prompt names the site by host: the user recognises URLs, not agent labels
+    try:
+        answer = prompt(origin, host)
+    except Exception:
+        return json.dumps({"success": False, "error_type": "prompt_failed", "error": "Secure login prompt failed."})
+    if not external_access_allowed():
+        if isinstance(answer, dict):
+            answer.clear()
+        return json.dumps(denied)
     if not answer or not answer.get("password") or not answer.get("identifier"):
         return json.dumps({"success": False, "error_type": "save_declined",
                            "error": "The user chose not to save a login for this site. Do not ask again this turn."})
-    identifier = str(answer["identifier"]).strip()
+    identifier = str(answer["identifier"])
     id_type = "email" if "@" in identifier else ("phone" if identifier.lstrip("+").isdigit() else "username")
     try:
-        meta = get_vault_store().add_item("login", site, {"identifier_type": id_type, "identifier": identifier,
+        store = get_vault_store()
+        if not external_access_allowed():
+            return json.dumps(denied)
+        meta = store.add_item("login", site, {"identifier_type": id_type, "identifier": identifier,
                                                         "password": str(answer["password"])}, origin=origin)
-    except Exception as exc:
-        return json.dumps({"success": False, "error_type": "save_failed", "error": str(exc)[:200]})
+    except Exception:
+        return json.dumps({"success": False, "error_type": "save_failed", "error": "Login could not be saved securely."})
     finally:
         answer.clear()
     filled = json.loads(browser_vault_fill(meta.id, task_id=effective_task_id))
@@ -399,17 +413,28 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
             return json.dumps({"success": False, "error_type": "prompt_unavailable",
                                "error": (f"{site} asks for a one-time code and this session cannot ask the user (headless/cron/API). "
                                          "Save an authenticator key for this login so codes can be generated automatically.")})
-        code = (prompt(site, "") or "").strip().replace(" ", "").replace("-", "")
+        try:
+            code = prompt(site, "") or ""
+            from agent.vault_backends.unlock import code_values_are_exact
+            if not code_values_are_exact():
+                code = code.strip().replace(" ", "").replace("-", "")
+        except Exception:
+            return json.dumps({"success": False, "error_type": "prompt_failed",
+                               "error": "Secure code prompt failed. Retry from the secure prompt."})
         if not code:
             return json.dumps({"success": False, "error_type": "code_declined",
                                "error": "The user did not enter a code. Do not ask again this turn."})
 
     register_vault_redaction_value(code)
-    fills = build_otp_fills(otp_controls, code)
-    result = _eval_js_secret(effective_task_id, build_fill_js(fills, expected_origin=origin, nonce=nonce))
-    del code
+    try:
+        fills = build_otp_fills(otp_controls, code)
+        result = _eval_js_secret(effective_task_id, build_fill_js(fills, expected_origin=origin, nonce=nonce))
+    except Exception:
+        return json.dumps({"success": False, "error": "Secure code fill failed."})
+    finally:
+        del code
     if not result.get("success"):
-        return json.dumps({"success": False, "error": str(result.get("error") or "fill failed")[:200]})
+        return json.dumps({"success": False, "error": "Secure code fill failed."})
     parsed = _parse_json_result(result.get("result"))
     if isinstance(parsed, str):
         parsed = _parse_json_result(parsed)

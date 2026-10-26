@@ -86,7 +86,8 @@ _callback_tls = threading.local()
 
 
 def _get_sudo_password_callback():
-    return getattr(_callback_tls, "sudo_password", None)
+    from tools.terminal_tool_sudo import scoped_sudo_callback
+    return scoped_sudo_callback(getattr(_callback_tls, "sudo_password", None))
 
 
 def _get_approval_callback():
@@ -1333,6 +1334,11 @@ def terminal_tool(
             # caller could not have meant for a foreground call, and the two are exclusive anyway.
             background, notify_on_complete, watch_patterns = True, True, None
         if background:
+            from tools.terminal_tool_sudo import NativeSudoRefused, prepare_native_sudo
+            try:
+                prepare_native_sudo(command, supported=False)
+            except NativeSudoRefused as exc:
+                return _error_json(str(exc))
             result = spawn_background_process(
                 command=command, env=env, env_type=env_type, effective_task_id=effective_task_id,
                 task_id=task_id, session_key=session_key, workdir=workdir, cwd=cwd,

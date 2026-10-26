@@ -2632,19 +2632,26 @@ def _managed_source(filename: str):
     return (managed_dir / filename) if managed_dir else "the managed scope"
 
 
-def save_env_value(key: str, value: str):
+def save_env_value(key: str, value: str, *, preserve_exact: bool = False):
     """Save or update a value in ~/.hermes/.env (also matching ``export KEY=`` lines, so a save
     never appends a second line that a later delete would resurrect)."""
     if _env_write_blocked(key, "set"):
         return
     validate_env_var_name_for_write(key)
-    value = value.replace("\n", "").replace("\r", "")
-    value = _check_non_ascii_credential(key, value)
+    if not preserve_exact:
+        value = value.replace("\n", "").replace("\r", "")
+        value = _check_non_ascii_credential(key, value)
     ensure_hermes_home()
     env_path = get_env_path()
 
     lines = _read_env_lines(env_path) if env_path.exists() else []
     serialized_value = _quote_env_value(value)
+    if preserve_exact:
+        # One physical line, standard dotenv escapes; opt in per assignment so
+        # legacy scoped literals are not retroactively reinterpreted.
+        from agent.secret_scope import EXACT_ENV_COMMENT
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
+        serialized_value = f'"{escaped}" {EXACT_ENV_COMMENT}'
 
     idx = next((i for i, line in enumerate(lines) if _env_line_defines_key(line, key)), None)
     if idx is not None:
@@ -2712,7 +2719,7 @@ def save_anthropic_api_key(value: str, save_fn=None):
     _write_anthropic_slots("", value, save_fn, token_first=False)
 
 
-def save_env_value_secure(key: str, value: str) -> Dict[str, Any]:
+def save_env_value_secure(key: str, value: str, *, preserve_exact: bool = False) -> Dict[str, Any]:
     """Save via the unified credential lifecycle (also refreshes any config.yaml mirror of the old
     value and lifts a prior env-source suppression)."""
     from hermes_cli.credential_lifecycle import save_provider_env_credential
@@ -2720,7 +2727,10 @@ def save_env_value_secure(key: str, value: str) -> Dict[str, Any]:
     # Route through the unified credential lifecycle so a rotation via the secret-capture path also
     # refreshes any config.yaml mirror of the old value and lifts a prior env-source suppression (#62269 fix
     # family).
-    save_provider_env_credential(key, value)
+    if preserve_exact:
+        save_provider_env_credential(key, value, preserve_exact=True)
+    else:
+        save_provider_env_credential(key, value)
     return {"success": True, "stored_as": key, "validated": False}
 
 

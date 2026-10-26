@@ -19,6 +19,10 @@ def _aux(timeout, *, reasoning_effort=True, **extra):
 
 
 DEFAULT_CONFIG = {
+    "platforms": {"thechat": {"secure_input": {
+        "allow_sudo": False,
+        "allow_skill_secrets": False,
+    }}},
     "model": "",
     "providers": {},
     "fallback_providers": [],

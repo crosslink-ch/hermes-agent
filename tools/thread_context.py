@@ -54,8 +54,7 @@ def propagate_context_to_thread(target: Callable) -> Callable:
                 return target(*args, **kwargs)
             try:
                 for setter, cb in installs:
-                    if cb is not None:
-                        setter(cb)
+                    setter(cb)  # explicit None must evict a stale callback on a pooled worker
             except Exception:
                 logger.debug("Failed to install propagated approval/sudo callbacks; "
                              "dangerous-command approval will fail closed", exc_info=True)

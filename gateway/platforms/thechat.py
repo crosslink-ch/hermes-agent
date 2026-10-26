@@ -231,6 +231,9 @@ class TheChatAdapter(BasePlatformAdapter):
         self._approval_request_ids: Dict[str, list[str]] = {}
         from gateway.platforms.thechat_vault import VaultUnlockBroker
         self._vault_unlock = VaultUnlockBroker()
+        from gateway.platforms.thechat_secure_input import SecureInputBroker
+        self._secure_input = SecureInputBroker()
+        self._secure_input_supported = False
         self._owner_user_id = ""
         from gateway.platforms.thechat_requests import BotRequestBridge
         # Approvals/clarify as durable TheChat inbox requests when the server supports them.
@@ -264,6 +267,7 @@ class TheChatAdapter(BasePlatformAdapter):
             health = response.json()
             self._capture_vault_owner(health)
             self._bot_requests.capture_capabilities(health)
+            self._capture_secure_input_capability(health)
         except Exception:
             await self._client.aclose()
             self._client = None
@@ -292,9 +296,13 @@ class TheChatAdapter(BasePlatformAdapter):
             health = response.json()
             self._capture_vault_owner(health)
             self._bot_requests.capture_capabilities(health)
+            self._capture_secure_input_capability(health)
             from gateway.platforms.thechat_vault import VaultUnlockBroker
             if self._vault_unlock.closed:
                 self._vault_unlock = VaultUnlockBroker()
+            from gateway.platforms.thechat_secure_input import SecureInputBroker
+            if self._secure_input.closed:
+                self._secure_input = SecureInputBroker()
             if self.webhook_url:
                 await self._start_webhook_server()
                 await self._register_webhook()
@@ -335,9 +343,16 @@ class TheChatAdapter(BasePlatformAdapter):
         except VaultUnlockError:
             pass  # Older workers may omit this field; TheChat 1Password access stays denied.
 
+    def _capture_secure_input_capability(self, health) -> None:
+        capabilities = health.get("capabilities") if isinstance(health, dict) else None
+        version = capabilities.get("secureInput") if isinstance(capabilities, dict) else None
+        self._secure_input_supported = type(version) is int and version == 3
+
     async def disconnect(self) -> None:
         self._running = False
         self._vault_unlock.close()
+        self._secure_input.close()
+        self._secure_input_supported = False
         await self._bot_requests.stop()
         self._owner_user_id = ""
         if self._webhook_recovery_task:
@@ -2122,6 +2137,7 @@ class TheChatAdapter(BasePlatformAdapter):
         if not context:
             return
         self._vault_unlock.cancel_invocation(context["invocation_id"])
+        self._secure_input.cancel_invocation(context["invocation_id"])
         context_key = self._context_key(event.source.chat_id, event.source.thread_id)
         active_context = self._contexts.get(context_key)
         if active_context is context:
@@ -2788,6 +2804,15 @@ class TheChatAdapter(BasePlatformAdapter):
             await asyncio.gather(lease_task, return_exceptions=True)
 
     async def _handle_webhook(self, request):
+        try:
+            response = await self._handle_webhook_body(request)
+        except web.HTTPException as exc:
+            exc.headers["Cache-Control"] = "no-store"
+            raise
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    async def _handle_webhook_body(self, request):
         body_bytes = await request.read()
         try:
             body = body_bytes.decode("utf-8")
@@ -2798,8 +2823,19 @@ class TheChatAdapter(BasePlatformAdapter):
         # Dedicated secret-bearing interaction lane: verify signature FIRST, then
         # dispatch in memory BEFORE the durable message/approval inbox can see it.
         from gateway.platforms.thechat_vault import VaultUnlockError
+        from gateway.platforms.thechat_secure_input import SecureInputError, strict_object
         try:
-            payload = json.loads(body)
+            payload = json.loads(body, object_pairs_hook=strict_object)
+            if isinstance(payload, dict) and payload.get("type") == "thechat.hermes_platform.secure_input":
+                try:
+                    if not self._secure_input_supported or not self.webhook_url:
+                        raise SecureInputError()
+                    duplicate = self._secure_input.resolve(payload)
+                    return web.json_response({"ok": True, "duplicate": duplicate})
+                except SecureInputError as exc:
+                    return web.json_response({"error": "Invalid or stale secure input interaction"}, status=exc.status)
+                except Exception:
+                    return web.json_response({"error": "Secure input interaction failed"}, status=409)
             if isinstance(payload, dict) and payload.get("type") == "thechat.hermes_platform.vault_unlock":
                 try:
                     duplicate = self._vault_unlock.resolve(payload)

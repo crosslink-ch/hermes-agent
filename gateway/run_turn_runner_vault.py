@@ -8,12 +8,13 @@ import time
 from contextlib import contextmanager
 
 
-def _publish(turn, adapter, context, event):
+def _publish(turn, adapter, context, event, *, retry=False):
     loop = turn._ctx._loop_for_step
     if loop is None or loop.is_closed():
         return None
-    return asyncio.run_coroutine_threadsafe(adapter.send_invocation_progress(
-        context["conversation_id"], event, context=context), loop)
+    send = adapter._send_interaction_request_progress if retry else adapter.send_invocation_progress
+    return asyncio.run_coroutine_threadsafe(send(
+        context["conversation_id"], event, context=context, metadata=None), loop)
 
 
 @contextmanager
@@ -105,10 +106,12 @@ def vault_turn_scope(turn):
     # Do not borrow a Desktop/CLI thread-local prompt on a reused gateway executor.
     unlock.set_unlock_prompt_callback(prompt if allowed and adapter.webhook_url else None)
     unlock.set_current_session_id(ctx.session_id)
+    from gateway.run_turn_runner_secure_input import secure_input_turn_scope
     try:
         with unlock.external_access_scope(
                 lambda: bool(owner and allowed and ctx.source.user_id == owner and adapter._owner_user_id == owner),
-                live=live, bitwarden_allowed=allowed):
+                live=live, bitwarden_allowed=allowed), secure_input_turn_scope(
+                    turn, adapter, context, profile_id, home, allowed, owner):
             yield
     finally:
         active.clear()

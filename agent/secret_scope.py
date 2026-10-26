@@ -258,17 +258,31 @@ def _strip_inline_comment(value: str) -> str:
     return re.split(r"\s+#", value, maxsplit=1)[0].strip()
 
 
-def _parse_env_value(raw_value: str) -> str:
+# This per-assignment discriminator opts into decoding CR/LF. Unmarked manually
+# written values retain the historical scoped parser's literal \\n/\\r semantics.
+EXACT_ENV_COMMENT = "# hermes:exact:v1"
+_EXACT_ENV_VALUE = re.compile(r'("(?:[^"\\\r\n]|\\[^\r\n])*") ' + re.escape(EXACT_ENV_COMMENT))
+
+
+def parse_exact_env_value(raw_value: str) -> str | None:
+    match = _EXACT_ENV_VALUE.fullmatch(raw_value.strip())
+    return _parse_env_value(match[1], exact=True) if match else None
+
+
+def _parse_env_value(raw_value: str, *, exact: bool = False) -> str:
     """Parse the small .env value subset Hermes writes itself (bare, 'single', or "double" with
-    ``\\"`` / ``\\\\`` escapes)."""
+    ``\\\"`` / ``\\\\`` escapes)."""
     value = raw_value.strip()
     if len(value) >= 2 and value[0] == value[-1] == '"':
         quoted = value[1:-1]
         parsed: list[str] = []
         i = 0
+        escapes = {'"': '"', "\\": "\\"}
+        if exact:
+            escapes.update({"n": "\n", "r": "\r"})
         while i < len(quoted):
-            escaped = quoted[i] == "\\" and quoted[i + 1:i + 2] in ('"', "\\")
-            parsed.append(quoted[i + 1] if escaped else quoted[i])
+            escaped = quoted[i] == "\\" and quoted[i + 1:i + 2] in escapes
+            parsed.append(escapes[quoted[i + 1]] if escaped else quoted[i])
             i += 2 if escaped else 1
         return "".join(parsed)
     if len(value) >= 2 and value[0] == value[-1] == "'":
@@ -316,7 +330,7 @@ def _decode_env_bytes(raw: bytes) -> str:
 def _parse_env_text(text: str) -> Dict[str, str]:
     """Tokenize already-read ``.env`` text. See :func:`load_env_file`."""
     secrets: Dict[str, str] = {}
-    for raw_line in text.splitlines():
+    for raw_line in text.split("\n"):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -325,7 +339,8 @@ def _parse_env_text(text: str) -> Dict[str, str]:
         key, sep, value = line.partition("=")
         key = key.strip()
         if sep and key:
-            secrets[key] = _parse_env_value(_strip_inline_comment(value))
+            exact = parse_exact_env_value(value)
+            secrets[key] = exact if exact is not None else _parse_env_value(_strip_inline_comment(value))
     return secrets
 
 
