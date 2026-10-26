@@ -25,6 +25,13 @@ class ReplyClient(_Client):
         return _Response({"event": {"id": "progress-event"}})
 
 
+def _dispatch(registry, name, args):
+    """The vault actions are one ``browser_vault`` tool upstream; keep the per-action names readable here."""
+    if name.startswith("browser_vault_"):
+        return registry.dispatch("browser_vault", {"action": name.removeprefix("browser_vault_"), **args})
+    return registry.dispatch(name, args)
+
+
 async def run_tool(adapter, name, args, *, sender="owner", check=None):
     from tools.registry import registry
     from tools.thread_context import propagate_context_to_thread
@@ -32,7 +39,7 @@ async def run_tool(adapter, name, args, *, sender="owner", check=None):
         is_interrupted = False
         def run_conversation(self, *_a, **_kw):
             with ThreadPoolExecutor(max_workers=1) as pool:
-                result = pool.submit(propagate_context_to_thread(lambda: json.loads(registry.dispatch(name, args)))).result()
+                result = pool.submit(propagate_context_to_thread(lambda: json.loads(_dispatch(registry, name, args)))).result()
             if check:
                 check(result)
             return result
@@ -89,7 +96,7 @@ async def test_unsupported_v3_is_unavailable_not_user_cancellation(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 async def test_onepassword_native_child_and_owner_guard(tmp_path, monkeypatch):
     from agent.vault_backends import unlock
     from agent.vault_backends.onepassword import OnePasswordLoginBackend

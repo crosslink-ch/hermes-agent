@@ -105,6 +105,8 @@
   "paste_collapse_char_threshold",
   "paste_collapse_threshold",
   "paste_collapse_threshold_fallback",
+  "platforms.thechat.secure_input.allow_skill_secrets",
+  "platforms.thechat.secure_input.allow_sudo",
   "security.acked_advisories",
   "security.protected_instruction_extra_patterns",
   "security.protected_instruction_files",

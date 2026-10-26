@@ -54,7 +54,7 @@ def synthetic_sudo(tmp_path, monkeypatch):
     return executable, cache, calls
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("options", [None, "", "-u root -g root", "--user root --group root --", "-u '#0' -g '#0'"])
 def test_authentication_is_separate_from_command_stdin(tmp_path, monkeypatch, synthetic_sudo, cached, options):
@@ -90,7 +90,7 @@ def test_authentication_is_separate_from_command_stdin(tmp_path, monkeypatch, sy
         env.cleanup()
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("shape", [
     "{sudo} /usr/bin/true && {sudo} /usr/bin/cat",
     "/usr/bin/cat; {sudo} /usr/bin/true",
@@ -117,7 +117,7 @@ def test_unsupported_shapes_refuse_before_capture_or_execution(tmp_path, synthet
         env.cleanup()
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("failure", ["cancel-prompt", "cancel-auth", "timeout", "auth-failed", "expired", "multiline"])
 def test_failed_or_cancelled_auth_never_hands_password_to_command(tmp_path, monkeypatch, failure):
     from tools.environments import native_sudo
