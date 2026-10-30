@@ -1770,8 +1770,8 @@ def merge_pending_message_event(pending_messages: dict[str, MessageEvent], sessi
                 existing.media_urls.extend(event.media_urls)
                 existing.media_types.extend(event.media_types)
                 existing.media_text_inlined.extend(incoming_inline_flags)
-            if event.text:
-                existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
+            if followup := existing.followup_text(event):
+                existing.text = BasePlatformAdapter._merge_caption(existing.text, followup)
             existing.absorb_reply_expected(event)
             if existing_is_photo or incoming_is_photo:
                 existing.message_type = MessageType.PHOTO
@@ -1785,8 +1785,8 @@ def merge_pending_message_event(pending_messages: dict[str, MessageEvent], sessi
             return
         both_text = existing_type == MessageType.TEXT and event.message_type == MessageType.TEXT
         if merge_text and both_text:
-            if event.text:
-                existing.text = _append_text(existing.text, event.text)
+            if followup := existing.followup_text(event):
+                existing.text = _append_text(existing.text, followup)
             existing.absorb_reply_expected(event)
             return
     pending_messages[session_key] = event
@@ -2533,8 +2533,8 @@ class BasePlatformAdapter(ABC):
         if existing is None:
             existing = self._pending_text_batches[key] = event
         else:
-            if event.text:
-                existing.text = _append_text(existing.text, event.text)
+            if followup := existing.followup_text(event):
+                existing.text = _append_text(existing.text, followup)
             if event.media_urls:
                 existing.media_urls.extend(event.media_urls)
                 existing.media_types.extend(event.media_types)
@@ -3821,8 +3821,8 @@ class BasePlatformAdapter(ABC):
             state = TextDebounceState(event=event, task=None, first_ts=now, last_ts=now)
             store[session_key] = state
         else:
-            if event.text:
-                state.event.text = _append_text(state.event.text, event.text)
+            if followup := state.event.followup_text(event):
+                state.event.text = _append_text(state.event.text, followup)
             state.event.absorb_reply_expected(event)
             latest_message_id = getattr(event, "message_id", None)
             latest_anchor = latest_message_id or getattr(event, "reply_to_message_id", None)
