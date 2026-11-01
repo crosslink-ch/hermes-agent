@@ -411,7 +411,15 @@ class TheChatAdapter(BasePlatformAdapter):
         )
         if error:
             return error
-        payload = self._platform_message_payload(target, text=content)
+        # The gateway marks mid-turn status sends ("⏳ Working", busy acks, warnings) as
+        # interim. TheChat uses the flag to notify only for finished work. A text
+        # approval/clarify prompt is also mid-turn, but the agent is blocked on it, so
+        # it must notify like an answer.
+        send_metadata = metadata or {}
+        interim = bool(send_metadata.get("_interim_send")) and not send_metadata.get(
+            "is_approval_prompt"
+        )
+        payload = self._platform_message_payload(target, text=content, interim=interim)
         with start_span(
             "thechat.message.send",
             {
@@ -423,6 +431,7 @@ class TheChatAdapter(BasePlatformAdapter):
                 "thechat.conversation_id": target.get("conversation_id") or "",
                 "thechat.thread_id": target.get("thread_id") or "",
                 "thechat.has_invocation_context": context is not None,
+                "thechat.message.interim": interim,
             },
         ) as span:
             try:
@@ -501,6 +510,7 @@ class TheChatAdapter(BasePlatformAdapter):
         text: Optional[str] = None,
         attachment_ids: Optional[list[str]] = None,
         platform_message_id: Optional[str] = None,
+        interim: bool = False,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "conversationId": str(target["conversation_id"]),
@@ -508,6 +518,8 @@ class TheChatAdapter(BasePlatformAdapter):
         }
         if text is not None:
             payload["content"] = text
+        if interim:
+            payload["interim"] = True
         if target.get("invocation_id"):
             payload["invocationId"] = str(target["invocation_id"])
         if target.get("bot_id"):
