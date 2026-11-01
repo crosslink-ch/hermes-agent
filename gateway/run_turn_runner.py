@@ -382,7 +382,7 @@ class TurnRunner(StructuredProgressMixin, GatewayTurnProgressMixin, GatewaySessi
             if self._status_live():
                 self._send_status_text(
                     message,
-                    _interim_metadata(_non_conversational_metadata(ctx._status_thread_metadata, platform=ctx.source.platform)),
+                    _interim_metadata(_non_conversational_metadata(ctx._status_thread_metadata, platform=ctx.source.platform), progress=True),
                     "background_review_callback scheduling error",
                 )
 

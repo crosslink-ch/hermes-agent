@@ -24,7 +24,6 @@ import hashlib
 import hmac
 import json
 import logging
-import math
 import mimetypes
 import os
 import re
@@ -55,6 +54,12 @@ from gateway.inbound_event_ledger import (
 )
 from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome, SendResult, cache_media_bytes, get_inbound_media_max_bytes
 from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms.thechat_attachments import (
+    _AttachmentError,
+    _attachment_timeout_seconds,
+    _normalize_attachment_media_type,
+    _s3_error_code,
+)
 from gateway.otel import start_span
 from tools.url_safety import async_is_safe_url, create_ssrf_safe_async_client
 
@@ -84,7 +89,6 @@ _INTERACTION_RECORD_MAX_LIFETIME_SECONDS = 24 * 60 * 60
 _INTERACTION_PROGRESS_MAX_ATTEMPTS = 3
 _INTERACTION_PROGRESS_RETRY_BASE_SECONDS = 0.1
 _ATTACHMENT_TRANSFER_TIMEOUT_SECONDS = 600.0
-_ATTACHMENT_TIMEOUT_MAX_SECONDS = 24 * 60 * 60
 _ATTACHMENT_CONNECT_TIMEOUT_SECONDS = 5.0
 _ATTACHMENT_POLL_TIMEOUT_SECONDS = 120.0
 _ATTACHMENT_POLL_INTERVAL_SECONDS = 0.25
@@ -110,54 +114,6 @@ _ATTACHMENT_UPLOAD_HEADERS = frozenset(
         "x-amz-checksum-sha256",
     }
 )
-_ATTACHMENT_MEDIA_TYPE_ALIASES = {
-    "audio/x-wav": "audio/wav",
-    "audio/wave": "audio/wav",
-    "image/jpg": "image/jpeg",
-}
-
-
-def _normalize_attachment_media_type(value: Any) -> str:
-    normalized = str(value or "").split(";", 1)[0].strip().lower()
-    return _ATTACHMENT_MEDIA_TYPE_ALIASES.get(normalized, normalized)
-
-
-def _attachment_timeout_seconds(extra: dict, key: str, default: float) -> float:
-    """Read a bounded platform timeout without letting bad config disable downloads."""
-    if key not in extra:
-        return default
-    value = extra[key]
-    try:
-        seconds = float(value) if not isinstance(value, bool) else float("nan")
-    except (TypeError, ValueError, OverflowError):
-        seconds = float("nan")
-    if math.isfinite(seconds) and 0 < seconds <= _ATTACHMENT_TIMEOUT_MAX_SECONDS:
-        return seconds
-    logger.warning("TheChat: invalid %s; using default timeout", key)
-    return default
-
-
-def _s3_error_code(response: httpx.Response) -> Optional[str]:
-    """Extract only S3's bounded symbolic error code, never signed details."""
-    match = re.search(r"<Code>([A-Za-z0-9_.-]{1,64})</Code>", response.text[:8192])
-    return match.group(1) if match else None
-
-
-class _AttachmentError(RuntimeError):
-    """Safe attachment error whose text never contains an object-store URL."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        retryable: bool = False,
-        preserve_attachment: bool = False,
-    ) -> None:
-        super().__init__(message)
-        self.retryable = retryable
-        self.preserve_attachment = preserve_attachment
-
-
 class _DirectInteractionError(ValueError):
     """Safe HTTP error raised while resolving a direct interaction."""
 
@@ -411,14 +367,9 @@ class TheChatAdapter(BasePlatformAdapter):
         )
         if error:
             return error
-        # The gateway marks mid-turn status sends ("⏳ Working", busy acks, warnings) as
-        # interim. TheChat uses the flag to notify only for finished work. A text
-        # approval/clarify prompt is also mid-turn, but the agent is blocked on it, so
-        # it must notify like an answer.
-        send_metadata = metadata or {}
-        interim = bool(send_metadata.get("_interim_send")) and not send_metadata.get(
-            "is_approval_prompt"
-        )
+        # Only progress ("⏳ Working", busy acks) is flagged: TheChat then notifies only for
+        # finished work. Other interim sends (shutdown notices, approval prompts) notify.
+        interim = (metadata or {}).get("_interim_send") == "progress"
         payload = self._platform_message_payload(target, text=content, interim=interim)
         with start_span(
             "thechat.message.send",

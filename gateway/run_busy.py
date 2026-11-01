@@ -572,17 +572,19 @@ class GatewayBusySessionMixin:
             return reply_anchor if event.source.chat_type == "dm" else None
         return None if getattr(event, "internal", False) else event.message_id
 
-    async def _send_busy_reply(self, event: MessageEvent, adapter, content: str, *, plain_anchor: bool = False) -> None:
+    async def _send_busy_reply(
+        self, event: MessageEvent, adapter, content: str, *, plain_anchor: bool = False, progress: bool = False,
+    ) -> None:
         """Send a busy-path reply anchored to the event (thread metadata included).
 
-        Busy replies (acks, drain notices, queued-turn confirmations) are never a turn's answer,
-        so they carry the interim marker: no native-stream seal, no "work finished" signal."""
+        A busy reply never seals the running turn's native stream, so it is always interim.
+        ``progress`` marks an ack ("Interrupting…", "Queued") rather than a refusal or a reply."""
         from gateway.run import _interim_metadata
         reply_anchor = self._reply_anchor_for_event(event)
         await adapter._send_with_retry(
             chat_id=event.source.chat_id, content=content,
             reply_to=reply_anchor if plain_anchor else self._busy_reply_to(event, reply_anchor),
-            metadata=_interim_metadata(self._thread_metadata_for_source(event.source, reply_anchor)),
+            metadata=_interim_metadata(self._thread_metadata_for_source(event.source, reply_anchor), progress=progress),
         )
 
     async def _send_busy_drain_notice(self, event: MessageEvent, session_key: str, effective_mode: str) -> None:
@@ -590,12 +592,13 @@ class GatewayBusySessionMixin:
         adapter = self._delivery_adapter_for(event.source)
         if not adapter:
             return
-        if self._queue_during_drain_enabled(effective_mode):
+        queued = self._queue_during_drain_enabled(effective_mode)
+        if queued:
             self._queue_or_replace_pending_event(session_key, event)
             message = t("gateway.busy.drain_queued", action=self._status_action_gerund())
-        else:
+        else:  # rejected: the user must resend, so it is not progress
             message = t("gateway.busy.drain_rejected", action=self._status_action_gerund())
-        await self._send_busy_reply(event, adapter, message)
+        await self._send_busy_reply(event, adapter, message, progress=queued)
 
     # Bare-word approval replies → (verb, args) for the synthesized slash command. English words
     # (and the thumbs) always match; ``approval.inputs.*`` adds the active language's synonyms.
@@ -655,7 +658,7 @@ class GatewayBusySessionMixin:
                     if _adapter and _reply:
                         _text, _eph_ttl = _adapter._unwrap_ephemeral(_reply)
                         if _text:
-                            await self._send_busy_reply(event, _adapter, _text, plain_anchor=True)
+                            await self._send_busy_reply(event, _adapter, _text, plain_anchor=True, progress=True)
                     return True
         except Exception:
             logger.warning(
@@ -884,7 +887,7 @@ class GatewayBusySessionMixin:
 
     async def _send_busy_ack_reply(self, event: MessageEvent, adapter, message: str) -> None:
         try:
-            await self._send_busy_reply(event, adapter, message)
+            await self._send_busy_reply(event, adapter, message, progress=True)
         except Exception as e:
             logger.debug("Failed to send busy-ack: %s", e)
 
@@ -1279,7 +1282,7 @@ class GatewayBusySessionMixin:
     def _send_after_commit(self, adapter, event: MessageEvent, text: str) -> None:
         async def send():
             try:
-                await self._send_busy_reply(event, adapter, text)
+                await self._send_busy_reply(event, adapter, text, progress=True)
             except Exception:
                 logger.warning("Queued-turn acknowledgement failed", exc_info=True)
         task = asyncio.get_running_loop().create_task(send())

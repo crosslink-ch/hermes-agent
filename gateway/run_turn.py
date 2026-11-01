@@ -1572,7 +1572,7 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                     "gateway.progress.stuck_warning",
                     minutes=int(worker.agent_warning // 60) or 1,
                     remaining=int((worker.agent_timeout - worker.agent_warning) // 60) or 1),
-                metadata=_interim_metadata(_status_thread_metadata), logical_platform=source.platform,
+                metadata=_interim_metadata(_status_thread_metadata, progress=True), logical_platform=source.platform,
             )
         except Exception as _warn_err:
             logger.debug("Inactivity warning send error: %s", _warn_err)
@@ -2289,7 +2289,7 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
                         break
                     _notify_res = await _notify_adapter.send(
                         source.chat_id, _heartbeat_text,
-                        metadata=_interim_metadata(_non_conversational_metadata(_status_thread_metadata, platform=source.platform)),
+                        metadata=_interim_metadata(_non_conversational_metadata(_status_thread_metadata, platform=source.platform), progress=True),
                     )
                     if getattr(_notify_res, "success", False) and getattr(_notify_res, "message_id", None):
                         _heartbeat_msg_id = str(_notify_res.message_id)

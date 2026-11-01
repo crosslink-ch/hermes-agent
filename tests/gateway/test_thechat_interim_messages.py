@@ -1,9 +1,10 @@
 """TheChat learns which bot messages are progress updates, not finished work.
 
-The gateway already marks mid-turn sends (heartbeats, busy acks, warnings) with the internal
-``_interim_send`` marker. The TheChat adapter forwards it as ``interim: true`` on
-``POST /hermes-platform/messages`` so TheChat can notify people only when work is done. These
-tests drive the real gateway senders into a real ``httpx`` client and read the wire body.
+The gateway marks every mid-turn send with the internal ``_interim_send`` marker (stream safety);
+progress sends (heartbeats, busy acks, stuck warnings) mark it ``"progress"``. Only those reach
+TheChat as ``interim: true`` on ``POST /hermes-platform/messages``, so TheChat can notify people
+only when work is done, failed or needs them. These tests drive the real gateway senders into a
+real ``httpx`` client and read the wire body.
 """
 
 import json
@@ -80,7 +81,9 @@ async def test_interim_marker_reaches_thechat_and_final_answers_stay_unmarked():
     adapter = _adapter(server)
     adapter._contexts[CONVERSATION_ID] = _invocation_context()
 
-    progress = await adapter.send(CONVERSATION_ID, "⏳ Working — 3 min", metadata=_interim_metadata({}))
+    progress = await adapter.send(
+        CONVERSATION_ID, "⏳ Working — 3 min", metadata=_interim_metadata({}, progress=True)
+    )
     final = await adapter.send(CONVERSATION_ID, "Here is the report.")
 
     assert progress.success and final.success
@@ -92,6 +95,45 @@ async def test_interim_marker_reaches_thechat_and_final_answers_stay_unmarked():
     # The final answer carries no flag at all, so older TheChat servers see the same body as before.
     assert "interim" not in final_body
     assert final_body["content"] == "Here is the report."
+
+
+@pytest.mark.asyncio
+async def test_shutdown_notice_still_notifies_because_the_work_was_cut_short():
+    """A restart notice is mid-turn (it must not seal a stream) but ends the user's work."""
+    server = _TheChatServer()
+    adapter = _adapter(server)
+    adapter._contexts[CONVERSATION_ID] = _invocation_context()
+    runner = object.__new__(GatewayRunner)
+
+    delivered = await runner._send_shutdown_notice(
+        adapter, CONVERSATION_ID, "⚠️ Gateway restarting — your current task will be interrupted.",
+        "active session", "thechat",
+    )
+
+    assert delivered
+    assert "interim" not in server.messages[0]
+
+
+@pytest.mark.asyncio
+async def test_drain_refusal_still_notifies_and_a_queued_drain_notice_is_progress():
+    """While draining, "send it again later" needs the user; "queued for after restart" does not."""
+    server = _TheChatServer()
+    adapter = _adapter(server)
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig()
+    runner._delivery_adapter_for = lambda source: adapter
+    runner._status_action_gerund = lambda: "restarting"
+    runner._queue_or_replace_pending_event = lambda key, event: None
+    event = MessageEvent(text="one more thing", source=_source(), message_id="message-3")
+
+    runner._queue_during_drain_enabled = lambda mode: False
+    await runner._send_busy_drain_notice(event, "sess", "interrupt")
+    runner._queue_during_drain_enabled = lambda mode: True
+    await runner._send_busy_drain_notice(event, "sess", "queue")
+
+    rejected, queued = server.messages
+    assert "interim" not in rejected
+    assert queued["interim"] is True
 
 
 @pytest.mark.asyncio
@@ -146,7 +188,7 @@ async def test_busy_reply_is_posted_as_interim():
     runner.config = GatewayConfig()
     event = MessageEvent(text="actually, stop", source=_source(thread_id="thread-1"), message_id="message-9")
 
-    await runner._send_busy_reply(event, adapter, "⚡ Interrupting current task. I'll respond shortly.")
+    await runner._send_busy_ack_reply(event, adapter, "⚡ Interrupting current task. I'll respond shortly.")
 
     assert len(server.messages) == 1
     ack = server.messages[0]
