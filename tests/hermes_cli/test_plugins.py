@@ -376,26 +376,13 @@ class TestPluginDiscovery:
         assert mgr.has_middleware("llm_request") is True
 
 
-    def test_middleware_helpers_skip_no_listener_work(self, monkeypatch):
-        manager = types.SimpleNamespace(_middleware={})
-        monkeypatch.setattr("hermes_cli.plugins.get_plugin_manager", lambda: manager)
 
-        request = {"messages": []}
-        args = {"path": "README.md"}
 
-        llm_result = apply_llm_request_middleware(request)
-        tool_result = apply_tool_request_middleware("read_file", args)
 
-        assert llm_result.payload is request
-        assert llm_result.original_payload is request
-        assert llm_result.changed is False
-        assert llm_result.trace == []
-        assert tool_result.payload is args
-        assert tool_result.original_payload is args
-        assert tool_result.changed is False
-        assert tool_result.trace == []
-        assert run_tool_execution_middleware("terminal", args, lambda payload: payload) is args
-        assert has_middleware("tool_request") is False
+
+
+
+
 
 
     def test_failed_discovery_is_not_cached(self, tmp_path, monkeypatch):

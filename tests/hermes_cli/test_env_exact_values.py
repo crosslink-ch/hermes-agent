@@ -75,7 +75,7 @@ def test_exact_writer_survives_scoped_and_fresh_startup_loaders(tmp_path, monkey
                 "assert all(os.environ.get(k)==v for k,v in expected.items()), 'startup changed exact value'; "
                 "print('exact startup verified')"
             )], env=env, input=json.dumps({key: value + str(index)}),
-                text=True, capture_output=True, timeout=30)
+                text=True, capture_output=True, timeout=30, check=False)
             assert proc.returncode == 0, proc.stderr
             assert "exact startup verified" in proc.stdout
         assert key not in os.environ
