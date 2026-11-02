@@ -39,7 +39,7 @@ class TestFileToolsContainerConfig:
              patch("tools.terminal_tool._active_environments", {}), \
              patch("tools.terminal_tool._creation_locks", {}), \
              patch("tools.terminal_tool._creation_locks_lock", __import__("threading").Lock()), \
-             patch("tools.terminal_tool._create_environment", side_effect=fake_create_env), \
+             patch("tools.terminal_tool_backends._create_environment", side_effect=fake_create_env), \
              patch("tools.terminal_tool._start_cleanup_thread"), \
              patch("tools.file_tools._file_ops_cache", {}), \
              patch("tools.file_tools._file_ops_lock", __import__("threading").Lock()):

@@ -16,13 +16,13 @@ from tools.code_execution_rpc import _rpc_poll_loop
 CALLS = {
     "web_search": {"query": "fixture", "limit": 3},
     "web_extract": {"urls": ["https://example.test"], "char_limit": 3000},
-    "read_file": {"path": "reference", "offset": 2, "limit": 4},
-    "write_file": {"path": "output", "content": "café", "cross_profile": False},
+    "read_file": {"path": "reference", "offset": 2, "limit": 4, "execution_target": "alpha", "runtime_scope": "scope"},
+    "write_file": {"path": "output", "content": "café", "cross_profile": False, "execution_target": "alpha"},
     "search_files": {"pattern": "x", "target": "files", "path": ".", "file_glob": "*.py",
-                     "limit": 4, "offset": 2, "output_mode": "count", "context": 3, "order": "modified"},
+                     "limit": 4, "offset": 2, "output_mode": "count", "context": 3, "order": "modified", "execution_target": "alpha"},
     "patch": {"path": "output", "old_string": "old", "new_string": "new", "replace_all": True,
-              "mode": "replace", "patch": None, "cross_profile": False},
-    "terminal": {"command": "echo fixture", "timeout": 3, "workdir": "/tmp"},
+              "mode": "replace", "patch": None, "cross_profile": False, "execution_target": "alpha"},
+    "terminal": {"command": "echo fixture", "timeout": 3, "workdir": "/tmp", "execution_target": "alpha"},
 }
 
 

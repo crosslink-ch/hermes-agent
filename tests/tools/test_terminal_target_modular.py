@@ -33,7 +33,7 @@ def isolated(monkeypatch, tmp_path):
 
 
 def test_named_targets_choose_independent_cwd_cache_and_report_metadata(isolated):
-    tt, targets, _config, alpha, beta = isolated
+    tt, _targets, _config, alpha, beta = isolated
     first = json.loads(tt.terminal_tool("pwd", task_id="s"))
     second = json.loads(tt.terminal_tool("pwd", task_id="s", execution_target="beta"))
     assert first["output"] == str(alpha)

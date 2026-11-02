@@ -1088,27 +1088,9 @@ def test_labels_attribute_populated_after_init(monkeypatch):
 
     env = _make_dummy_env(task_id="abc")
 
-    assert {k: env._labels[k] for k in ("hermes-agent", "hermes-task-id", "hermes-profile", "hermes-egress", "hermes-process-instance")} == {
-        "hermes-agent": "1",
-        "hermes-task-id": "abc",
-        "hermes-profile": "default",
-        "hermes-egress": "off",
-        "hermes-process-instance": docker_env._PROCESS_INSTANCE_ID,
-    }
-
-
-def test_labels_attribute_populated_after_init(monkeypatch):
-    """``self._labels`` must be set to the same key/value pairs that went onto
-    docker run, so subsequent reuse / reaper paths can match without re-running
-    the sanitizer or re-importing the profile module."""
-    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
-    monkeypatch.setattr(docker_env, "_get_active_profile_name", lambda: "default")
-    _mock_subprocess_run(monkeypatch)
-
-    env = _make_dummy_env(task_id="abc")
-
     labels = dict(env._labels)
     environment_label = labels.pop("hermes-environment")
+    assert labels.pop("hermes-process-instance") == docker_env._PROCESS_INSTANCE_ID
     assert labels == {
         "hermes-agent": "1",
         "hermes-task-id": "abc",

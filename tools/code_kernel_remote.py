@@ -151,10 +151,12 @@ class RemoteKernel:
                 logger.debug(failure, exc_info=True)
 
 
-def _kernel_key(owner: str, env_type: str, task_env_id: str, sandbox_tools: frozenset) -> tuple:
+def _kernel_key(owner: str, env_type: str, task_env_id: str, sandbox_tools: frozenset, *, env=None) -> tuple:
     """The hermes_tools stub module is generated from ``sandbox_tools`` once, at spawn, so a kernel
     is only reusable by calls with the SAME tool set; a different set gets its own kernel."""
-    return (owner, "remote", env_type, task_env_id, tuple(sorted(sandbox_tools)))
+    key = (owner, "remote", env_type, task_env_id, tuple(sorted(sandbox_tools)))
+    scope = getattr(env, "_hermes_target_scope", None)
+    return (*key, scope) if isinstance(scope, str) and scope else key
 
 
 # Registry + lock shared-shape with code_kernel; teardown runs outside the lock.
@@ -272,7 +274,7 @@ def _acquire_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
                            idle_exit: int) -> tuple[Optional[RemoteKernel], bool, bool, bool]:
     """Find/respawn the owner's kernel: (kernel|None, reused, state_reset, state_lost); reaps
     idle-expired entries on the way in."""
-    key = _kernel_key(owner, env_type, task_env_id, sandbox_tools)
+    key = _kernel_key(owner, env_type, task_env_id, sandbox_tools, env=env)
     state_lost = state_reset = False
     with _REGISTRY.lock:
         expired = _reap_unlocked(idle_exit)
@@ -299,7 +301,7 @@ def _acquire_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
     return kernel, reused, state_reset, state_lost
 
 
-def _run_remote_cell(kernel: RemoteKernel, code: str, timeout: int) -> tuple[str, dict[str, Any]]:
+def _run_remote_cell(kernel: RemoteKernel, code: str, timeout: int, *, operation_cwd=None) -> tuple[str, dict[str, Any]]:
     """Ship one cell request and poll for its result: (cell status, payload)."""
     from tools.code_execution_tool import _ship_file_to_remote
     kernel.cell_seq += 1
@@ -307,7 +309,7 @@ def _run_remote_cell(kernel: RemoteKernel, code: str, timeout: int) -> tuple[str
     q_cells, q_res = shlex.quote(f"{kernel.kernel_dir}/cells"), shlex.quote(f"cell_res_{seq}.json")
     # One round-trip: tmp write + rename publishes the request atomically.
     _ship_file_to_remote(kernel.env, f"{kernel.kernel_dir}/cells/cell_req_{seq}.json",
-                         json.dumps({"id": seq, "code": code}, ensure_ascii=False), atomic=True)
+                         json.dumps({"id": seq, "code": code, **({"cwd": operation_cwd} if operation_cwd else {})}, ensure_ascii=False), atomic=True)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -336,6 +338,7 @@ def _run_remote_cell(kernel: RemoteKernel, code: str, timeout: int) -> tuple[str
 def execute_in_remote_kernel(
     code: str, *, env, env_type: str, task_env_id: str, sandbox_tools: frozenset,
     timeout: int, max_tool_calls: int, reset: bool, idle_exit: int = 1800,
+    operation_cwd: str | None = None,
 ) -> Optional[dict[str, Any]]:
     """Run one cell in the owner's remote kernel. Returns the raw cell result dict (caller
     post-processes output), or ``None`` when no kernel could be spawned (caller falls open to
@@ -346,7 +349,7 @@ def execute_in_remote_kernel(
         env, env_type, owner, task_env_id, sandbox_tools, reset=reset, idle_exit=idle_exit)
     if kernel is None:
         return None  # fail open to per-call
-    key = _kernel_key(owner, env_type, task_env_id, sandbox_tools)
+    key = _kernel_key(owner, env_type, task_env_id, sandbox_tools, env=env)
     kernel.last_used = time.monotonic()
     with _REGISTRY.lock:
         kernel.attached += 1
@@ -356,7 +359,8 @@ def execute_in_remote_kernel(
     try:
         return _run_attached_cell(kernel, key, code, env=env, task_env_id=task_env_id,
                                   sandbox_tools=sandbox_tools, timeout=timeout, max_tool_calls=max_tool_calls,
-                                  reused=reused, state_reset=state_reset, state_lost=state_lost)
+                                  reused=reused, state_reset=state_reset, state_lost=state_lost,
+                                  operation_cwd=operation_cwd)
     finally:
         with _REGISTRY.lock:
             kernel.attached -= 1
@@ -365,7 +369,8 @@ def execute_in_remote_kernel(
 
 def _run_attached_cell(kernel: RemoteKernel, key: tuple, code: str, *, env, task_env_id: str,
                        sandbox_tools: frozenset, timeout: int, max_tool_calls: int,
-                       reused: bool, state_reset: bool, state_lost: bool) -> dict[str, Any]:
+                       reused: bool, state_reset: bool, state_lost: bool,
+                       operation_cwd: str | None = None) -> dict[str, Any]:
     from tools.code_execution_rpc import tool_errors_since
     from tools.code_execution_tool import _rpc_poll_loop
     from tools.thread_context import propagate_context_to_thread
@@ -386,7 +391,8 @@ def _run_attached_cell(kernel: RemoteKernel, key: tuple, code: str, *, env, task
     rpc_thread.start()
     cell_status, cell_payload = "no-result", {}
     try:
-        cell_status, cell_payload = _run_remote_cell(kernel, code, timeout)
+        cell_status, cell_payload = (_run_remote_cell(kernel, code, timeout, operation_cwd=operation_cwd)
+                                    if operation_cwd else _run_remote_cell(kernel, code, timeout))
     except Exception:
         # The atomic ship is the only remote call here that can raise (the poll
         # and result cleanup are best-effort), so the request never reached the runner and the
