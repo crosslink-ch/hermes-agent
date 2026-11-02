@@ -79,13 +79,15 @@ class FileStateRegistryUnitTests(unittest.TestCase):
     def test_remote_write_records_without_host_stat(self):
         remote_path = "/remote-only/project/file.txt"
         namespace = "ssh:physical-host"
-        file_state.record_read(
-            "A", remote_path, namespace=namespace, stat_path=False,
-        )
-        time.sleep(0.01)
-        file_state.note_write(
-            "B", remote_path, namespace=namespace, stat_path=False,
-        )
+        # The contract is timestamp ordering, not wall-clock scheduling.
+        with patch("tools.file_state.time.time", return_value=100.0):
+            file_state.record_read(
+                "A", remote_path, namespace=namespace, stat_path=False,
+            )
+        with patch("tools.file_state.time.time", return_value=101.0):
+            file_state.note_write(
+                "B", remote_path, namespace=namespace, stat_path=False,
+            )
         warn = file_state.check_stale("A", remote_path, namespace=namespace)
         self.assertIsNotNone(warn)
         assert isinstance(warn, str)

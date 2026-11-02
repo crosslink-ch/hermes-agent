@@ -38,7 +38,7 @@ def _turn_scope_key(task_id: Hashable) -> Hashable:
             config=resolution.config,
         )
         return resolution.scope_task_key(collapsed)
-    except Exception:
+    except ValueError:
         collapsed = _resolve_container_task_id(str(task_id))
         return _profile_scoped_task_key(collapsed)
 
@@ -226,7 +226,7 @@ def execution_environment_turn_key(
             config=resolution.config,
         )
         return resolution.session_key(base_task_id)
-    except Exception:
+    except (ValueError, OSError):
         # Invalid-target tools still execute to return their normal user-visible
         # validation error; the raw logical lease remains the safe fallback.
         return None
@@ -418,7 +418,7 @@ def _cleanup_environment_resource(
                     if close is not None:
                         close()
                 except Exception:
-                    pass
+                    logger.debug("Closing failed environment cleanup coroutine failed", exc_info=True)
                 raise
 
         wait_fn = getattr(env, "wait_for_cleanup", None)
@@ -603,7 +603,7 @@ def _cleanup_retired_environments(
             else:
                 logger.warning(
                     "Error cleaning retired environment for task %s: %s",
-                    retired_key, exc,
+                    retired_key, exc, exc_info=True,
                 )
                 _retire_replaced_environment(env, retired_key)
     return cleaned
