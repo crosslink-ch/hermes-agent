@@ -1863,9 +1863,13 @@ def check_terminal_requirements() -> bool:
             ordered = sorted(inventory, key=lambda item: (item.backend != "local", not item.is_default, item.target))
             return any(_check_terminal_config_requirements(_get_env_config(dict(item.config))) for item in ordered)
         return _check_terminal_config_requirements(_get_env_config())
-    except (ValueError, OSError) as exc:
-        logger.error("Invalid execution target config: %s", exc)
-        _record_unavailable_reason(f"invalid execution target config: {exc}")
+    except Exception as exc:
+        # Availability probes include plugin/config implementations; preserve
+        # the unavailable result even for an unexpected backend exception.
+        logger.error("Invalid execution target config", exc_info=(
+            RuntimeError, RuntimeError("target availability probe failed"), exc.__traceback__,
+        ))
+        _record_unavailable_reason(f"invalid execution target config: {_redact_terminal_error_text(exc)}")
         return False
 
 
