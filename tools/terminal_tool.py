@@ -1866,7 +1866,7 @@ def check_terminal_requirements() -> bool:
     except Exception as exc:
         # Availability probes include plugin/config implementations; preserve
         # the unavailable result even for an unexpected backend exception.
-        logger.error("Invalid execution target config", exc_info=(
+        logger.error("Invalid execution target config: %s", _redact_terminal_error_text(exc), exc_info=(
             RuntimeError, RuntimeError("target availability probe failed"), exc.__traceback__,
         ))
         _record_unavailable_reason(f"invalid execution target config: {_redact_terminal_error_text(exc)}")
