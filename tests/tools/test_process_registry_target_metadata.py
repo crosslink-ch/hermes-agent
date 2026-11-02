@@ -193,4 +193,3 @@ class TestCheckpoint:
             assert data[0]["session_id"] == "proc_secret"
             assert secret not in data[0]["command"]
             assert data[0]["command"] != command
-

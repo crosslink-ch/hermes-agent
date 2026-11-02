@@ -50,4 +50,3 @@ def _parse_tool_arguments(raw_arguments: Any) -> tuple[dict, Optional[str]]:
         {"error": "Invalid tool arguments", "message": "Tool arguments must be a valid JSON object; tool was not executed."},
         ensure_ascii=False,
     )
-

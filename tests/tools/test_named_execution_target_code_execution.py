@@ -295,4 +295,3 @@ def test_remote_project_mode_executes_from_target_session_cwd(
     ]
     assert len(script_calls) == 2
     assert all(cwd == "/srv/session-project" for _, cwd in script_calls)
-
