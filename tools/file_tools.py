@@ -425,11 +425,20 @@ def _create_terminal_env_for_file_ops(raw_task_id: str, task_id: str,
                 cwd, env_type, fallback)
         cwd = fallback
     logger.info("Creating new %s environment for task %s...", env_type, task_id[:8])
+    constructor_kwargs = {}
+    if resolution is not None and resolution.named:
+        from tools.terminal_tool import _resolve_container_task_id
+        from tools.terminal_tool_target_lifecycle import _build_environment_constructor_configs
+        container_config, ssh_config, local_config = _build_environment_constructor_configs(
+            config, resolution, _resolve_container_task_id(raw_task_id, config=config))
+        constructor_kwargs = dict(container_config=container_config, ssh_config=ssh_config,
+                                  local_config=local_config)
     terminal_env = _create_configured_env(
         config, env_type, image=_select_image(env_type, overrides, config), cwd=cwd,
         timeout=config["timeout"], task_id=backend_task_id or task_id,
+        resolution=resolution,
         host_cwd=host_cwd,
-        local_config={"persistent": config.get("local_persistent", True)} if env_type == "local" else None,
+        **constructor_kwargs,
         session_scoped=bool(resolution and resolution.named and env_type == "docker"
                             and not config.get("container_persistent", True)),
     )
@@ -439,7 +448,7 @@ def _create_terminal_env_for_file_ops(raw_task_id: str, task_id: str,
     return env_type, terminal_env
 
 
-def _get_file_ops(task_id: str = "default", target: str = None, *,
+def _get_file_ops(task_id: str = "default", target: str | None = None, *,
                   _resolution=None) -> ShellFileOperations:
     """Get or create ShellFileOperations for the task's terminal environment.
 
@@ -789,8 +798,8 @@ def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_s
 
 
 def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT,
-                   task_id: str = "default", execution_target: str = None,
-                   runtime_scope: str = None) -> str:
+                   task_id: str = "default", execution_target: str | None = None,
+                   runtime_scope: str | None = None) -> str:
     """Read a file with pagination and line numbers.
 
     Guard order: NT/device-namespace prefix (raw string, no resolution) →
@@ -1135,7 +1144,7 @@ def _whole_file_rewrite_hint(task_id: str, resolved: str | None, new_content: st
 def write_file_tool(path: str, content: str, task_id: str = "default",
                     cross_profile: bool = False,
                     session_id: str | None = None,
-                    execution_target: str = None) -> str:
+                    execution_target: str | None = None) -> str:
     """Write content to a file.
 
     ``cross_profile`` bypasses the sandbox-mirror lost-write guards only
@@ -1263,7 +1272,7 @@ def patch_tool(mode: str = "replace", path: str | None = None, old_string: str |
                new_string: str | None = None, replace_all: bool = False, patch: str | None = None,
                task_id: str = "default", cross_profile: bool = False,
                session_id: str | None = None,
-               execution_target: str = None) -> str:
+               execution_target: str | None = None) -> str:
     """Patch a file using replace mode or V4A patch format.
 
     ``cross_profile``: same semantics as ``write_file``'s flag (mirror-guard
@@ -1388,7 +1397,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
                 file_glob: str | None = None, limit: int = 50, offset: int = 0,
                 output_mode: str = "content", context: int = 0,
                 order: str = "discovery",
-                task_id: str = "default", execution_target: str = None) -> str:
+                task_id: str = "default", execution_target: str | None = None) -> str:
     """Search for content or files."""
     nt_err = get_nt_namespace_error(path, verb="Search")
     if nt_err:

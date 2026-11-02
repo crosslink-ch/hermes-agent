@@ -996,7 +996,8 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
     smart_denied = False
     if smart:
         result, smart_denied = _smart_gate(spec, command, description, pattern_key, pattern_keys,
-                                           session_key, human_present=is_cli or is_gateway or is_ask)
+                                           session_key, human_present=is_cli or is_gateway or is_ask,
+                                           execution_target=execution_target, execution_backend=execution_backend)
         if result is not None:
             return result
     pending_body = pending_body() if pending_body else None
@@ -1362,7 +1363,7 @@ def _execution_scoped_pattern_key(
     except Exception:
         profile_scope = ""
     digest = hashlib.sha256(
-        f"{profile_scope}:{target}".encode("utf-8")
+        f"{profile_scope}:{target}".encode()
     ).hexdigest()[:16]
     return f"target:{digest}:{pattern_key}"
 
@@ -1467,9 +1468,9 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
         "execute_code", execution_target, execution_target_named, execution_target_scope
     )
     execution_backend = execution_backend or env_type
-    description = _EXECUTE_CODE_DESCRIPTION + (
-        f" [execution target: {execution_target!r}; backend: {execution_backend}]"
-    )
+    description = _EXECUTE_CODE_DESCRIPTION
+    if execution_target_named or execution_target != "default":
+        description += f" [execution target: {execution_target!r}; backend: {execution_backend}]"
 
     # Isolated backends already sandbox the child. vercel_sandbox has no host-bind concept so it stays always-skipped.
     if env_type == "vercel_sandbox":

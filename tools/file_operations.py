@@ -214,7 +214,7 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
     patches "succeed" with a plausible diff while landing in the wrong directory).
     """
 
-    def __init__(self, terminal_env, cwd: str = None, *, fixed_cwd: str = None):
+    def __init__(self, terminal_env, cwd: str | None = None, *, fixed_cwd: str | None = None):
         self.env = terminal_env
         # Never os.getcwd(): that is the HOST path, absent inside container backends.
         self.cwd = cwd or getattr(terminal_env, 'cwd', None) or \

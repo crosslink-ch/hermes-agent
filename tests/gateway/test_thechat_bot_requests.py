@@ -509,10 +509,7 @@ async def test_named_target_inbox_approval_is_scoped_to_that_target(monkeypatch)
     monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
     monkeypatch.setattr(wait_mod._ctx, "_get_approval_timeout", lambda: 30)
     monkeypatch.setattr(wait_mod._ctx, "_fire_approval_hook", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "tools.tirith_security.check_command_security",
-        lambda *_a, **_k: {"action": "allow", "findings": [], "summary": ""},
-    )
+
     monkeypatch.setenv("HERMES_GATEWAY_SESSION", "1")
     monkeypatch.setenv("HERMES_EXEC_ASK", "1")
     api = _TheChat()

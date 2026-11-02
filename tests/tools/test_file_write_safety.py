@@ -66,7 +66,7 @@ class TestSshConfigApprovalGate:
         assert is_write_approval_required(str(tmp_path / "notes.txt")) is False
 
     def test_named_ssh_targets_use_separate_approval_scopes(self, monkeypatch):
-        import tools.approval as approval
+        from tools import approval
         import tools.execution_targets as targets
         from tools.file_tools import _check_approval_required_write
 

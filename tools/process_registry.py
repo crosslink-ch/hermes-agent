@@ -1302,7 +1302,7 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         return session
 
     def spawn_via_env(
-        self, env: Any, command: str, cwd: str = None, task_id: str = "", session_key: str = "",
+        self, env: Any, command: str, cwd: str | None = None, task_id: str = "", session_key: str = "",
         timeout: int = 10, owner_task_id: str = "", target: str = "",
         backend: str = "", timeout_seconds: int = 0,
         environment_task_key: str = "", runtime_scope: str = "", persist_on_release: bool = False) -> ProcessSession:

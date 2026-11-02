@@ -511,7 +511,9 @@ def _dispatch_rpc_tool(handler, tool_name, tool_args, task_id, execution_target_
 def _frozen_target_config(resolution):
     """Restrict nested resolution to the selected target without altering its fingerprint."""
     target = deepcopy(dict(resolution.config))
-    targets = {resolution.target: target}
+    # Keep inherited defaults inherited; making them explicit entry fields
+    # would reject e.g. modal_mode on a local/SSH target.
+    targets = {resolution.target: {"backend": resolution.backend}}
     default = resolution.target
     if not resolution.is_default:
         # Preserve is_default=False in the resolver's spec fingerprint. The
@@ -520,7 +522,7 @@ def _frozen_target_config(resolution):
         while default in targets:
             default += "_"
         targets[default] = {"backend": "__blocked__"}
-    frozen = {"terminal": {"targets": targets, "default_target": default}}
+    frozen = {"terminal": {**target, "targets": targets, "default_target": default}}
     if resolution.provider is not None:
         from tools.execution_target_lifecycle import REGISTRY_METADATA_KEY, runtime_record_metadata_entry
         frozen[REGISTRY_METADATA_KEY] = {"records": [runtime_record_metadata_entry(
@@ -669,7 +671,7 @@ def _sandbox_tools_for(enabled_tools: Optional[list[str]]) -> frozenset:
 
 def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
                           sandbox_tools: frozenset, *, timeout: int, max_tool_calls: int,
-                          exec_start: float, operation_cwd: str = None,
+                          exec_start: float, operation_cwd: str | None = None,
                           execution_target=None, execution_target_scope=None,
                           execution_target_config=None) -> str:
     """Per-call script ship: stage hermes_tools.py + script.py in a fresh remote sandbox dir,
@@ -699,9 +701,14 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         # The token travels in a sourced env file, never in argv. No umask on
         # the launch command: the 700 dirs + explicit 0600 writes cover Hermes'
         # files, and user code keeps the remote's default file modes.
+        launch = "exec python3 script.py"
+        if operation_cwd:
+            launch = (f"cd {shlex.quote(operation_cwd)} && "
+                      f"exec python3 {quoted_sandbox_dir}/script.py")
         launch_cmd = _ship_env_file_and_launch(
-            env, sandbox_dir, "sandbox.env", "exec python3 script.py",
-            rpc_dir=f"{sandbox_dir}/rpc", rpc_token=rpc_token)
+            env, sandbox_dir, "sandbox.env", launch,
+            rpc_dir=f"{sandbox_dir}/rpc", rpc_token=rpc_token,
+            PYTHONPATH=sandbox_dir)
         logger.info("Executing code on %s backend (task %s)...", env_type, effective_task_id[:8])
         script_result = env.execute(launch_cmd, cwd=operation_cwd or "", timeout=timeout)
         stdout_text = script_result.get("output", "") or ""
@@ -737,9 +744,9 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
 
 
 def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[list[str]],
-                    reset: bool = False, *, target: str = None, mode: str = "strict",
-                    expected_target_scope: str = None,
-                    expected_target_config: dict = None) -> str:
+                    reset: bool = False, *, target: str | None = None, mode: str = "strict",
+                    expected_target_scope: str | None = None,
+                    expected_target_config: dict | None = None) -> str:
     """Run code on the remote terminal backend: the owner's persistent remote session kernel
     (tools/code_kernel_remote.py) first, else the per-call script ship — the fail-open route when
     a kernel cannot be spawned and the only route for hosts that cannot sustain a background process."""
@@ -766,26 +773,25 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[l
             if "OK" not in py_check.get("output", ""):
                 return _error_result(f"Python 3 is not available in the {env_type} terminal "
                                      "environment. Install Python to use execute_code with remote backends.")
-            # Session-kernel path (hermes-agent#96873): one persistent kernel per owner on the
-            # run-to-completion transport (detached runner + file cell protocol). Spawn failure falls
-            # OPEN to the per-call path below so a degraded remote host never blocks execution.
-            # A named project cell must execute from its own session cwd. The remote kernel stages
-            # cells in its private directory, so use the per-call transport until it supports a
-            # per-cell cwd.
-            if not (target and mode == "project"):
-                try:
-                    from tools.code_kernel_remote import execute_in_remote_kernel
-                    kernel_result = execute_in_remote_kernel(
-                        code, env=env, env_type=env_type, task_env_id=effective_task_id,
-                        sandbox_tools=frozenset(sandbox_tools), timeout=timeout,
-                        max_tool_calls=max_tool_calls, reset=bool(reset),
-                        idle_exit=int(_cfg.get("kernel_idle_timeout", 1800)),
-                    )
-                except Exception:
-                    logger.warning("remote session-kernel path failed; falling back to per-call", exc_info=True)
-                    kernel_result = None
-                if kernel_result is not None:
-                    return _finish_remote_kernel_result(kernel_result, timeout=timeout, exec_start=exec_start)
+            # Session-kernel path: one persistent kernel per owner on the
+            # run-to-completion transport. Spawn failure falls OPEN to the per-call
+            # path below so a degraded remote host never blocks execution.
+            try:
+                from tools.code_kernel_remote import execute_in_remote_kernel
+                kernel_result = execute_in_remote_kernel(
+                    code, env=env, env_type=env_type, task_env_id=effective_task_id,
+                    sandbox_tools=frozenset(sandbox_tools), timeout=timeout,
+                    max_tool_calls=max_tool_calls, reset=bool(reset),
+                    idle_exit=int(_cfg.get("kernel_idle_timeout", 1800)),
+                    **({"operation_cwd": operation_cwd} if operation_cwd else {}),
+                )
+            except Exception:
+                logger.warning("remote session-kernel path failed; falling back to per-call", exc_info=True)
+                kernel_result = None
+            if kernel_result is not None:
+                if operation_cwd:
+                    kernel_result["cwd"] = operation_cwd
+                return _finish_remote_kernel_result(kernel_result, timeout=timeout, exec_start=exec_start)
             logger.info("remote session kernel unavailable on %s; using per-call path", env_type)
         except Exception as exc:
             return _remote_failure(exc, exec_start, 0)

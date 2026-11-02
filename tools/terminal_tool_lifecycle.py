@@ -15,7 +15,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional, Hashable
-from tools.environments.singularity import _get_scratch_dir
+
 from tools.terminal_tool_backends import (
     _container_config_from_config,
     _local_config_from_config,
@@ -32,16 +32,18 @@ logger = logging.getLogger("tools.terminal_tool")
 
 
 def _create_configured_env(
-    config: Dict[str, Any], env_type: str, *, image: str, cwd: str, timeout: int,
+    config: dict[str, Any], env_type: str, *, image: str, cwd: str, timeout: int,
     task_id: str, host_cwd: Optional[str], local_config: Optional[dict] = None,
     container_config: Optional[dict] = None, ssh_config: Optional[dict] = None,
-    session_scoped: bool = False,
+    session_scoped: bool = False, resolution=None,
 ):
     """``_create_environment`` with the ssh/container kwargs shaped from *config*
     (shared by the terminal tool and the lazy :func:`ensure_task_env` bring-up)."""
-    from tools.terminal_tool import _create_environment
+    from tools import terminal_tool, terminal_tool_backends
+    constructor = (terminal_tool._create_environment if resolution is not None and resolution.named
+                   else terminal_tool_backends._create_environment)
     from tools.terminal_tool_config import _is_container_backend
-    return _create_environment(
+    return constructor(
         env_type=env_type, image=image, cwd=cwd, timeout=timeout,
         ssh_config=ssh_config if ssh_config is not None else (_ssh_config_from_config(config) if env_type == "ssh" else None),
         container_config=(
@@ -335,8 +337,8 @@ def ensure_task_env(
                 )
             )
             from tools import terminal_tool_backends
-            constructor = _create_environment if resolution.named else terminal_tool_backends._create_environment
-            new_env = constructor(
+            new_env = _create_configured_env(
+                config, resolution=resolution,
                 env_type=env_type,
                 image=image,
                 cwd=cwd,
@@ -354,7 +356,7 @@ def ensure_task_env(
             )
             _record_environment_lifetime(new_env, config)
             _record_environment_target(new_env, resolution)
-        except Exception as exc:  # noqa: BLE001 — best-effort bring-up
+        except Exception as exc:
             logger.warning(
                 "Lazy %s environment init failed for task %s: %s",
                 env_type, effective_task_id, exc,

@@ -212,7 +212,9 @@ def _build_ssh_env(*, cwd, timeout, ssh_config, probe_only=False, **_):
         raise ValueError("SSH environment requires ssh_host and ssh_user to be configured")
     return _SSHEnvironment(host=ssh_config["host"], user=ssh_config["user"], port=ssh_config.get("port", 22),
                            key_path=ssh_config.get("key", ""), cwd=cwd, timeout=timeout, probe_only=probe_only,
-                           persistent=ssh_config.get("persistent", True))
+                           persistent=ssh_config.get("persistent", True),
+                           runtime_scope=ssh_config.get("runtime_scope", ""),
+                           profile_name=ssh_config.get("profile_name"))
 
 
 def _stamp_sandbox_home(env_obj, provider, cwd) -> None:
@@ -284,7 +286,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     for local/ssh/vercel; ``container_config`` carries the container_*/docker_* resource keys; ``host_cwd`` is
     the host dir bound into Docker when cwd mounting is enabled. ``probe_only`` asks ssh for a throwaway
     connection with no remote setup/sync (the prompt-time probe). Unknown types fall through to plugin backends."""
-    builder = _ENV_BUILDERS.get(env_type, _build_plugin_env)
+    builder = _ENV_BUILDERS.get(env_type)
     if env_type == "docker" and session_scoped is None:
         # Only direct legacy callers derive isolation from ambient settings.
         # Routed callers pass an explicit value from their target snapshot.

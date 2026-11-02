@@ -1725,31 +1725,6 @@ class DockerEnvironment(BaseEnvironment):
             self._start_teardown(lambda: strip_sandbox_privileges(docker_exe, container_id), log_id)
             return
 
-        # Capture what the worker needs — the thread can outlive ``self``.
-        docker_exe = self._docker_exe
-        log_id = container_id[:12]
-        workspace_dirs = (self._workspace_dir, self._home_dir)
-        self._cleanup_error = None
-
-        def _container_is_absent() -> bool:
-            try:
-                inspected = subprocess.run(
-                    [docker_exe, "container", "inspect", container_id],
-                    capture_output=True, timeout=15,
-                    stdin=subprocess.DEVNULL,
-                )
-            except (subprocess.TimeoutExpired, OSError):
-                return False
-            if getattr(inspected, "returncode", 0) == 0:
-                return False
-            detail = (
-                f"{getattr(inspected, 'stdout', '')} "
-                f"{getattr(inspected, 'stderr', '')}"
-            ).lower()
-            return any(marker in detail for marker in (
-                "no such", "not found", "does not exist",
-            ))
-
         def _do_cleanup() -> None:
             for argv, fail_msg in ((["stop", "-t", "10"], "docker stop %s timed out / failed: %s"),
                                    (["rm", "-f"], "docker rm -f %s failed: %s")):

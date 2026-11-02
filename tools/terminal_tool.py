@@ -745,7 +745,7 @@ def _workspace_container_key(base: str, task_id: Optional[str]) -> str:
     if not _tenv_bool("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false"):
         return base
     for key in dict.fromkeys((task_id, _resolve_container_alias(task_id))):
-        overrides = _task_env_overrides.get(_qualify_task_key(key))
+        overrides = _task_env_overrides.get(_profile_scoped_task_key(key))
         if not overrides or overrides.get("cwd_source") != "session":
             continue
         digest = overrides.get("workspace_key")
@@ -1125,14 +1125,7 @@ def _get_env_config(terminal_config: Optional[dict[str, Any]] = None) -> dict[st
     # Default cwd: local uses the host's current directory, ssh uses the
     # remote home, Vercel uses its documented workspace root, and everything
     # else starts in the backend's default root-like cwd.
-    if env_type == "local":
-        default_cwd = _safe_getcwd()
-    elif env_type == "ssh":
-        default_cwd = "~"
-    elif env_type == "vercel_sandbox":
-        default_cwd = _VERCEL_SANDBOX_DEFAULT_CWD
-    else:
-        default_cwd = "/root"
+    default_cwd = _backend_default_cwd(env_type)
 
     # Read TERMINAL_CWD but sanity-check it for container backends.
     # If Docker cwd passthrough is explicitly enabled, remap the host path to
@@ -1142,7 +1135,7 @@ def _get_env_config(terminal_config: Optional[dict[str, Any]] = None) -> dict[st
     if env_type == "local" and cwd in {".", "./", "auto", "cwd"}:
         cwd = _safe_getcwd()
     from hermes_cli.config import _is_ssh_remote_tilde_cwd
-    if cwd and not _is_ssh_remote_tilde_cwd(env_type, cwd):
+    if cwd and cwd != default_cwd and not _is_ssh_remote_tilde_cwd(env_type, cwd):
         cwd = os.path.expanduser(cwd)
     host_cwd = None
     if env_type == "docker" and mount_docker_cwd:
@@ -1165,6 +1158,9 @@ def _get_env_config(terminal_config: Optional[dict[str, Any]] = None) -> dict[st
                         "(host/relative path won't work in sandbox). Using %r instead.",
                         cwd, env_type, default_cwd)
             cwd = default_cwd
+
+    if terminal_config is None:
+        cwd, host_cwd = _resolve_config_cwd(env_type, mount_docker_cwd)
 
     return {
         "env_type": env_type,
@@ -1384,7 +1380,8 @@ def _resolve_command_cwd(
     """
     if workdir:
         return coerce_ssh_remote_cwd(_container_visible_cwd(workdir, env_type, env), env_type)
-    recorded = get_session_cwd(session_key, target, _resolution=_resolution)
+    recorded = (get_session_cwd(session_key) if target is None and _resolution is None
+                else get_session_cwd(session_key, target, _resolution=_resolution))
     if recorded and _is_container_backend(env_type) and _is_unusable_container_cwd(
         recorded, mounted_host=mounted_host
     ) and not _in_sandbox_home(recorded, env):
@@ -1692,6 +1689,7 @@ def _acquire_env(plan: _ExecPlan, task_id: Optional[str]) -> Any:
             new_env = _create_configured_env(
                 plan.config, env_type, image=plan.image, cwd=plan.cwd,
                 timeout=plan.effective_timeout, task_id=plan.backend_task_id, host_cwd=plan.host_cwd,
+                resolution=plan.resolution,
                 local_config=local_config, container_config=container_config, ssh_config=ssh_config,
                 session_scoped=_docker_environment_is_session_scoped(plan.config, task_id, plan.base_task_id),
             )
@@ -1975,34 +1973,39 @@ def terminal_tool(
                 # Promotion implies notify_on_complete; watch_patterns is a background-only flag the
                 # caller could not have meant for a foreground call, and the two are exclusive anyway.
                 background, notify_on_complete, watch_patterns = True, True, None
-            if background:
-                from tools.terminal_tool_sudo import NativeSudoRefused, prepare_native_sudo
-                try:
-                    prepare_native_sudo(command, supported=False)
-                except NativeSudoRefused as exc:
-                    return _error_json(str(exc))
-                result = spawn_background_process(
-                    command=command, env=env, env_type=env_type, effective_task_id=effective_task_id,
-                    task_id=task_id, session_key=session_key, workdir=workdir, cwd=cwd,
-                    resolution=plan.resolution, effective_timeout=plan.effective_timeout,
-                    mounted_host=getattr(env, "host_cwd", None) or plan.host_cwd,
-                    effective_pty=pty and not pty_disabled, notify_on_complete=notify_on_complete,
-                    watch_patterns=watch_patterns, approval_note=verdict.note,
-                    pty_disabled_reason=_PTY_DISABLED_REASON if pty_disabled else None,
-                    completion_output_chars=_completion_output_chars,
-                    heartbeat_seconds=heartbeat,
-                    persist_on_release=persist_on_release,
-                    auto_backgrounded=auto_bg is not None and plan.promoted_from_foreground_timeout is None,
-                )
-                if plan.promoted_from_foreground_timeout is not None:
-                    result = _with_promoted_note(result, plan.promoted_from_foreground_timeout)
-                return _metered(None if _host_local else plan, result)
-            return _metered(None if _host_local else plan, _run_foreground(
-                command, env, plan,
-                task_id=task_id, session_id=session_id, session_key=session_key,
-                workdir=workdir, approval_note=verdict.note, clear_interrupt=verdict.approved_run,
-                metered=not _host_local,
-            ))
+            with _scoped_sudo_execution(
+                plan.resolution.target, env_type, named=plan.resolution.named,
+                sudo_password=plan.resolution.config.get("sudo_password") if plan.resolution.named else None,
+                target_scope=plan.resolution.security_scope if plan.resolution.named else "",
+            ):
+                if background:
+                    from tools.terminal_tool_sudo import NativeSudoRefused, prepare_native_sudo
+                    try:
+                        prepare_native_sudo(command, supported=False)
+                    except NativeSudoRefused as exc:
+                        return _error_json(str(exc))
+                    result = spawn_background_process(
+                        command=command, env=env, env_type=env_type, effective_task_id=effective_task_id,
+                        task_id=task_id, session_key=session_key, workdir=workdir, cwd=cwd,
+                        resolution=plan.resolution, effective_timeout=plan.effective_timeout,
+                        mounted_host=getattr(env, "host_cwd", None) or plan.host_cwd,
+                        effective_pty=pty and not pty_disabled, notify_on_complete=notify_on_complete,
+                        watch_patterns=watch_patterns, approval_note=verdict.note,
+                        pty_disabled_reason=_PTY_DISABLED_REASON if pty_disabled else None,
+                        completion_output_chars=_completion_output_chars,
+                        heartbeat_seconds=heartbeat,
+                        persist_on_release=persist_on_release,
+                        auto_backgrounded=auto_bg is not None and plan.promoted_from_foreground_timeout is None,
+                    )
+                    if plan.promoted_from_foreground_timeout is not None:
+                        result = _with_promoted_note(result, plan.promoted_from_foreground_timeout)
+                    return _metered(None if _host_local else plan, result)
+                return _metered(None if _host_local else plan, _run_foreground(
+                    command, env, plan,
+                    task_id=task_id, session_id=session_id, session_key=session_key,
+                    workdir=workdir, approval_note=verdict.note, clear_interrupt=verdict.approved_run,
+                    metered=not _host_local,
+                ))
     except _Rejected as r:
         return r.result_json
     except EnvironmentConnectionError as e:
@@ -2014,7 +2017,7 @@ def terminal_tool(
         return _metered(None if _host_local else plan, _fatal_error_json(e), error_class="exception")
 
 
-def _check_terminal_config_requirements(config: Dict[str, Any]) -> bool:
+def _check_terminal_config_requirements(config: dict[str, Any]) -> bool:
     """Check one already-resolved backend configuration."""
     try:
         checker = _REQUIREMENT_CHECKERS.get(config["env_type"], _check_plugin_requirements)

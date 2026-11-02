@@ -39,16 +39,6 @@ def _active_profile_identity() -> str:
         return str(os.environ.get("HERMES_PROFILE") or "default")
 
 
-def _active_profile_identity() -> str:
-    """Return the current Hermes profile without exposing it in socket paths."""
-    try:
-        from hermes_cli.profiles import get_active_profile_name
-
-        return str(get_active_profile_name() or "default")
-    except Exception:
-        return str(os.environ.get("HERMES_PROFILE") or "default")
-
-
 def _ensure_ssh_available() -> None:
     """Fail fast with a clear error when the SSH client is unavailable."""
     for tool in ("ssh", "scp"):

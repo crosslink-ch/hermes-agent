@@ -265,54 +265,31 @@ def _current_owned_environment_turns(environment_key: Hashable) -> int:
 
 
 def _build_environment_constructor_configs(
-    config: Dict[str, Any],
-    resolution: 'ExecutionTargetResolution',
+    config: dict[str, Any],
+    resolution: ExecutionTargetResolution,
     base_task_id: str,
-) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-    """Build backend constructor inputs from one canonical normalized config."""
+) -> tuple[Optional[dict[str, Any]], Optional[dict[str, Any]], Optional[dict[str, Any]]]:
+    """Extend the canonical backend shapers with the frozen target identity."""
+    from tools.terminal_tool_backends import (
+        _container_config_from_config, _ssh_config_from_config, _local_config_from_config)
+    from tools.terminal_tool_config import _is_container_backend
     env_type = config["env_type"]
-    container_config: Optional[Dict[str, Any]] = None
-    if env_type in _CONTAINER_BACKENDS:
-        container_config = {
-            "container_cpu": config.get("container_cpu", 1),
-            "container_memory": config.get("container_memory", 5120),
-            "container_disk": config.get("container_disk", 51200),
-            "container_persistent": config.get("container_persistent", True),
-            "vercel_runtime": config.get("vercel_runtime", ""),
-            "modal_mode": config.get("modal_mode", "auto"),
-            "docker_volumes": config.get("docker_volumes", []),
-            "docker_mount_cwd_to_workspace": config.get("docker_mount_cwd_to_workspace", False),
-            "docker_forward_env": config.get("docker_forward_env", []),
-            "docker_env": config.get("docker_env", {}),
-            "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
-            "docker_extra_args": config.get("docker_extra_args", []),
-            "docker_network": config.get("docker_network", True),
-            "docker_shm_size": config.get("docker_shm_size", "1g"),
-            "docker_persist_across_processes": config.get("docker_persist_across_processes", True),
-            "docker_orphan_reaper": config.get("docker_orphan_reaper", True),
-            "lifetime_seconds": config.get("lifetime_seconds", 300),
-            "storage_task_id": resolution.storage_task_id(base_task_id),
-            "legacy_storage_task_id": resolution.legacy_backend_task_id(base_task_id),
-        }
-
-    ssh_config: Optional[Dict[str, Any]] = None
-    if env_type == "ssh":
-        ssh_config = {
-            "host": config.get("ssh_host", ""),
-            "user": config.get("ssh_user", ""),
-            "port": config.get("ssh_port", 22),
-            "key": config.get("ssh_key", ""),
-            "persistent": config.get("ssh_persistent", False),
-            "runtime_scope": resolution.security_scope if resolution.named else "",
-        }
-
-    local_config: Optional[Dict[str, Any]] = None
-    if env_type == "local":
-        local_config = {"persistent": config.get("local_persistent", False)}
+    container_config = None
+    if _is_container_backend(env_type):
+        container_config = _container_config_from_config(config)
+        container_config["lifetime_seconds"] = config.get("lifetime_seconds", 300)
+        if resolution.named:
+            container_config.update(
+                storage_task_id=resolution.storage_task_id(base_task_id),
+                legacy_storage_task_id=resolution.legacy_backend_task_id(base_task_id))
+    ssh_config = _ssh_config_from_config(config) if env_type == "ssh" else None
+    if ssh_config is not None:
+        ssh_config["runtime_scope"] = resolution.security_scope if resolution.named else ""
+    local_config = _local_config_from_config(config) if env_type == "local" else None
     return container_config, ssh_config, local_config
 
 
-def _record_environment_lifetime(env: Any, config: Dict[str, Any]) -> None:
+def _record_environment_lifetime(env: Any, config: dict[str, Any]) -> None:
     """Attach the resolved target's idle lifetime to its environment."""
     try:
         env._hermes_lifetime_seconds = int(config["lifetime_seconds"])
@@ -323,25 +300,15 @@ def _record_environment_lifetime(env: Any, config: Dict[str, Any]) -> None:
 def _record_environment_target(env: Any, resolution: Any) -> None:
     """Bind a created environment to the exact resolved named-target spec."""
     try:
-        setattr(env, "_hermes_target_name", resolution.target)
-        setattr(
-            env, "_hermes_target_fingerprint",
-            resolution.spec_fingerprint if resolution.named else None,
-        )
-        setattr(env, "_hermes_target_backend", resolution.backend)
-        setattr(
-            env, "_hermes_target_scope",
-            resolution.security_scope if resolution.named else None,
-        )
-        setattr(env, "_hermes_target_resolution", resolution)
+        env._hermes_target_name = resolution.target
+        env._hermes_target_fingerprint = resolution.spec_fingerprint if resolution.named else None
+        env._hermes_target_backend = resolution.backend
+        env._hermes_target_scope = resolution.security_scope if resolution.named else None
+        env._hermes_target_resolution = resolution
         persistent = resolution.config.get("container_persistent", True)
         if isinstance(persistent, str):
             persistent = persistent.strip().lower() in {"1", "true", "yes", "on"}
-        setattr(
-            env,
-            "_hermes_stable_storage",
-            resolution.backend == "docker" and bool(persistent),
-        )
+        env._hermes_stable_storage = resolution.backend == "docker" and bool(persistent)
     except (AttributeError, TypeError):
         pass
 
@@ -402,7 +369,6 @@ def _cleanup_environment_resource(
     preserve_storage: bool = False,
 ) -> None:
     """Stop one environment, optionally preserving its persistent storage."""
-    import inspect
 
     ownership_attrs = {}
     if force_remove:

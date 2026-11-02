@@ -167,7 +167,7 @@ def run_tool_execution_middleware(
     authorized_args = dict(args)
     middleware_args = dict(authorized_args)
 
-    def guarded_next_call(dispatch_args: Dict[str, Any]) -> Any:
+    def guarded_next_call(dispatch_args: dict[str, Any]) -> Any:
         validate_execution_target_dispatch_args(tool_name, authorized_args, dispatch_args)
         return next_call(dict(dispatch_args))
 

@@ -161,7 +161,7 @@ def test_schema_and_prebuilt_prompt_hint_are_stable_across_registration(
     tmp_path,
     monkeypatch,
 ):
-    import agent.prompt_builder as prompt_builder
+    from agent import prompt_builder
     from tools.terminal_tool import TERMINAL_SCHEMA
 
     monkeypatch.setattr(prompt_builder, "is_wsl", lambda: False)

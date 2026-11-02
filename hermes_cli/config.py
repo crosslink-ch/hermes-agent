@@ -2051,7 +2051,7 @@ def terminal_config_owned_env_vars(terminal_config: Any) -> set[str]:
         and _terminal_config_value_is_bridgeable(key, terminal_config[key])}
 
 
-def effective_terminal_config(terminal_cfg: Dict[str, Any]) -> Dict[str, Any]:
+def effective_terminal_config(terminal_cfg: dict[str, Any]) -> dict[str, Any]:
     """Return the flat settings represented by the configured default target.
 
     Legacy/runtime-adjacent consumers still use ``TERMINAL_*`` variables to

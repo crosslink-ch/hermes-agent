@@ -726,7 +726,6 @@ class TestEnvironmentHints:
             probe_calls.append((
                 backend, terminal_config, target_name, runtime_scope,
             ))
-            return None
 
         monkeypatch.setattr(_pb, "is_wsl", lambda: False)
         monkeypatch.setattr(_pb, "_probe_remote_backend", _capture_probe)

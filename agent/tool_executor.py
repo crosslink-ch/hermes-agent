@@ -274,7 +274,11 @@ def _target_subdirectory_hints(
     return trackers[key].check_tool_call(tool_name, args)
 
 
-def _persisted_target_hint(content: str, target: str | None, scope: str | None) -> str:
+def _persisted_target_hint(content, target: str | None, scope: str | None):
+    if isinstance(content, list):
+        return [{**part, "text": _persisted_target_hint(part.get("text", ""), target, scope)}
+                if isinstance(part, dict) and part.get("type") == "text" else part
+                for part in content]
     if target and isinstance(content, str) and PERSISTED_OUTPUT_TAG in content and "Execution target for this saved output:" not in content:
         selector = f"execution_target={json.dumps(target)}"
         if scope:
