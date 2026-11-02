@@ -110,6 +110,8 @@ def run_cell(request, execution_count):
     # the last cell, so a fix that "still fails" is not mistaken for a wrong fix.
     stale_modules = _scan_edited_modules(True)
     try:
+        if request.get("cwd"):
+            os.chdir(request["cwd"])
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             exec(compile(request["code"], "<cell>", "exec"), GLOBALS)
     except SystemExit as exc:
@@ -309,15 +311,11 @@ class CellAuthority:
             except Exception:
                 previous = None
         try:
-            identity = {}
-            if self.session_id is not None:
-                identity["session_id"] = self.session_id
-            if self.turn_id is not None:
-                identity["turn_id"] = self.turn_id
-            if self.conversation_id is not None:
-                identity["conversation_id"] = self.conversation_id
-            with programmatic_file_read():
-                return handle_function_call(tool_name, tool_args, task_id=self.task_id, **identity)
+            from tools.code_execution_rpc import _inherited_rpc_authority
+            from tools.code_execution_tool import _dispatch_rpc_tool, _inherit_execution_target
+            target, scope, config = _inherited_rpc_authority(None, None, None)
+            bound_args = _inherit_execution_target(tool_name, tool_args, target, scope)
+            return _dispatch_rpc_tool(handle_function_call, tool_name, bound_args, self.task_id, config)
         finally:
             if previous is not None:
                 try:

@@ -8,7 +8,7 @@ config.yaml.
 
 import pytest
 
-import tools.terminal_tool as terminal_tool
+from tools import terminal_tool
 from tools.environments import docker as docker_env
 
 

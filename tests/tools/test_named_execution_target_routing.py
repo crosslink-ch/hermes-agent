@@ -660,7 +660,7 @@ def test_local_targets_route_write_read_patch_search_and_cache_separately(
 def test_real_config_loader_routes_terminal_and_files_between_two_local_targets(
     monkeypatch, tmp_path, isolated_target_state,
 ):
-    import yaml
+    import hermes_yaml as yaml
 
     import tools.file_tools as file_mod
     import tools.terminal_tool as terminal_mod
@@ -1004,12 +1004,11 @@ def test_logical_environment_turn_exception_releases_once(isolated_target_state)
 def test_local_persistent_config_marks_environment(
     monkeypatch, isolated_target_state,
 ):
-    terminal_mod, _ = isolated_target_state
-
     class FakeLocal:
-        def __init__(self, cwd, timeout):
+        def __init__(self, cwd, timeout, persistent=True):
             self.cwd = cwd
             self.timeout = timeout
+            self._persistent = persistent
 
     import tools.terminal_tool_backends as backends
     from tools.terminal_tool_lifecycle import _environment_is_persistent
@@ -1122,7 +1121,7 @@ def test_execute_code_inherits_target_and_rejects_nested_override(
     monkeypatch.setattr(code_mod, "_get_execution_mode", lambda: "project")
     monkeypatch.setattr(
         code_mod, "_execute_remote",
-        lambda code, task_id, enabled_tools, target=None, mode="strict",
+        lambda code, task_id, enabled_tools, reset=False, target=None, mode="strict",
         expected_target_scope=None, expected_target_config=None: (
             forwarded.update(
                 target=target, mode=mode, scope=expected_target_scope,
@@ -2048,9 +2047,6 @@ def test_command_approval_payload_and_observer_include_target_metadata(monkeypat
         approval_mod, "detect_dangerous_command",
         lambda command: (True, "danger", "dangerous command"),
     )
-    monkeypatch.setattr("tools.tirith_security.check_command_security", lambda command: {
-        "action": "allow", "findings": [], "summary": "",
-    })
     session_key = "approval-target-session"
     token = approval_context.set_current_session_key(session_key)
     seen = {}
