@@ -55,4 +55,3 @@ def isolated_target_state(monkeypatch):
         except Exception:
             import logging
             logging.getLogger(__name__).exception("Named-target fixture cleanup failed")
-

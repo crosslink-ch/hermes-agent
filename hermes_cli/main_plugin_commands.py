@@ -44,4 +44,3 @@ def _register_plugin_cli_commands(subparsers) -> None:
                 _attach_plugin_cli_command(subparsers, cmd_info)
     except Exception as _exc:
         logging.getLogger(__name__).debug("Plugin CLI discovery failed: %s", _exc, exc_info=True)
-

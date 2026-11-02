@@ -181,4 +181,3 @@ def _persisted_target_hint(content, target: str | None, scope: str | None):
             selector += f", runtime_scope={json.dumps(scope)}"
         return content + f"\nExecution target for this saved output: {json.dumps(target)}. Pass {selector} to `read_file`."
     return content
-

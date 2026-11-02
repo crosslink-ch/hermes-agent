@@ -295,4 +295,3 @@ def test_non_persistent_cleanup_removes_container(monkeypatch):
 
     stops = [c for c in cleanup_calls if isinstance(c[0], list) and c[0][1:2] == ["stop"]]
     assert stops, f"cleanup() should docker stop {container_id}; got {cleanup_calls}"
-

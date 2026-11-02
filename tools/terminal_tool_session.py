@@ -213,4 +213,3 @@ def _resolve_container_alias(task_id: str) -> str:
             raw_task_id = _container_aliases[key]
             key = (profile_scope, raw_task_id)
     return raw_task_id
-
