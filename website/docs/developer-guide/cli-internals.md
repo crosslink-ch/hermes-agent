@@ -8,6 +8,14 @@ description: "How hermes_cli is shaped: slash dispatch, config loaders, the skin
 
 Companion to `hermes_cli/AGENTS.md` (the rules) — this page holds the longer explanations.
 
+## Terminal configuration and plugin command owners
+
+`config_terminal.py` owns the named-target inheritance and child-environment bridge;
+`config_terminal_defaults.py` constructs the terminal defaults with the canonical images
+supplied by `config_defaults.py`. The `config.py` facade remains the loader and writer seam.
+`main_plugin_commands.py` owns lazy plugin CLI registration and reads invocation/discovery
+seams from `main.py` at call time, so built-in commands do not eagerly discover plugins.
+
 ## Update pipeline
 
 User-facing behaviour (receipts, `--plan`, snapshot modes) is in

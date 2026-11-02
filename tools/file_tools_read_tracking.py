@@ -168,13 +168,10 @@ def _trackers_for_logical_task(task_id: str) -> list[dict]:
     Call with ``_read_tracker_lock`` held.
     """
     keys = {task_id}
-    try:
-        from tools.execution_targets import _active_profile_scope
-        profile = _active_profile_scope()
-        if profile:
-            keys.add(f"profile-{profile}:{task_id}")
-    except Exception:
-        pass
+    from tools.execution_targets import _active_profile_scope
+    profile = _active_profile_scope()
+    if profile:
+        keys.add(f"profile-{profile}:{task_id}")
     return [
         data for key, data in _read_tracker.items()
         if (key[0] if isinstance(key, tuple) and key else key) in keys

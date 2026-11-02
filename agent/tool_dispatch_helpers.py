@@ -184,7 +184,7 @@ def _named_execution_targets_enabled() -> bool:
     try:
         from tools.execution_targets import list_execution_targets
         return any(target.named for target in list_execution_targets())
-    except Exception:
+    except (ValueError, OSError):
         return True
 
 
@@ -636,3 +636,16 @@ __all__ = [
     "_trajectory_normalize_msg",
     "make_tool_result_message",
 ]
+
+
+def _resolve_concurrent_tool_timeout() -> float | None:
+    """Per-batch concurrent deadline: ``timeouts.tools.concurrent_batch`` wins,
+    ``HERMES_CONCURRENT_TOOL_TIMEOUT_S`` is the legacy bridge, ``0``/negative disables."""
+    from agent.deadline import resolve_timeout
+    from agent.tool_executor import _DEFAULT_CONCURRENT_TOOL_TIMEOUT_S
+
+    return resolve_timeout(
+        "tools.concurrent_batch",
+        default=_DEFAULT_CONCURRENT_TOOL_TIMEOUT_S,
+        env_var="HERMES_CONCURRENT_TOOL_TIMEOUT_S",
+    )

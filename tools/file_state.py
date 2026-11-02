@@ -304,7 +304,7 @@ def known_reads(task_id: TaskKey) -> list[str]:
         from tools.execution_targets import resolve_execution_target
 
         scoped = resolve_execution_target().scope_task_key(task_id)
-    except Exception:
+    except (ValueError, OSError):
         scoped = task_id
     if scoped != task_id:
         for path in _registry.known_reads(scoped):
