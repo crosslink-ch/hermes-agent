@@ -66,4 +66,3 @@ def test_resolve_chat_argv_scopes_terminal_bridge_to_child_profile(
     assert env["HERMES_HOME"] == str(profile_home)
     assert env["TERMINAL_ENV"] == "ssh"
     assert "TERMINAL_TIMEOUT" not in env
-

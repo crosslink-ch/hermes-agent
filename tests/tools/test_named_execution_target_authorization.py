@@ -441,4 +441,3 @@ def test_removed_target_selector_blocks_before_agent_authorization(monkeypatch):
     assert "does not accept 'target'" in json.loads(managed.result)["error"]
     assert managed.blocked is True
     assert execute_calls == []
-

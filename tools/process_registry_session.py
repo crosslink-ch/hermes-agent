@@ -123,4 +123,3 @@ class ProcessSession:
             self.completion_reason = reason
             if source:
                 self.termination_source = source
-

@@ -99,4 +99,3 @@ def _mock_response(
     else:
         resp.usage = None
     return resp
-

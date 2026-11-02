@@ -44,4 +44,3 @@ def cleanup_task_resources(agent, task_id: str) -> None:
             _ra().cleanup_browser(task_id)
         except Exception as e:
             logger.warning("Failed to cleanup browser for task %s: %s", task_id, e, exc_info=True)
-

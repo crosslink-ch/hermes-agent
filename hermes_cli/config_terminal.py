@@ -124,4 +124,3 @@ def apply_terminal_config_to_env(
         if (should_override and cfg_key in explicit_keys) or env_var not in target:
             target[env_var] = _terminal_env_value(value)
     return target
-

@@ -48,4 +48,3 @@ def _make_session(
         output_buffer=output,
     )
     return s
-
