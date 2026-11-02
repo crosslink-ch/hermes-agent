@@ -55,6 +55,7 @@ from gateway.inbound_event_ledger import (
 )
 from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome, SendResult, cache_media_bytes, get_inbound_media_max_bytes
 from gateway.platforms.event import MessageEvent, MessageType
+from gateway.platforms.thechat_event_fields import reply_fields, validate_session_intent
 from gateway.otel import start_span
 from tools.url_safety import async_is_safe_url, create_ssrf_safe_async_client
 
@@ -2959,22 +2960,7 @@ class TheChatAdapter(BasePlatformAdapter):
         expected_chat_type = "dm" if conversation["type"] == "direct" else "group"
         if conversation["type"] not in {"direct", "group"} or item["chatType"] != expected_chat_type:
             raise ValueError("TheChat event chatType does not match conversation.type")
-        session_intent = item.get("sessionIntent")
-        if session_intent is not None:
-            if (
-                not isinstance(session_intent, dict)
-                or session_intent.get("type") != "branch"
-                or set(session_intent) != {"type", "fromThreadId", "title"}
-                or (
-                    session_intent["fromThreadId"] is not None
-                    and not isinstance(session_intent["fromThreadId"], str)
-                )
-                or (
-                    session_intent["title"] is not None
-                    and not isinstance(session_intent["title"], str)
-                )
-            ):
-                raise ValueError("TheChat event has an invalid sessionIntent")
+        validate_session_intent(item)
         if not item["text"] and not item.get("attachments"):
             raise ValueError("TheChat event must contain text or attachments")
         return item
@@ -3118,5 +3104,6 @@ class TheChatAdapter(BasePlatformAdapter):
                 message_id=message_id,
                 media_urls=media_urls,
                 media_types=media_types,
+                **reply_fields(item),
             )
             await self.handle_message(event)

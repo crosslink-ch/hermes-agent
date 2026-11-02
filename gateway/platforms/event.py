@@ -122,6 +122,19 @@ class MessageEvent:
         if self.reply_expected is not True and other.reply_expected is not False:
             self.reply_expected = other.reply_expected
 
+    def followup_text(self, other: "MessageEvent") -> Optional[str]:
+        """*other*'s text as merged into this event's turn.
+
+        A merged turn keeps only this event's reply context, so a follow-up that replies
+        to a different message carries its own pointer inline instead of losing it.
+        """
+        note = reply_context_note(other)
+        same_reply = (other.reply_to_message_id, other.reply_to_text) == (
+            self.reply_to_message_id, self.reply_to_text)
+        if note is None or same_reply:
+            return other.text
+        return f"{note}\n\n{other.text}" if other.text else note
+
     def _command_text(self) -> str:
         """Return the message text with leading Desktop attachment refs stripped.
 
@@ -152,3 +165,11 @@ class MessageEvent:
         args = parts[1] if len(parts) > 1 else ""
         # iOS auto-corrects -- to — (em dash) and - to – (en dash)
         return args.replace("\u2014\u2014", "--").replace("\u2014", "--").replace("\u2013", "-")
+
+
+def reply_context_note(event: MessageEvent) -> Optional[str]:
+    """The ``[Replying to ...]`` pointer the agent sees for *event*'s reply context, if any."""
+    if not (event.reply_to_text and event.reply_to_message_id):
+        return None
+    who = " your previous message" if event.reply_to_is_own_message else ""
+    return f'[Replying to{who}: "{event.reply_to_text}"]'
