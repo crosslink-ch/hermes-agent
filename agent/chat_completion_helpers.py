@@ -2313,41 +2313,9 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     return final_response
 
 
-def cleanup_task_resources(agent, task_id: str) -> None:
-    """Release this logical turn before cleaning its non-persistent environments.
-
-    A sibling turn may still be using a shared environment. Defer collapsed
-    cleanup until that sibling finishes; the idle reaper owns persistent ones.
-    Headed browser sessions likewise remain open until their idle reaper runs.
-    """
-    try:
-        from tools.terminal_tool_target_lifecycle import (
-            active_environment_turns,
-            defer_environment_turn_cleanup,
-            release_logical_environment_turn_for_cleanup,
-        )
-
-        release_logical_environment_turn_for_cleanup(task_id)
-        include_collapsed = active_environment_turns(task_id) == 0
-        if not include_collapsed:
-            defer_environment_turn_cleanup(task_id)
-        _ra().cleanup_vm(
-            task_id, preserve_persistent=True, include_collapsed=include_collapsed,
-        )
-    except Exception as e:
-        if agent.verbose_logging:
-            logger.warning("Failed to cleanup VM for task %s: %s", task_id, e)
-
-    try:
-        from tools.browser_session_cloud import is_headed_mode
-        if is_headed_mode():
-            if agent.verbose_logging:
-                logging.debug(f"Skipping per-turn cleanup_browser for headed session {task_id}; idle reaper will handle it.")
-        else:
-            _ra().cleanup_browser(task_id)
-    except Exception as e:
-        if agent.verbose_logging:
-            logger.warning("Failed to cleanup browser for task %s: %s", task_id, e)
+from agent.chat_completion_cleanup import (
+    cleanup_task_resources,
+)
 
 
 def _build_partial_stream_stub(role, full_content, full_reasoning, model_name, usage_obj, *,

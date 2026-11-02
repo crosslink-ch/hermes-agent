@@ -247,7 +247,7 @@ def ensure_task_env(
             _get_env_config(dict(resolution.config))
             if resolution.named else _get_env_config()
         )
-    except Exception as exc:  # best-effort bring-up
+    except (ValueError, OSError) as exc:  # best-effort bring-up
         logger.warning("Lazy environment target resolution failed: %s", exc)
         return None
 
@@ -275,16 +275,11 @@ def ensure_task_env(
         return existing
 
     overrides = resolve_task_overrides(task_id, config=config)
-    if env_type == "docker":
-        image = overrides.get("docker_image") or config["docker_image"]
-    elif env_type == "singularity":
-        image = overrides.get("singularity_image") or config["singularity_image"]
-    elif env_type == "modal":
-        image = overrides.get("modal_image") or config["modal_image"]
-    elif env_type == "daytona":
-        image = overrides.get("daytona_image") or config["daytona_image"]
-    else:
-        image = ""
+    image_key = {
+        "docker": "docker_image", "singularity": "singularity_image",
+        "modal": "modal_image", "daytona": "daytona_image",
+    }.get(env_type)
+    image = (overrides.get(image_key) or config[image_key]) if image_key else ""
 
     cwd_override = (
         overrides.get("cwd")
@@ -359,7 +354,7 @@ def ensure_task_env(
         except Exception as exc:
             logger.warning(
                 "Lazy %s environment init failed for task %s: %s",
-                env_type, effective_task_id, exc,
+                env_type, effective_task_id, exc, exc_info=True,
             )
             return None
 
@@ -381,7 +376,7 @@ def ensure_task_env(
                         f"Execution target {resolution.target!r} changed while "
                         "its environment was being created."
                     )
-            except Exception as exc:
+            except (ValueError, OSError) as exc:
                 publish_error = str(exc)
 
         if publish_error is not None:
@@ -504,49 +499,7 @@ def cleanup_vm(
     """
     from tools.terminal_tool import _active_environments, _creation_locks, _creation_locks_lock, _env_lock, _last_activity, _resolve_container_task_id, _target_resolution
     from tools.terminal_tool_target_lifecycle import _cleanup_retired_environments
-    # Direct tuple keys are used by global/idle cleanup. For a raw task,
-    # omitted target cleans every target scope owned by that exact raw key;
-    # an explicit target cleans exactly that scope. Do not collapse arbitrary
-    # subagent ids to "default" here: legacy cleanup_vm(child_id) never tore
-    # down the parent's shared environment, and doing so in named mode would
-    # let a delegate's close race/disrupt its parent.
-    if isinstance(task_id, tuple):
-        keys = [task_id]
-    elif target is None:
-        try:
-            resolution = _target_resolution(None)
-            scoped_task_id = resolution.scope_task_key(task_id)
-            collapsed_task_id = _resolve_container_task_id(
-                str(task_id),
-                config=resolution.config,
-            )
-            scoped_collapsed_task_id = resolution.scope_task_key(collapsed_task_id)
-        except Exception:
-            scoped_task_id = task_id
-            collapsed_task_id = task_id
-            scoped_collapsed_task_id = task_id
-        matching_task_ids = {task_id, scoped_task_id}
-        if include_collapsed:
-            matching_task_ids.update({
-                collapsed_task_id, scoped_collapsed_task_id,
-            })
-        with _env_lock:
-            keys = [
-                key for key in _active_environments
-                if key in matching_task_ids
-                or (
-                    isinstance(key, tuple) and len(key) == 2
-                    and key[0] in matching_task_ids
-                )
-            ]
-        if not keys:
-            keys = [task_id]
-    else:
-        resolution = _target_resolution(target)
-        if resolution.named:
-            keys = [resolution.environment_key(task_id)]
-        else:
-            keys = [task_id]
+    keys = _cleanup_keys(task_id, target, include_collapsed)
 
     active_process_keys = set()
     if preserve_persistent:
@@ -628,7 +581,7 @@ def cleanup_vm(
             if "404" in error_str or "not found" in error_str.lower():
                 logger.info("Environment for task %s already cleaned up", key)
             else:
-                logger.warning("Error cleaning up environment for task %s: %s", key, e)
+                logger.warning("Error cleaning up environment for task %s: %s", key, e, exc_info=True)
 
 
 def _evict_environment_for_task(
@@ -680,7 +633,7 @@ def get_environment_for_target_scope(
             raw,
             config=resolution.config,
         )
-    except Exception:
+    except ValueError:
         collapsed = _resolve_container_task_id(raw)
     bases = {
         _profile_scoped_task_key(raw),
@@ -707,3 +660,54 @@ def get_environment_for_target_scope(
             if _matches(key, env):
                 return env
     return None
+
+
+def _cleanup_keys(task_id, target, include_collapsed):
+    from tools.terminal_tool import (
+        _active_environments, _env_lock, _resolve_container_task_id, _target_resolution,
+    )
+    # Direct tuple keys are used by global/idle cleanup. For a raw task,
+    # omitted target cleans every target scope owned by that exact raw key;
+    # an explicit target cleans exactly that scope. Do not collapse arbitrary
+    # subagent ids to "default" here: legacy cleanup_vm(child_id) never tore
+    # down the parent's shared environment, and doing so in named mode would
+    # let a delegate's close race/disrupt its parent.
+    if isinstance(task_id, tuple):
+        keys = [task_id]
+    elif target is None:
+        try:
+            resolution = _target_resolution(None)
+            scoped_task_id = resolution.scope_task_key(task_id)
+            collapsed_task_id = _resolve_container_task_id(
+                str(task_id),
+                config=resolution.config,
+            )
+            scoped_collapsed_task_id = resolution.scope_task_key(collapsed_task_id)
+        except ValueError:
+            scoped_task_id = task_id
+            collapsed_task_id = task_id
+            scoped_collapsed_task_id = task_id
+        matching_task_ids = {task_id, scoped_task_id}
+        if include_collapsed:
+            matching_task_ids.update({
+                collapsed_task_id, scoped_collapsed_task_id,
+            })
+        with _env_lock:
+            keys = [
+                key for key in _active_environments
+                if key in matching_task_ids
+                or (
+                    isinstance(key, tuple) and len(key) == 2
+                    and key[0] in matching_task_ids
+                )
+            ]
+        if not keys:
+            keys = [task_id]
+    else:
+        resolution = _target_resolution(target)
+        if resolution.named:
+            keys = [resolution.environment_key(task_id)]
+        else:
+            keys = [task_id]
+
+    return keys

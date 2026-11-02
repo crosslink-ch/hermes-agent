@@ -1017,7 +1017,7 @@ def _named_target_hints() -> str:
     try:
         from tools.execution_targets import list_execution_targets
         targets = list_execution_targets()
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
         logger.debug("Could not build execution target inventory: %s", exc)
         return ""
     if not any(target.named for target in targets):
@@ -1051,7 +1051,7 @@ def build_environment_hints(*, home_override: Path | str | None = None) -> str:
     try:
         from tools.execution_targets import resolve_execution_target
         selected = resolve_execution_target()
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
         logger.debug("Could not resolve default target for prompt: %s", exc)
     backend = selected.backend if selected is not None and selected.named else (
         _tenv_read("TERMINAL_ENV") or "local"

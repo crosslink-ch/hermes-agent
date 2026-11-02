@@ -1157,27 +1157,10 @@ def _contains_unsafe_gateway_action(
                 if candidate_executed:
                     return _budget_exhausted(budget, "remote reads", depth)
                 break
-            remote_result = read_remote_script(str(script_path))
-            if isinstance(remote_result, tuple):
-                remote_text, remote_unsafe = remote_result
-                if remote_unsafe:
-                    if candidate_executed:
-                        return _refuse_unreadable(
-                            budget, script_path, f"`{script_path}` could not be scanned on the selected backend",
-                        )
-                    continue
-            else:
-                remote_text = remote_result
-            script_text, unsafe = _sanitize_remote_script_text(
-                remote_text, max_bytes=budget.bytes_remaining,
-            )
-            if unsafe:
+            script_text, refusal = _read_remote_candidate(script_path, read_remote_script, budget)
+            if refusal:
                 if candidate_executed:
-                    return _refuse_unreadable(
-                        budget, script_path,
-                        f"`{script_path}` read from the backend exceeds the scan cap "
-                        f"({_MAX_REFERENCED_SCRIPT_BYTES} bytes) or the remaining walk budget",
-                    )
+                    return _refuse_unreadable(budget, script_path, refusal)
                 continue
         else:
             # Never read more than the walk can still afford to tokenize.
@@ -1307,3 +1290,22 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
             "(#30719). Run `hermes gateway restart` from a shell outside "
             "the running gateway instead."
         )
+
+
+def _read_remote_candidate(script_path, read_remote_script, budget):
+    """Return script text or the precise remote-read refusal reason."""
+    remote_result = read_remote_script(str(script_path))
+    if isinstance(remote_result, tuple):
+        remote_text, remote_unsafe = remote_result
+        if remote_unsafe:
+            return None, f"`{script_path}` could not be scanned on the selected backend"
+    else:
+        remote_text = remote_result
+    script_text, unsafe = _sanitize_remote_script_text(
+        remote_text, max_bytes=budget.bytes_remaining,
+    )
+    if unsafe:
+        return None, (
+            f"`{script_path}` read from the backend exceeds the scan cap "
+            f"({_MAX_REFERENCED_SCRIPT_BYTES} bytes) or the remaining walk budget")
+    return script_text, None

@@ -279,16 +279,14 @@ def frozen_execution_target_config():
 
 def _active_profile_scope() -> str:
     """Return a stable multiplex-profile scope, empty in legacy mode."""
-    try:
-        from agent.secret_scope import is_multiplex_active
-        if not is_multiplex_active():
-            return ""
-        from hermes_constants import get_hermes_home
-
-        home = str(get_hermes_home().resolve())
-        return hashlib.sha256(home.encode("utf-8")).hexdigest()[:12]
-    except Exception:
+    from agent.secret_scope import is_multiplex_active
+    if not is_multiplex_active():
         return ""
+    from hermes_constants import get_hermes_home
+
+    # Identity failures must propagate, never alias a routed profile to legacy.
+    home = str(get_hermes_home().resolve())
+    return hashlib.sha256(home.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass(frozen=True)
@@ -421,12 +419,9 @@ class ExecutionTargetResolution:
 
 def _load_static_unscoped_config() -> dict[str, Any]:
     """Load static effective config without runtime target fragments."""
-    try:
-        from agent.secret_scope import is_multiplex_active
+    from agent.secret_scope import is_multiplex_active
 
-        multiplex = is_multiplex_active()
-    except Exception:
-        multiplex = False
+    multiplex = is_multiplex_active()
     if not multiplex:
         with _classic_config_lock:
             override = deepcopy(_classic_config_override)
@@ -467,13 +462,7 @@ def _available(names: Iterable[str]) -> str:
 
 
 
-def _validate_named_target_entry(
-    name: str,
-    entry: Mapping[str, Any],
-    effective: Mapping[str, Any],
-    backend: str,
-) -> None:
-    """Fail fast on misspelled, inapplicable, or malformed target settings."""
+def _validate_setting_names(name, entry, backend):
     allowed = _TARGET_COMMON_SETTINGS | _TARGET_BACKEND_SETTINGS[backend]
     for key in entry:
         if not isinstance(key, str):
@@ -494,6 +483,67 @@ def _validate_named_target_entry(
                 f"Execution target {name!r} has unknown setting {key!r}.{hint}"
             )
 
+
+def _validate_integer(value, invalid, expected, minimum, maximum=None):
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        invalid(expected)
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        invalid(expected)
+    if number < minimum or (maximum is not None and number > maximum):
+        invalid(expected)
+
+
+def _validate_cpu(value, invalid):
+    if isinstance(value, bool):
+        invalid("a non-negative number")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        invalid("a finite non-negative number")
+    if not math.isfinite(number) or number < 0:
+        invalid("a finite non-negative number")
+
+
+def _validate_setting_value(key, value, invalid):
+    if key in _TARGET_BOOLEAN_SETTINGS:
+        if not isinstance(value, bool) and str(value).strip().lower() not in {
+            "true", "false", "1", "0", "yes", "no",
+        }:
+            invalid("boolean")
+    elif key in _TARGET_LIST_SETTINGS:
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            invalid("list of strings")
+    elif key == "docker_env":
+        if not isinstance(value, Mapping) or any(
+            not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()
+        ):
+            invalid("mapping of string keys to string values")
+    elif key in _TARGET_STRING_SETTINGS:
+        if not isinstance(value, str):
+            invalid("a string")
+    elif key == "container_cpu":
+        _validate_cpu(value, invalid)
+    elif key in {"container_memory", "container_disk"}:
+        _validate_integer(value, invalid, "a non-negative integer", 0)
+    elif key in {"timeout", "lifetime_seconds"}:
+        _validate_integer(value, invalid, "a positive integer", 1)
+    elif key == "ssh_port":
+        _validate_integer(value, invalid, "an integer from 1 to 65535", 1, 65535)
+
+
+def _validate_named_target_entry(
+    name: str,
+    entry: Mapping[str, Any],
+    effective: Mapping[str, Any],
+    backend: str,
+) -> None:
+    """Fail fast on misspelled, inapplicable, or malformed target settings."""
+    from functools import partial
+
+    _validate_setting_names(name, entry, backend)
+    allowed = _TARGET_COMMON_SETTINGS | _TARGET_BACKEND_SETTINGS[backend]
     def invalid(key: str, expected: str) -> None:
         raise ExecutionTargetError(
             f"Execution target {name!r} setting {key!r} has an invalid shape; "
@@ -501,70 +551,7 @@ def _validate_named_target_entry(
         )
 
     for key in allowed & set(effective):
-        value = effective[key]
-        if key in _TARGET_BOOLEAN_SETTINGS:
-            if isinstance(value, bool):
-                continue
-            if str(value).strip().lower() not in {
-                "true", "false", "1", "0", "yes", "no",
-            }:
-                invalid(key, "boolean")
-        elif key in _TARGET_LIST_SETTINGS:
-            if not isinstance(value, list) or any(
-                not isinstance(item, str) for item in value
-            ):
-                invalid(key, "list of strings")
-        elif key == "docker_env":
-            if not isinstance(value, Mapping) or any(
-                not isinstance(item_key, str) or not isinstance(item_value, str)
-                for item_key, item_value in value.items()
-            ):
-                invalid(key, "mapping of string keys to string values")
-        elif key in _TARGET_STRING_SETTINGS:
-            if not isinstance(value, str):
-                invalid(key, "a string")
-        elif key == "container_cpu":
-            if isinstance(value, bool):
-                invalid(key, "a non-negative number")
-            try:
-                number = float(value)
-            except (TypeError, ValueError):
-                invalid(key, "a finite non-negative number")
-            if not math.isfinite(number) or number < 0:
-                invalid(key, "a finite non-negative number")
-        elif key in {"container_memory", "container_disk"}:
-            if isinstance(value, bool):
-                invalid(key, "a non-negative integer")
-            if isinstance(value, float) and not value.is_integer():
-                invalid(key, "a non-negative integer")
-            try:
-                number = int(value)
-            except (TypeError, ValueError):
-                invalid(key, "a non-negative integer")
-            if number < 0:
-                invalid(key, "a non-negative integer")
-        elif key in {"timeout", "lifetime_seconds"}:
-            if isinstance(value, bool):
-                invalid(key, "a positive integer")
-            if isinstance(value, float) and not value.is_integer():
-                invalid(key, "a positive integer")
-            try:
-                number = int(value)
-            except (TypeError, ValueError):
-                invalid(key, "a positive integer")
-            if number <= 0:
-                invalid(key, "a positive integer")
-        elif key == "ssh_port":
-            if isinstance(value, bool):
-                invalid(key, "an integer from 1 to 65535")
-            if isinstance(value, float) and not value.is_integer():
-                invalid(key, "an integer from 1 to 65535")
-            try:
-                number = int(value)
-            except (TypeError, ValueError):
-                invalid(key, "an integer from 1 to 65535")
-            if not 1 <= number <= 65535:
-                invalid(key, "an integer from 1 to 65535")
+        _validate_setting_value(key, effective[key], partial(invalid, key))
 
     if backend == "ssh":
         for key in ("ssh_host", "ssh_user"):
@@ -611,7 +598,7 @@ def _explicit_legacy_terminal_keys(
         from hermes_cli import managed_scope
 
         _collect_authority(managed_scope.load_managed_config())
-    except Exception:
+    except (ImportError, OSError, ValueError):
         # Provenance discovery must not make terminal activation unavailable
         # when the optional managed scope cannot be read.
         pass
@@ -660,12 +647,9 @@ def synthesize_legacy_default_target(
         return None
     from tools.terminal_tool import _get_env_config
 
-    try:
-        from agent.secret_scope import is_multiplex_active
+    from agent.secret_scope import is_multiplex_active
 
-        multiplex = is_multiplex_active()
-    except Exception:
-        multiplex = False
+    multiplex = is_multiplex_active()
 
     flat = dict(legacy.config)
     if multiplex:

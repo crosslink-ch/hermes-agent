@@ -871,7 +871,7 @@ def execute_code(
     from tools.execution_targets import resolve_execution_target
     try:
         resolution = resolve_execution_target(execution_target)
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
         return tool_error(str(exc))
     from tools.terminal_tool import _get_env_config, _docker_has_host_access
     _env_config = (
@@ -1110,7 +1110,7 @@ def _execute_code_handler(args: dict, **kwargs) -> str:
     try:
         from tools.execution_targets import validate_execution_target_args
         validate_execution_target_args("execute_code", args)
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
         return tool_error(str(exc))
     if "code" not in args and "command" in args:
         logger.warning("execute_code received 'command' instead of the required 'code' argument")

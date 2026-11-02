@@ -144,43 +144,9 @@ def overlay_runtime_execution_targets(
         }
         return root
 
-    static_names = set(targets)
-    by_name: dict[str, list[Any]] = {}
-    for record in snapshot.records:
-        by_name.setdefault(record.execution_target, []).append(record)
-
-    runtime_records: dict[str, Any] = {}
-    for name, records in sorted(by_name.items()):
-        if name in static_names:
-            for record in records:
-                records_metadata.append(_metadata_entry(record, "shadowed_static"))
-            diagnostics.append(
-                RegistryDiagnostic(
-                    code="static_name_reserved",
-                    message=f"Static execution target {name!r} reserves its name over runtime providers.",
-                )
-            )
-            continue
-        if len(records) > 1:
-            providers = sorted(record.provider for record in records)
-            for record in records:
-                records_metadata.append(_metadata_entry(record, "provider_collision"))
-            diagnostics.append(
-                RegistryDiagnostic(
-                    code="provider_name_collision",
-                    message=(
-                        f"Runtime execution target {name!r} is unavailable because multiple "
-                        f"providers claim it: {_available(providers)}."
-                    ),
-                )
-            )
-            continue
-        record = records[0]
-        status = "active" if record.state == "ready" else "draining"
-        records_metadata.append(_metadata_entry(record, status))
-        if record.state == "ready":
-            targets[name] = deepcopy(dict(record.config))
-            runtime_records[name] = record
+    runtime_records = _merge_runtime_records(
+        targets, snapshot, records_metadata, diagnostics,
+    )
 
     terminal["targets"] = targets
     root["terminal"] = terminal
@@ -220,3 +186,45 @@ def overlay_runtime_execution_targets(
         diag.as_dict() for diag in diagnostics
     ]
     return root
+
+
+def _merge_runtime_records(targets, snapshot, records_metadata, diagnostics):
+    static_names = set(targets)
+    by_name: dict[str, list[Any]] = {}
+    for record in snapshot.records:
+        by_name.setdefault(record.execution_target, []).append(record)
+
+    runtime_records: dict[str, Any] = {}
+    for name, records in sorted(by_name.items()):
+        if name in static_names:
+            for record in records:
+                records_metadata.append(_metadata_entry(record, "shadowed_static"))
+            diagnostics.append(
+                RegistryDiagnostic(
+                    code="static_name_reserved",
+                    message=f"Static execution target {name!r} reserves its name over runtime providers.",
+                )
+            )
+            continue
+        if len(records) > 1:
+            providers = sorted(record.provider for record in records)
+            for record in records:
+                records_metadata.append(_metadata_entry(record, "provider_collision"))
+            diagnostics.append(
+                RegistryDiagnostic(
+                    code="provider_name_collision",
+                    message=(
+                        f"Runtime execution target {name!r} is unavailable because multiple "
+                        f"providers claim it: {_available(providers)}."
+                    ),
+                )
+            )
+            continue
+        record = records[0]
+        status = "active" if record.state == "ready" else "draining"
+        records_metadata.append(_metadata_entry(record, status))
+        if record.state == "ready":
+            targets[name] = deepcopy(dict(record.config))
+            runtime_records[name] = record
+
+    return runtime_records

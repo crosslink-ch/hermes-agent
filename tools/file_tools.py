@@ -812,36 +812,9 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT,
         return tool_error(nt_err)
     try:
         from tools.execution_targets import resolve_execution_target
-        selected_execution_target = execution_target
-
-        pinned_file_ops = None
-        if runtime_scope:
-            from tools.terminal_tool import get_environment_for_target_scope
-
-            selected_name = str(selected_execution_target or "")
-            if not selected_name:
-                return tool_error(
-                    "read_file runtime_scope requires execution_target from the saved-output hint."
-                )
-            pinned_env = get_environment_for_target_scope(
-                task_id, selected_name, runtime_scope,
-            )
-            if pinned_env is None:
-                return tool_error(
-                    "The producing execution environment for this saved output "
-                    "is no longer available. Re-run the originating tool."
-                )
-            resolution = getattr(pinned_env, "_hermes_target_resolution", None)
-            if resolution is None:
-                return tool_error(
-                    "The producing environment lacks immutable target metadata. "
-                    "Re-run the originating tool."
-                )
-            pinned_file_ops = ShellFileOperations(
-                pinned_env, str(getattr(pinned_env, "cwd", ".")),
-            )
-        else:
-            resolution = resolve_execution_target(selected_execution_target)
+        resolution, pinned_file_ops = _read_target_context(
+            task_id, execution_target, runtime_scope,
+        )
         selected_target = resolution.target if resolution.named else None
         host_mtime_tracking = resolution.backend == "local"
         state_task_id = resolution.file_coordination_key(task_id)
@@ -849,14 +822,6 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT,
             task_id, selected_target, _resolution=resolution,
         )
         offset, limit = normalize_read_pagination(offset, limit)
-
-        # On the RAW model-supplied string, before any expanduser()/resolve():
-        # on Windows resolving \??\UNC\host\share already sends SMB auth (NTLM
-        # leak); on POSIX the task-base join would anchor the prefix as a
-        # relative segment and hide it from every resolved-path check below.
-        nt_err = get_nt_namespace_error(path, verb="Read")
-        if nt_err:
-            return tool_error(nt_err)
 
         device_base = None if Path(path).expanduser().is_absolute() else _resolve_base_dir(
             task_id, execution_target=selected_target, _resolution=resolution)
@@ -912,12 +877,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT,
         # Dedup: identical (path, offset, limit) on an unchanged file returns a
         # lightweight stub instead of re-sending the content.
         dedup_key = (resolved_str, offset, limit)
-        with _read_tracker_lock:
-            task_data = _task_data(state_task_id)
-            cached_version = task_data["dedup"].get(dedup_key) if host_mtime_tracking else None
-            # First unchanged read after a compaction boundary serves full content
-            # (the summary may have dropped exact bytes); later ones get the stub.
-            content_served_in_generation = dedup_key in task_data["dedup_generation_reads"]
+        task_data, cached_version, content_served_in_generation = _read_dedup_state(
+            state_task_id, dedup_key, host_mtime_tracking)
         # Same rule as skill_view: the review fork shares the parent's task_id and its
         # read-before-write guard needs a real read, which the stub path never records (#95976).
         # Keep the selected backend: consulting the default environment here
@@ -1160,7 +1121,7 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
         selected_target = resolution.target if resolution.named else None
         namespace = _file_state_namespace(task_id, selected_target, _resolution=resolution)
         state_task_id = resolution.file_coordination_key(task_id)
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
         return tool_error(str(exc))
     nt_err = get_nt_namespace_error(path, verb="Write")
     if nt_err:
@@ -1220,13 +1181,9 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
                         _mark_full_write_baseline(
                             _resolved, state_task_id, getattr(result, "_content_sha256", None))
                     else:
-                        version = _backend_file_version(file_ops, operation_path)
-                        if (version is not None and version[1].hex() ==
-                                getattr(result, "_content_sha256", None)):
-                            with _read_tracker_lock:
-                                data = _task_data(state_task_id)
-                                data["full_write_baselines"][_resolved] = version
-                                _cap_read_tracker_data(data)
+                        _record_remote_write_baseline(
+                            file_ops, operation_path, _resolved, state_task_id,
+                            getattr(result, "_content_sha256", None))
                 _note_edited(task_id, [path], path_to_resolved, session_id, resolution, namespace)
         result_dict.update(resolution.metadata(cwd=_authoritative_workspace_root(
             task_id, selected_target, _resolution=resolution)))
@@ -1278,35 +1235,21 @@ def patch_tool(mode: str = "replace", path: str | None = None, old_string: str |
     ``cross_profile``: same semantics as ``write_file``'s flag (mirror-guard
     bypass only; unadvertised).
     """
-    # Validate raw paths before target resolution can touch the filesystem.
-    early_paths = [path] if path else []
-    if mode == "patch" and patch:
-        collected = _collect_v4a_header_paths(patch)
-        if isinstance(collected, str):
-            return collected
-        early_paths.extend(collected[0])
-    for raw_path in early_paths:
-        nt_err = get_nt_namespace_error(raw_path, verb="Write")
-        if nt_err:
-            return tool_error(nt_err)
+    early_error = _raw_patch_path_error(mode, path, patch)
+    if early_error:
+        return early_error
     try:
         from tools.execution_targets import resolve_execution_target
         resolution = resolve_execution_target(execution_target)
         selected_target = resolution.target if resolution.named else None
         namespace = _file_state_namespace(task_id, selected_target, _resolution=resolution)
         state_task_id = resolution.file_coordination_key(task_id)
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
         return tool_error(str(exc))
-    _paths_to_check = [path] if path else []
-    _content_write_paths = list(_paths_to_check)
-    _entry_paths: list[str] = []
-    if mode == "patch" and patch:
-        collected = _collect_v4a_header_paths(patch)
-        if isinstance(collected, str):
-            return collected
-        _paths_to_check += collected[0]
-        _content_write_paths += collected[1]
-        _entry_paths = collected[2]
+    path_groups = _patch_path_groups(mode, path, patch)
+    if isinstance(path_groups, str):
+        return path_groups
+    _paths_to_check, _content_write_paths, _entry_paths = path_groups
     precheck_err = _write_precheck_error(_paths_to_check, _content_write_paths,
                                          task_id, cross_profile, resolution)
     if precheck_err:
@@ -1682,7 +1625,7 @@ def _handle_read_file(args, **kw):
         from tools.execution_targets import validate_execution_target_args
 
         validate_execution_target_args("read_file", args)
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
         return tool_error(str(exc))
     tid = kw.get("task_id") or "default"
     return read_file_tool(
@@ -1696,7 +1639,7 @@ def _handle_write_file(args, **kw):
         from tools.execution_targets import validate_execution_target_args
 
         validate_execution_target_args("write_file", args)
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
         return tool_error(str(exc))
     tid = kw.get("task_id") or "default"
     if not args.get("path") or not isinstance(args.get("path"), str):
@@ -1742,7 +1685,7 @@ def _handle_patch(args, **kw):
         from tools.execution_targets import validate_execution_target_args
 
         validate_execution_target_args("patch", args)
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
         return tool_error(str(exc))
     tid = kw.get("task_id") or "default"
     mode = args.get("mode", "replace")
@@ -1760,7 +1703,7 @@ def _handle_search_files(args, **kw):
     try:
         from tools.execution_targets import validate_execution_target_args
         validate_execution_target_args("search_files", args)
-    except Exception as exc:
+    except (ValueError, OSError) as exc:
         return tool_error(str(exc))
     tid = kw.get("task_id") or "default"
     target_map = {"grep": "content", "find": "files"}
@@ -1826,3 +1769,80 @@ def _patch_schema_overrides():
 
 registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000, dynamic_schema_overrides=_patch_schema_overrides)
 registry.register(name="search_files", toolset="file", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000)
+
+
+def _read_target_context(task_id, execution_target, runtime_scope):
+    """Resolve the producing environment without falling back to a changed alias."""
+    from tools.execution_targets import ExecutionTargetError, resolve_execution_target
+    from tools.terminal_tool import get_environment_for_target_scope
+
+    if not runtime_scope:
+        return resolve_execution_target(execution_target), None
+    selected_name = str(execution_target or "")
+    if not selected_name:
+        raise ExecutionTargetError(
+            "read_file runtime_scope requires execution_target from the saved-output hint.")
+    pinned_env = get_environment_for_target_scope(task_id, selected_name, runtime_scope)
+    if pinned_env is None:
+        raise ExecutionTargetError(
+            "The producing execution environment for this saved output "
+            "is no longer available. Re-run the originating tool.")
+    resolution = getattr(pinned_env, "_hermes_target_resolution", None)
+    if resolution is None:
+        raise ExecutionTargetError(
+            "The producing environment lacks immutable target metadata. "
+            "Re-run the originating tool.")
+    return resolution, ShellFileOperations(pinned_env, str(getattr(pinned_env, "cwd", ".")))
+
+
+
+def _record_remote_write_baseline(file_ops, operation_path, resolved, state_task_id, digest):
+    """Only a verified remote write establishes whole-file knowledge."""
+    version = _backend_file_version(file_ops, operation_path)
+    if version is None or version[1].hex() != digest:
+        return
+    with _read_tracker_lock:
+        data = _task_data(state_task_id)
+        data["full_write_baselines"][resolved] = version
+        _cap_read_tracker_data(data)
+
+
+
+def _raw_patch_path_error(mode, path, patch):
+    # Validate raw paths before target resolution can touch the filesystem.
+    early_paths = [path] if path else []
+    if mode == "patch" and patch:
+        collected = _collect_v4a_header_paths(patch)
+        if isinstance(collected, str):
+            return collected
+        early_paths.extend(collected[0])
+    for raw_path in early_paths:
+        nt_err = get_nt_namespace_error(raw_path, verb="Write")
+        if nt_err:
+            return tool_error(nt_err)
+    return None
+
+
+
+def _read_dedup_state(state_task_id, dedup_key, host_mtime_tracking):
+    with _read_tracker_lock:
+        task_data = _task_data(state_task_id)
+        cached_version = task_data["dedup"].get(dedup_key) if host_mtime_tracking else None
+        # First unchanged read after a compaction boundary serves full content
+        # (the summary may have dropped exact bytes); later ones get the stub.
+        content_served_in_generation = dedup_key in task_data["dedup_generation_reads"]
+    return task_data, cached_version, content_served_in_generation
+
+
+def _patch_path_groups(mode, path, patch):
+    _paths_to_check = [path] if path else []
+    _content_write_paths = list(_paths_to_check)
+    _entry_paths: list[str] = []
+    if mode == "patch" and patch:
+        collected = _collect_v4a_header_paths(patch)
+        if isinstance(collected, str):
+            return collected
+        _paths_to_check += collected[0]
+        _content_write_paths += collected[1]
+        _entry_paths = collected[2]
+    return _paths_to_check, _content_write_paths, _entry_paths

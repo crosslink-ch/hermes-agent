@@ -82,209 +82,37 @@ def _tc_name(tool_call: Any) -> str:
     return getattr(getattr(tool_call, "function", None), "name", "") or "tool"
 
 
-def _record_persisted_path_for_stub(agent, tool_call_id: str, function_result) -> None:
-    """Record the spillover file path so a later result-reference stub can't dangle (best-effort)."""
-    try:
-        candidates = [function_result] if isinstance(function_result, str) else [
-            function_result.get("text_summary"),
-            *(p.get("text") for p in function_result.get("content") or [] if isinstance(p, dict)),
-        ] if _is_multimodal_tool_result(function_result) else []
-        path = next((p for p in map(extract_persisted_path, candidates) if p), None)
-        if path:
-            agent._tool_guardrails.record_persisted_result(tool_call_id, path)
-    except Exception as exc:
-        logger.debug("persisted-path record for result stub failed: %s", exc)
+from agent.tool_executor_storage import (
+    _record_persisted_path_for_stub,
+    _budget_for_agent,
+    _parse_tool_arguments,
+)
 
 
-def _ensure_file_checkpoint(agent, function_name: str, function_args: dict, effective_task_id: str) -> None:
-    """Checkpoint the same workspace path that the file tool will mutate, resolved the way
-    file tools do (against the task's live cwd, which differs from the process cwd in Docker)."""
-    file_path = function_args.get("path", "")
-    if not file_path:
-        return
-    from agent.file_safety import is_nt_namespace_path
-    from tools.execution_targets import resolve_execution_target
-    from tools.file_tools_paths import _resolve_path_for_task, container_backend_for_task
-
-    # The raw NT-namespace check precedes all path resolution (which can itself
-    # initiate outbound SMB authentication on Windows).
-    if is_nt_namespace_path(file_path):
-        return
-    resolution = resolve_execution_target(function_args.get("execution_target"))
-    if resolution.backend != "local" or (
-        not resolution.named and container_backend_for_task(effective_task_id or "default") is not None
-    ):
-        return  # Never checkpoint a container/remote path on the host.
-    if resolution.named:
-        from tools.terminal_tool import get_session_cwd
-        cwd = (get_session_cwd(effective_task_id or "default", _resolution=resolution)
-               or resolution.config.get("cwd"))
-        # Match the file tool's tilde/MSYS conversion and host symlink
-        # resolution, but anchor a relative path to this selected target.
-        from tools.file_tools_paths import _anchor, _host_text
-        resolved_path = _anchor(_host_text(file_path, False),
-                                lambda: cwd or os.getcwd(), False)
-    else:
-        resolved_path = _resolve_path_for_task(file_path, effective_task_id or "default")
-    agent._checkpoint_mgr.ensure_checkpoint(
-        agent._checkpoint_mgr.get_working_dir_for_path(str(resolved_path)), f"before {function_name}",
-    )
+from agent.tool_executor_targets import (
+    _TARGET_RESULT_TOOLS,
+    _ensure_file_checkpoint,
+    _result_target_identity,
+    _result_environment,
+    _active_env_for_tool_result,
+    _selected_local_target_cwd,
+    _target_subdirectory_hints,
+    _persisted_target_hint,
+)
 
 
-def _budget_for_agent(agent) -> BudgetConfig:
-    """Tool-result BudgetConfig scaled to the agent's context window. Unknown length goes
-    through ``budget_for_context_window(None)`` (not DEFAULT_BUDGET) so the MCP threshold
-    override still applies.
-
-    Large-context models keep the historical 100K/200K char defaults; small models (e.g. a 65K-token local
-    model switched into mid-session) get a budget proportional to their window so a single large tool result
-    can't push the request past the model's limit (#23767). Falls back to the default budget when the
-    context length isn't resolvable.
-    """
-    try:
-        ctx = getattr(getattr(agent, "context_compressor", None), "context_length", None)
-        return budget_for_context_window(int(ctx) if ctx else None)
-    except Exception:
-        return DEFAULT_BUDGET
-
-_TARGET_RESULT_TOOLS = {
-    "terminal", "read_file", "write_file", "patch", "search_files", "execute_code", "process",
-}
-def _result_target_identity(tool_name: str, args: dict, result) -> tuple[str | None, str | None]:
-    """Use the producer's target/scope, not the current mutable default alias."""
-    if tool_name not in _TARGET_RESULT_TOOLS:
-        return None, None
-    payload = None
-    if isinstance(result, str) and result.lstrip().startswith("{"):
-        try:
-            payload = json.loads(result)
-        except ValueError:
-            pass
-    if isinstance(payload, dict) and isinstance(payload.get("target"), str):
-        return payload["target"], payload.get("runtime_scope")
-    selector = args.get("execution_target")
-    if isinstance(selector, str) and selector:
-        return selector, None
-    try:
-        from tools.execution_targets import resolve_execution_target
-        resolution = resolve_execution_target()
-        if resolution.named:
-            return resolution.target, resolution.security_scope
-    except Exception:
-        pass
-    return None, None
 
 
-def _result_environment(task_id: str, target: str | None, scope: str | None):
-    """Never spill a named target's data to the default backend on a miss."""
-    if not target:
-        return get_active_env(task_id)
-    try:
-        if scope:
-            from tools.terminal_tool import get_environment_for_target_scope
-            return get_environment_for_target_scope(task_id, target, scope)
-        return get_active_env(task_id, target=target)
-    except Exception:
-        return None
 
 
-def _active_env_for_tool_result(task_id: str, tool_name: str, args: dict, result=None):
-    """Find the producer of a result, never a changed default target.
-
-    Process output belongs to its background session even if a named target
-    was later reconfigured; spilling to the host/default environment would
-    cross the execution boundary.
-    """
-    if tool_name == "process" and args.get("session_id"):
-        try:
-            from tools.process_registry import process_registry
-            record = process_registry.get(args["session_id"])
-            if record is not None and record.env_ref is not None:
-                return record.env_ref
-        except Exception:
-            pass
-        return None
-    target, scope = _result_target_identity(tool_name, args, result)
-    try:
-        return _result_environment(task_id, target, scope)
-    except Exception:
-        return None
 
 
-def _selected_local_target_cwd(
-    task_id: str, tool_name: str, args: dict, *, runtime_scope: str | None = None,
-) -> str | None:
-    """Host cwd only when the producing target is still the same local runtime."""
-    if tool_name not in _TARGET_RESULT_TOOLS:
-        return None
-    try:
-        from tools.execution_targets import resolve_execution_target
-        from tools.terminal_tool import get_session_cwd
-        resolution = resolve_execution_target(args.get("execution_target"))
-        if resolution.backend != "local" or (
-            runtime_scope is not None and resolution.security_scope != runtime_scope
-        ):
-            return None
-        return (get_session_cwd(task_id, _resolution=resolution)
-                or resolution.config.get("cwd"))
-    except Exception:
-        return None
 
 
-def _target_subdirectory_hints(
-    agent, task_id: str, tool_name: str, args: dict,
-    target: str | None, *, runtime_scope: str | None = None,
-) -> str | None:
-    """Inject context from the *actual local target*, never a remote host path."""
-    if tool_name not in _TARGET_RESULT_TOOLS:
-        tracker = getattr(agent, "_subdirectory_hints", None)
-        return tracker.check_tool_call(tool_name, args) if tracker else None
-    from tools.execution_targets import resolve_execution_target
-    try:
-        resolution = resolve_execution_target(target)
-    except Exception:
-        return None
-    if resolution.backend != "local" or (
-        runtime_scope is not None and runtime_scope != resolution.security_scope
-    ):
-        return None
-    cwd = _selected_local_target_cwd(
-        task_id, tool_name, {**args, "execution_target": resolution.target},
-        runtime_scope=runtime_scope,
-    )
-    if not cwd:
-        tracker = getattr(agent, "_subdirectory_hints", None)
-        return (tracker.check_tool_call(tool_name, args)
-                if not resolution.named and tracker else None)
-    tracker = getattr(agent, "_subdirectory_hints", None)
-    if tracker is None or not getattr(tracker, "enabled", True):
-        return None
-    if not resolution.named and str(tracker.working_dir) == str(Path(cwd).resolve()):
-        return tracker.check_tool_call(tool_name, args)
-    from agent.subdirectory_hints import SubdirectoryHintTracker
-    trackers = getattr(agent, "_target_subdirectory_hint_trackers", None)
-    if trackers is None:
-        trackers = {}
-        agent._target_subdirectory_hint_trackers = trackers
-    key = (resolution.target, resolution.security_scope, str(Path(cwd).resolve()))
-    if key not in trackers:
-        trackers[key] = SubdirectoryHintTracker(
-            cwd, enabled=getattr(tracker, "enabled", True),
-        )
-    return trackers[key].check_tool_call(tool_name, args)
 
 
-def _persisted_target_hint(content, target: str | None, scope: str | None):
-    if isinstance(content, list):
-        return [{**part, "text": _persisted_target_hint(part.get("text", ""), target, scope)}
-                if isinstance(part, dict) and part.get("type") == "text" else part
-                for part in content]
-    if target and isinstance(content, str) and PERSISTED_OUTPUT_TAG in content and "Execution target for this saved output:" not in content:
-        selector = f"execution_target={json.dumps(target)}"
-        if scope:
-            selector += f", runtime_scope={json.dumps(scope)}"
-        return content + f"\nExecution target for this saved output: {json.dumps(target)}. Pass {selector} to `read_file`."
-    return content
+
+
 
 
 _MAX_TOOL_WORKERS = 8  # concurrent worker threads per batch
@@ -327,30 +155,9 @@ class _BatchAbandoned(BaseException):
     so ``except Exception`` handlers in the middleware chain can't swallow it."""
 
 
-def _parse_tool_arguments(raw_arguments: Any) -> tuple[dict, Optional[str]]:
-    """Parse model-emitted arguments without repairing or coercing them."""
-    try:
-        arguments = json.loads(raw_arguments)
-    except (json.JSONDecodeError, TypeError):
-        arguments = None
-    if isinstance(arguments, dict):
-        return arguments, None
-    return {}, json.dumps(
-        {"error": "Invalid tool arguments", "message": "Tool arguments must be a valid JSON object; tool was not executed."},
-        ensure_ascii=False,
-    )
 
 
-def _resolve_concurrent_tool_timeout() -> float | None:
-    """Per-batch concurrent deadline: ``timeouts.tools.concurrent_batch`` wins,
-    ``HERMES_CONCURRENT_TOOL_TIMEOUT_S`` is the legacy bridge, ``0``/negative disables."""
-    from agent.deadline import resolve_timeout
-
-    return resolve_timeout(
-        "tools.concurrent_batch",
-        default=_DEFAULT_CONCURRENT_TOOL_TIMEOUT_S,
-        env_var="HERMES_CONCURRENT_TOOL_TIMEOUT_S",
-    )
+from agent.tool_dispatch_helpers import _resolve_concurrent_tool_timeout
 
 
 def _flush_session_db_after_tool_progress(agent, messages: list, *, stage: str) -> bool:

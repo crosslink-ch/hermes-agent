@@ -928,7 +928,13 @@ def _target_smart_verdict(command, description, pattern_key, pattern_keys,
             "session_key": session_key, "surface": "smart",
             "target": execution_target, "backend": execution_backend,
         }
-    except Exception:
+    except Exception as exc:
+        # Exception messages can contain the very command redaction failed to
+        # scrub. Preserve diagnostic frames, never the raw exception payload.
+        logger.error("Approval observer redaction failed", exc_info=(
+            RuntimeError, RuntimeError("redaction failure; details suppressed"),
+            exc.__traceback__,
+        ))
         payload = None  # No unredacted hook payload on redaction failure.
     if payload is not None:
         approval_context._fire_approval_hook("pre_approval_request", **payload)
@@ -1356,12 +1362,9 @@ def _execution_scoped_pattern_key(
     target = str(execution_target or "")
     if execution_target_scope:
         return f"target:{execution_target_scope}:{pattern_key}"
-    try:
-        from tools.execution_targets import _active_profile_scope
+    from tools.execution_targets import _active_profile_scope
 
-        profile_scope = _active_profile_scope()
-    except Exception:
-        profile_scope = ""
+    profile_scope = _active_profile_scope()
     digest = hashlib.sha256(
         f"{profile_scope}:{target}".encode()
     ).hexdigest()[:16]
