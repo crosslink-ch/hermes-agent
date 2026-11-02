@@ -483,13 +483,12 @@ def _non_conversational_metadata(
     return merged
 
 
-def _interim_metadata(metadata: Optional[dict[str, Any]] = None) -> dict[str, Any]:
-    """Mark a mid-turn status/advisory send as NOT the turn-final.
-
+def _interim_metadata(metadata: Optional[dict[str, Any]] = None, *, progress: bool = False) -> dict[str, Any]:
+    """Mark a mid-turn status/advisory send as NOT the turn-final. ``progress`` ("progress" value) also says "still working" (heartbeat, ack): TheChat notifies only for finished work, so notices that end work or ask the user to act must NOT set it.
     Stream-is-the-message adapters seal the live stream with the first unmarked send to an armed (chat, turn)
     key, so every mid-turn send MUST carry this marker. Gateway-internal; adapters strip it before the wire."""
     merged = dict(metadata or {})
-    merged["_interim_send"] = True
+    merged["_interim_send"] = "progress" if progress else True
     return merged
 
 
