@@ -21,7 +21,9 @@ from agent.memory_manager import sanitize_context
 from agent.memory_provider import MemoryProvider, is_trivial_prompt
 from agent.coding_context import INTERACTIVE_CODING_PLATFORMS as _LOCAL_PLATFORMS
 from agent.turn_author import a2a_key
+from plugins.memory.honcho.cli import ConfigWriteRefused, clone_honcho_for_profile, migrate_profile_host
 from plugins.memory.honcho.client import HonchoClientConfig, resolve_config_path
+from plugins.memory.honcho.config_panel import read_fields, write_fields
 from plugins.memory.honcho.client import _host_block, _HostLookup
 from plugins.memory.honcho.client import join_plugin_threads, spawn_context_thread
 from plugins.memory.honcho.dialectic import DialecticMixin
@@ -214,6 +216,27 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         import types
         from plugins.memory.honcho.cli import cmd_setup
         cmd_setup(types.SimpleNamespace())
+
+    # ----- Hermes profile lifecycle and config panel -----
+
+    def on_profile_created(self, profile_name: str, hermes_home: str, **kwargs) -> None:
+        """Give the new profile its own host block (aiPeer = profile name), cloned from the default."""
+        try:
+            if clone_honcho_for_profile(profile_name, in_hook=True):
+                print(f"Honcho config cloned (peer: {profile_name})")
+        except ConfigWriteRefused as e:
+            print(f"Honcho config not cloned: {e}")
+
+    def on_profile_renamed(self, old_name: str, new_name: str, hermes_home: str, **kwargs) -> None:
+        """Re-key the profile's host block to its new name, keeping its peer."""
+        for line in migrate_profile_host(old_name, new_name):
+            print(line)
+
+    def read_config_fields(self, hermes_home: str) -> Dict[str, Any]:
+        return read_fields()
+
+    def write_config_fields(self, values: Dict[str, Any], hermes_home: str) -> None:
+        write_fields(values)
 
     # ----- Session lifecycle -----
 
