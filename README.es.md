@@ -50,7 +50,7 @@ Ejecuta esto en PowerShell:
 iex (irm https://share.kihub.ch/hermes/install.ps1)
 ```
 
-El instalador de código fuente usa PM para Python 3.14, Node.js, npm,
+El instalador de código fuente usa PM para Python 3.14, Node.js, npm, pnpm,
 ripgrep, FFmpeg y las dependencias de Python. Si falta Git, descarga el archivo
 verificado de Git for Windows en el almacén de Hermes, sin reemplazar el Git
 del sistema. MSIX/App Installer es una distribución separada.
