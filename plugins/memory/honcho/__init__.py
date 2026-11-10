@@ -232,10 +232,10 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         for line in migrate_profile_host(old_name, new_name):
             print(line)
 
-    def read_config_fields(self, hermes_home: str) -> Dict[str, Any]:
+    def read_config_fields(self, hermes_home: str) -> dict[str, Any]:
         return read_fields()
 
-    def write_config_fields(self, values: Dict[str, Any], hermes_home: str) -> None:
+    def write_config_fields(self, values: dict[str, Any], hermes_home: str) -> None:
         write_fields(values)
 
     # ----- Session lifecycle -----

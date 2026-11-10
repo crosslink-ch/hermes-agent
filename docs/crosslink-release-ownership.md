@@ -4,8 +4,9 @@ This is a downstream-only maintenance contract. It is not an upstream release pi
 
 ## Pinned sync
 
-- Upstream: `v0.22.5`, annotated tag object `56b6a31fededdf7364e1a0a79548d144e7fd81a3`, commit `bf0203a794a07aac3ff764972ab9087baa4e4f4e`.
-- Fork parent: `37324f90833e68eb917c3e5b3dd4cecaafbb54bc`.
+- Upstream: `v0.23.1`, annotated tag object `b65acf3fdc1d43bd889211ea8e37032974b395a5`, commit `3b421578588243f920886e6fe79a6faa87ea026e`.
+- Fork parent: `0adbfaa51f546154400fd83bfc508632654ff46b`.
+- Previous sync: `v0.22.5`, commit `bf0203a794a07aac3ff764972ab9087baa4e4f4e`, fork parent `37324f90833e68eb917c3e5b3dd4cecaafbb54bc`.
 - PR destination: **crosslink-ch/hermes-agent**, never NousResearch/hermes-agent.
 
 ## Ownership boundary
@@ -50,7 +51,9 @@ not a reason to maintain fork release logic in upstream YAML.
 - Compression retains todo snapshots, reply anchors and rotation-state behavior.
 - SQLite journal selection and fail-open FTS repair remain downstream behavior.
 - Honcho remains bundled for existing downstream configurations, including content-digest
-  identity invalidation. Its `honcho-ai==2.2.0` SDK is a locked optional PM extra, not a call to
+  identity invalidation. Since the `v0.23.1` sync core no longer knows Honcho's file layout, so
+  the bundled provider implements the memory-provider seams itself (config panel storage,
+  profile create and rename). Its `honcho-ai==2.2.0` SDK is a locked optional PM extra, not a call to
   retired lazy-dependency APIs. Existing identity/config data is not migrated to another provider.
 - Vault errors remain redacted rather than returning password-manager stderr.
 
