@@ -28,17 +28,19 @@ Outside `nousresearch.com`:
 
 ## Installing from an official source
 
-The script installers are served from `hermes-agent.nousresearch.com`:
+This documentation ships with the Crosslink distribution of Hermes Agent, a fork maintained at [crosslink-ch/hermes-agent](https://github.com/crosslink-ch/hermes-agent). Its script installers are served from `share.kihub.ch`:
 
 ```bash
 # Linux / macOS / WSL2
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
+curl -fsSL https://share.kihub.ch/hermes/install.sh | bash
 ```
 
 ```powershell
 # Windows (native)
-iex (irm https://hermes-agent.nousresearch.com/install.ps1)
+iex (irm https://share.kihub.ch/hermes/install.ps1)
 ```
+
+The upstream Nous Research installers are served from `hermes-agent.nousresearch.com`; the other sources listed on this page are the ones Nous Research operates.
 
 The other supported routes also stay on official sources: Desktop packages download from the [Hermes website](https://hermes-agent.nousresearch.com/), Termux uses the signed APT repository on `hermes-assets.nousresearch.com` (see the [Termux guide](./termux.md), not the script above), Nix builds from the GitHub repository (see [Nix & NixOS](./nix-setup.md)), and Docker pulls `nousresearch/hermes-agent` from Docker Hub. Some guides fetch `install.ps1` straight from the repository at `raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1`; it is the same script.
 

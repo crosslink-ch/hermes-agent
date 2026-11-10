@@ -364,6 +364,11 @@ def _parse_dotenv_file(path: Path) -> list[tuple[str, str | None, bool]]:
     except UnicodeDecodeError:
         raw = raw.removeprefix(codecs.BOM_UTF8)
         text = raw.decode("latin-1")
+    return _dotenv_text_assignments(text)
+
+
+def _dotenv_text_assignments(text: str) -> list[tuple[str, str | None, bool]]:
+    """``(name, raw value, exact)`` assignments of decoded dotenv *text*, uninterpolated, in file order."""
     # Imported here, not at module level: gateway tests stub ``sys.modules["dotenv"]`` with a bare module
     # exposing only ``load_dotenv``, and ``gateway.run`` imports this module at import time.
     from dotenv.main import with_warn_for_invalid_lines
@@ -475,8 +480,8 @@ def _load_dotenv_with_fallback(
     _sanitize_loaded_credentials()  # httpx encodes headers as ASCII
 
 
-def _dotenv_assignments(path: Path) -> list:
-    """``(name, raw value)`` pairs of one dotenv file as the loader will see it once
+def _dotenv_assignments(path: Path) -> list[tuple[str, str | None, bool]]:
+    """``(name, raw value, exact)`` assignments of one dotenv file as the loader will see it once
     ``_sanitize_env_file_if_needed`` has run: :func:`_parse_dotenv_file` plus the sanitizer's UTF-16
     rewrite and NUL strip, for the pre-boot bootstrap reads that run before the sanitizer."""
     raw = path.read_bytes()
@@ -498,11 +503,7 @@ def _dotenv_assignments(path: Path) -> list:
             raw = raw.removeprefix(codecs.BOM_UTF8)
             text = raw.decode("latin-1")
     text = text.replace("\x00", "")  # the sanitizer strips NULs too (BOM-less UTF-16 / NUL-padded ASCII)
-    # Imported here, not at module level: gateway tests stub ``sys.modules["dotenv"]`` with a bare module
-    # exposing only ``load_dotenv``, and ``gateway.run`` imports this module at import time.
-    from dotenv.main import DotEnv
-
-    return list(DotEnv(dotenv_path=None, stream=io.StringIO(text), interpolate=False).parse())
+    return _dotenv_text_assignments(text)
 
 
 def _bootstrap_env(home: Path | None = None, project_env: Path | None = None) -> dict:

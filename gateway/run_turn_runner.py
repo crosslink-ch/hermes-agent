@@ -754,8 +754,6 @@ class TurnRunner(StructuredProgressMixin, GatewayTurnProgressMixin, GatewaySessi
         # Check the *class*, not the instance — MagicMock auto-creates attributes in tests.
         if _renders_exec_approval_buttons(type(adapter)):
             try:
-                if approval_data.get("request_id") and _callable_accepts_keyword(adapter.send_exec_approval, "request_id"):
-                    flags["request_id"] = approval_data["request_id"]
                 fut = self._schedule(
                     adapter.send_exec_approval(
                         chat_id=ctx._status_chat_id, command=cmd, session_key=ctx.session_key or "",

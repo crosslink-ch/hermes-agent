@@ -109,11 +109,10 @@ def test_session_release_is_profile_scoped_even_when_session_ids_match(monkeypat
 
 def test_expired_token_does_not_keep_previous_session_as_prompt_owner(monkeypatch):
     unlock.set_current_session_id("previous-session")
+    from tests.waiting import wait_until
+    monkeypatch.setattr(unlock, "_IDLE_TTL_S", 0.05)
     unlock.store_session_token("bitwarden", "expired-token")
-    key = unlock._key("bitwarden")
-    token, last = unlock._sessions[key]
-    unlock._sessions[key] = (token, last - unlock._IDLE_TTL_S - 1)
-    assert not unlock.is_unlocked("bitwarden")
+    wait_until(lambda: not unlock.is_unlocked("bitwarden"), timeout=5, what="the previous session's token expires")
     unlock.set_current_session_id("new-session")
     try:
         with unlock.unlock_attempt("bitwarden"):

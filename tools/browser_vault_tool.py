@@ -297,8 +297,11 @@ def browser_vault_list() -> str:
             continue
         try:
             metas = backend.list_items()
-        except Exception:
-            errors.append({"backend": backend.name, "error": "Password manager listing failed."})
+        except Exception as exc:
+            from agent.vault_backends.plugin import PluginBackendError
+            # A plugin backend's error is fixed core text; any other exception may carry CLI stderr.
+            errors.append({"backend": backend.name,
+                           "error": str(exc)[:200] if isinstance(exc, PluginBackendError) else "Password manager listing failed."})
             continue
         for meta in metas:
             entry = {"handle": meta.id, "backend": backend.name, "label": meta.label, "kind": meta.kind,
