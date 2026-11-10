@@ -7,6 +7,7 @@ OS boundary, not redacted after capture. Other transports fail before capture.
 import subprocess
 import time
 
+from hermes_cli.process_identity import own_process_groups, release_process_groups
 from tools.terminal_tool_sudo import NativeSudoRefused, native_sudo_is_current
 
 _AUTH_TIMEOUT = 15.0
@@ -19,6 +20,7 @@ def spawn(env, argv, cwd, stdin_data=None, *, authentication=False):
     if not native_sudo_is_current():
         raise NativeSudoRefused("Native sudo was cancelled; command not started.")
     proc = subprocess.Popen(
+        # detached-spawn: ok — owned via own_process_groups right below
         argv, cwd=cwd, env=_make_run_env(env.env), start_new_session=True,
         stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
         stdout=subprocess.DEVNULL if authentication else subprocess.PIPE,
@@ -26,6 +28,10 @@ def spawn(env, argv, cwd, stdin_data=None, *, authentication=False):
         text=True, encoding="utf-8", errors="strict", close_fds=True,
     )
     proc._hermes_pgid = proc.pid
+    # Dies with this process however it dies; LocalEnvironment._wait_for_process (the command) and
+    # authenticate() (the auth child) release the group once the wait returns.
+    own_process_groups([proc.pid])
+    proc._hermes_owned_pgid = proc.pid
     if stdin_data is not None:
         _pipe_stdin(proc, stdin_data)
     return proc
@@ -68,6 +74,9 @@ def authenticate(env, argv, password, cwd, timeout):
             if proc.poll() is None:
                 env._force_kill_process(proc)
             proc.wait()
+            if (owned_pgid := getattr(proc, "_hermes_owned_pgid", None)) is not None:
+                proc._hermes_owned_pgid = None
+                release_process_groups([owned_pgid])
             writer = getattr(proc, "_hermes_stdin_thread", None)
             if writer is not None:
                 writer.join(timeout=2)
