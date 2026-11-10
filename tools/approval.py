@@ -14,6 +14,7 @@ call time; sibling-defined names are imported from their defining module.
 from dataclasses import dataclass
 import hashlib
 import importlib
+import contextvars
 import logging
 import os
 import threading
@@ -150,9 +151,9 @@ def resolve_gateway_approval(session_key: str, choice: str,
 
     *resolve_all* resolves every pending approval (``/approve all``); otherwise the oldest
     (FIFO) or the one matching *request_id*. An explicitly targeted request may pass earlier
-    requests only inside the same desktop preparation batch. *reason* is the
-    ``/deny <reason>`` free text relayed to the agent in the BLOCKED message.
-    Returns the number resolved.
+    requests only inside the same desktop preparation batch, or when a native card answers its
+    own request (``resolve_gateway_approval_card``). *reason* is the ``/deny <reason>`` free
+    text relayed to the agent in the BLOCKED message. Returns the number resolved.
     """
     with _lock:
         queue = _gateway_queues.get(session_key)
@@ -163,7 +164,7 @@ def resolve_gateway_approval(session_key: str, choice: str,
                                  if entry.request_id == request_id), None)
             if target_index is None:
                 return 0
-            if target_index:
+            if target_index and not _card_tap.get():
                 batch = queue[target_index].prepared_batch
                 # Never jump a different request or batch. Desktop batches publish
                 # all their cards before execution, but release shells in call order.
@@ -189,6 +190,11 @@ def resolve_gateway_approval(session_key: str, choice: str,
         if resolved_request_ids is not None:
             resolved_request_ids.extend(entry.request_id for entry in targets)
     return len(targets)
+
+
+# Set while a native card answers its own request: the card shows that command, so the tap may pass
+# older requests still waiting in the session (#124974).
+_card_tap: contextvars.ContextVar[bool] = contextvars.ContextVar("approval_card_tap", default=False)
 
 
 def _card_target(session_key: str, request_id: Optional[str]):
@@ -231,7 +237,11 @@ def resolve_gateway_approval_card(session_key: str, choice: str, request_id: Opt
             from gateway.approval_actor import may_answer
             if not may_answer(target.authority, actor_id, admin_ids, extra):
                 return 0
-        return resolve_gateway_approval(session_key, choice, request_id=request_id)
+        tap = _card_tap.set(True)
+        try:
+            return resolve_gateway_approval(session_key, choice, request_id=request_id)
+        finally:
+            _card_tap.reset(tap)
 
 
 def withdraw_gateway_approval(session_key: str, request_id: str, cause: str) -> bool:

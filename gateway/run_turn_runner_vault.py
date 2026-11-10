@@ -21,7 +21,7 @@ def _publish(turn, adapter, context, event, *, retry=False):
 def vault_turn_scope(turn):
     from gateway.config import Platform
     ctx = turn._ctx
-    if ctx.source.platform != Platform.THECHAT:
+    if getattr(ctx.source, "platform", None) != Platform.THECHAT:
         yield
         return
     from agent.vault_backends import unlock
