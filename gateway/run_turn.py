@@ -2052,12 +2052,7 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         turn_ctx._status_adapter = self._delivery_adapter_for(source)
         turn_ctx._status_chat_id = source.chat_id
         turn_ctx._status_thread_metadata = _status_thread_metadata
-        turn_ctx._structured_progress_adapter = turn_ctx._status_adapter
-        turn_ctx._structured_progress_supported = (
-            turn_ctx._status_adapter is not None
-            and getattr(type(turn_ctx._status_adapter), "send_invocation_progress", BasePlatformAdapter.send_invocation_progress)
-            is not BasePlatformAdapter.send_invocation_progress
-        )
+        turn_runner.bind_structured_progress()
         return _status_thread_metadata
 
     async def _run_agent_notify_long_running(

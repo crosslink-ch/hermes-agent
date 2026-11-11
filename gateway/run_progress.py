@@ -31,6 +31,17 @@ class StructuredProgressMixin:
         except Exception:
             return str(value)
 
+    def bind_structured_progress(self) -> None:
+        """Use the status adapter for structured activity when it implements that rail."""
+        from gateway.platforms.base import BasePlatformAdapter
+        turn_ctx = self._ctx
+        turn_ctx._structured_progress_adapter = turn_ctx._status_adapter
+        turn_ctx._structured_progress_supported = (
+            turn_ctx._status_adapter is not None
+            and getattr(type(turn_ctx._status_adapter), "send_invocation_progress", BasePlatformAdapter.send_invocation_progress)
+            is not BasePlatformAdapter.send_invocation_progress
+        )
+
     def _schedule_structured_progress(self, event: dict[str, Any]) -> None:
         ctx = self._ctx
         if (
