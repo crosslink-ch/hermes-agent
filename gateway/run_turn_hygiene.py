@@ -39,6 +39,30 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 logger = logging.getLogger("gateway.run")
 
 
+def hygiene_no_commit_reason(agent) -> str:
+    """Name WHY a hygiene compression left the session id unchanged with no in-place commit.
+    The terminal ``else`` used to blame "no session_db on the hygiene agent" for every route into it,
+    but that is one of several causes (#71097): an attempt that ABORTED before any commit boundary
+    (lock skip, transient cooldown, summary timeout, codex thread interrupted) leaves
+    ``_last_compression_attempt_in_place`` at ``None``; a DB-less agent is only the case when
+    ``_session_db`` really is missing. Read the per-attempt signals the compressor sets, in that order."""
+    if not bool(getattr(agent, "_last_compression_attempt_recorded", False)):
+        return "compression did not run"
+    lock_skip = getattr(agent, "_compression_skipped_due_to_lock", None)
+    if lock_skip is True or isinstance(lock_skip, str):
+        return "attempt skipped: compression lease held by another process"
+    blocked = getattr(agent, "_compression_blocked_transient", None)
+    if blocked:
+        return f"attempt blocked: {blocked}"
+    if getattr(agent, "_last_compression_attempt_in_place", None) is None:
+        detail = "summary timed out" if getattr(agent, "_last_compression_timed_out", False) else "aborted before commit"
+        warning = getattr(agent, "_last_compression_summary_warning", None)
+        return f"attempt {detail}" + (f": {warning}" if warning else "")
+    if getattr(agent, "_session_db", None) is None:
+        return "no session_db on the hygiene agent"
+    return "in-place commit did not complete"
+
+
 class GatewayTurnHygieneMixin:
     @dataclasses.dataclass
     class _HygienePlan:
@@ -506,7 +530,6 @@ class GatewayTurnHygieneMixin:
         old rows and rewrite_transcript() would DELETE them; neither rotation nor in-place signals
         FAILURE and an unconditional rewrite would leave only the summary. Write-before-repoint:
         a repoint-then-failed-rewrite would point the live entry at an empty session."""
-        from gateway.run_turn import hygiene_no_commit_reason
         from agent.model_metadata import estimate_messages_tokens_rough
         _hyg_agent = attempt.agent
         # _compress_context rotates to a NEW session_id so the old transcript stays intact/searchable.

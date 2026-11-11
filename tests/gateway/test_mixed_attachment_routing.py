@@ -27,13 +27,12 @@ from gateway.platforms.event import MessageEvent, MessageType
 from gateway.run import (
     GatewayRunner,
     _build_media_placeholder,
-    _event_media_is_audio_file,
     _event_media_is_audio,
     _event_media_is_image,
     _event_media_is_stt_input,
     _event_media_is_video,
-    _event_media_is_voice,
 )
+from gateway.run_media_kinds import _event_media_is_audio_file, _event_media_is_voice
 from gateway.session import SessionSource
 
 

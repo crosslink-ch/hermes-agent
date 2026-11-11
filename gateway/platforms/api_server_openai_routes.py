@@ -1631,3 +1631,10 @@ class OpenAICompatRoutesMixin:
             from gateway.platforms.api_server_response_identity import identify_output
             return identify_output(items, response_id)
         return items
+
+    def public_http_routes(self) -> list[dict]:
+        from gateway.http_routes import loopback_route
+        return [
+            loopback_route("api-server-v1", path_prefix="/v1", port=self._port),
+            loopback_route("api-server-jobs", path_prefix="/api/jobs", port=self._port),
+        ]

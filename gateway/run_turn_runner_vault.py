@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import threading
 import time
 from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
 
 
 def _publish(turn, adapter, context, event, *, retry=False):
@@ -75,6 +78,7 @@ def vault_turn_scope(turn):
                         if not sent.success:
                             adapter._vault_unlock.cancel(record, outcome="failed")
                     except Exception:
+                        logger.debug("vault unlock prompt was not delivered", exc_info=True)
                         adapter._vault_unlock.cancel(record, outcome="failed")
             if not live() or not unlock.unlock_attempt_is_current(backend):
                 adapter._vault_unlock.cancel(record)
@@ -98,6 +102,7 @@ def vault_turn_scope(turn):
                 try:
                     resolved.result(timeout=3)
                 except Exception:
+                    logger.warning("vault unlock resolution was not published", exc_info=True)
                     resolved.cancel()
             adapter._vault_unlock.release(record)
 

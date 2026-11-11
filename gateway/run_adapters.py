@@ -1088,7 +1088,7 @@ class GatewayAdapterLifecycleMixin(GatewaySecondaryReconnectMixin):
         # Hydrate external secret sources off-loop ONCE: sync hydration would stall every heartbeat.
         await asyncio.to_thread(hydrate_profile_secret_sources, profile_home)
         # A platform that left core for a catalog plugin is installed before discovery below.
-        from gateway.run_startup import recover_left_core_in
+        from gateway.run_startup_left_core import recover_left_core_in
         await asyncio.to_thread(recover_left_core_in, profile_home, hydrate_secrets=False)
         with _profile_runtime_scope(profile_home, hydrate_secrets=False):
             profile_runtime_cfg = _load_gateway_config()
@@ -1864,6 +1864,7 @@ class GatewayAdapterLifecycleMixin(GatewaySecondaryReconnectMixin):
                     "Failed to collect HTTP routes from %s: %s",
                     platform.value,
                     exc,
+                    exc_info=True,
                 )
                 continue
             if adapter_routes:
@@ -1890,7 +1891,15 @@ class GatewayAdapterLifecycleMixin(GatewaySecondaryReconnectMixin):
             self._http_route_manifest_signature = signature
             logger.debug("Published HTTP route manifest to %s", path)
         except Exception as exc:
-            logger.warning("Failed to publish HTTP route manifest: %s", exc)
+            logger.warning("Failed to publish HTTP route manifest: %s", exc, exc_info=True)
+
+    def _start_http_route_manifest_watcher(self) -> None:
+        """Keep the manifest current for as long as the gateway runs."""
+        if not hasattr(self, "_background_tasks"):
+            self._background_tasks = set()
+        route_manifest_task = asyncio.create_task(self._http_route_manifest_watcher())
+        self._background_tasks.add(route_manifest_task)
+        route_manifest_task.add_done_callback(self._background_tasks.discard)
 
     async def _http_route_manifest_watcher(self) -> None:
         """Periodically republish routes in case an adapter changes live config."""

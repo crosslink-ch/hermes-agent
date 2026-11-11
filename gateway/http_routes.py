@@ -20,6 +20,7 @@ DEFAULT_ROUTES_PATH = "runtime/http-routes.json"
 
 
 def route_manifest_path() -> Path:
+    # health: allow HX002 -- set by the managed deployment chart; kept until the chart stops setting it
     raw = os.getenv("HERMES_HTTP_ROUTES_PATH", "").strip()
     if raw:
         return Path(raw).expanduser()

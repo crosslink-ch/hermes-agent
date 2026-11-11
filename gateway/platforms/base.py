@@ -18,10 +18,11 @@ import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
-from hermes_dir_acl import make_user_dir, unusable_dir_remedy
+from hermes_dir_acl import unusable_dir_remedy
 from gateway.platforms.base_log_safety import describe_proxy_error, env_proxy_for_redaction, safe_proxy_url_for_log, safe_url_for_log
 from gateway.platforms.base_image_sniff import _looks_like_image
 from gateway.platforms.base_media_flags import pad_inline_flags
+from gateway.platforms.base_media_cache_dir import _secure_media_cache_dir
 
 from utils import normalize_proxy_url, unlink_files_older_than
 from agent.i18n import t
@@ -439,6 +440,7 @@ if (_checkout_root := str(Path(__file__).resolve().parents[2])) not in sys.path:
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import fence_state_after, typing_metadata_for_turn
 from gateway.platforms.base_post_delivery import run_post_delivery_callback
+from gateway.platforms.base_invocation_hooks import InvocationHooksMixin
 from gateway.platforms.base_exec_approval import (
     approval_timeout_seconds, ea_action_labels, ea_default_reason_text, ea_header_text,
     ea_reason_label_text, ea_smart_deny_line_text, exec_approval_cmd_budget, format_approval_deadline_line,
@@ -566,43 +568,6 @@ def _cache_dir_accessors(kind: str, constant_name: str, new_subpath: str, old_na
 
 get_image_cache_dir, cleanup_image_cache = _cache_dir_accessors(
     "image", "IMAGE_CACHE_DIR", "cache/images", "image_cache")
-
-
-def _secure_media_cache_dir(cache_dir: Path) -> None:
-    """Create/reconcile a gateway media-cache dir owner-only (0700), except managed.
-
-    Inbound media (photos, voice notes, documents a user sent through a
-    messaging platform) is user content, not regenerable cache: the
-    umask-derived 0755 these dirs inherited made them readable by every other
-    local account whenever ``HERMES_HOME`` is traversable — the documented
-    ``HERMES_HOME_MODE=0701`` web-server hatch. The mode is passed to ``mkdir``
-    so it is set at creation, then reconciled by the house policy helper
-    ``hermes_cli.config._secure_dir`` (managed/NixOS installs keep their
-    group-share design: these lazily-created dirs are not covered by the
-    module's ``systemd.tmpfiles`` rules, so the mode is left to the
-    configured umask/setgid). Best-effort: never fails a media write.
-    """
-    try:
-        managed = False
-        try:
-            from hermes_cli.config import is_managed
-
-            managed = bool(is_managed())
-        except Exception:  # pragma: no cover - defensive
-            pass
-        if managed:
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            return
-        make_user_dir(cache_dir, parents=True, exist_ok=True, mode=0o700)
-        try:
-            from hermes_cli.config import _secure_dir
-
-            _secure_dir(cache_dir)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("media cache dir chmod skipped: %s", exc)
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.debug("media cache dir creation failed for %s: %s", cache_dir, exc)
-        cache_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _write_cache_file(cache_dir: Path, prefix: str, ext: str, data: bytes) -> str:
@@ -1803,7 +1768,7 @@ def _lazy_attr(obj: Any, name: str, factory: Callable[[], Any]) -> Any:
 _strip_media_directives = _strip_media_tag_directives
 
 
-class BasePlatformAdapter(ABC):
+class BasePlatformAdapter(InvocationHooksMixin, ABC):
     """Base class for platform adapters: connect/auth, receive, send, handle media."""
 
     # ``format_message`` renders ``` fences as real code blocks (tool-progress then sends a bare
@@ -4825,65 +4790,3 @@ class BasePlatformAdapter(ABC):
         if len(chunks) > 1:
             chunks = [f"{chunk} ({i + 1}/{len(chunks)})" for i, chunk in enumerate(chunks)]
         return chunks
-
-    def public_http_routes(self) -> list[dict]:
-        """Return public HTTP routes exposed by this adapter, if any.
-
-        Managed deployments can publish these routes to a local reverse proxy
-        sidecar. Most adapters do not run an HTTP listener, so the default is
-        an empty list.
-        """
-        return []
-
-    async def send_invocation_progress(
-        self,
-        chat_id: str,
-        event: dict[str, Any],
-        metadata: Optional[dict[str, Any]] = None,
-    ) -> SendResult:
-        """Send a structured in-progress event for a platform invocation.
-
-        This is for first-party platforms that can render tool progress outside
-        the chat message history. Most chat platforms only support messages and
-        edits, so the default is unsupported.
-        """
-        return SendResult(success=False, error="Not supported")
-
-    async def _dispatch_inline_with_processing_lifecycle(self, event: MessageEvent, session_key: str, cmd: str | None = None) -> None:
-        """Close the bypass event's invocation without releasing the active turn's guard."""
-        if not self._message_handler:
-            return
-        await self._run_processing_hook("on_processing_start", event)
-        try:
-            delivered = await self._dispatch_inline_reply(event, log_cmd=cmd)
-        except Exception:
-            await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
-            raise
-        await self._run_processing_hook(
-            "on_processing_complete", event,
-            ProcessingOutcome.SUCCESS if delivered else ProcessingOutcome.FAILURE,
-        )
-
-    async def _complete_absorbed_active_session_event(
-        self,
-        event: MessageEvent,
-        session_key: str,
-    ) -> None:
-        """Close an active-session event that will not run as its own turn."""
-        pending_event = self._pending_messages.get(session_key)
-        is_command = bool(event.get_command()) or event.message_type == MessageType.COMMAND
-        if pending_event is event and not is_command:
-            return
-        try:
-            await self._run_processing_hook("on_processing_start", event)
-            await self._run_processing_hook(
-                "on_processing_complete",
-                event,
-                ProcessingOutcome.SUCCESS,
-            )
-        except Exception:
-            logger.debug(
-                "[%s] Failed to complete absorbed active-session event",
-                self.name,
-                exc_info=True,
-            )

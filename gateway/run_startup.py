@@ -40,35 +40,6 @@ logger = logging.getLogger("gateway.run")
 _HANDOFF_SHARED_CHAT_TYPES = frozenset({"group", "channel", "forum", "room", "supergroup", "thread"})
 
 
-def recover_left_core_in(home: Path, *, hydrate_secrets: bool = True) -> list[str]:
-    """Install the catalog plugin of every feature that left core (Home Assistant) *home* uses, in
-    *home*'s runtime scope (its config, secrets and allow_lazy_installs); once per process per home.
-    Returns the installed plugin names. Blocking: call it off the event loop."""
-    from gateway.run import _profile_runtime_scope
-    from hermes_cli.left_core_migration import recover_at_startup
-    with _profile_runtime_scope(Path(home), hydrate_secrets=hydrate_secrets):
-        return recover_at_startup(gateway_start=True)
-
-
-def recover_left_core_at_gateway_start() -> bool:
-    """Left-core migration for the homes whose platform config the runner loads first: the launch
-    home and the default root (the multiplex primary; a named launcher is then served as a
-    secondary). Every secondary runs :func:`recover_left_core_in` before its plugins are discovered,
-    so a platform plugin it gets starts its adapter in the same gateway start. True when a plugin
-    that ships a gateway platform was installed: platform config loaded before it lacks the platform."""
-    from hermes_cli.left_core_migration import LEFT_CORE
-    from hermes_constants import get_default_hermes_root, get_hermes_home
-    # The launch home too runs in its own scope: a multiplexing config load already armed fail-closed
-    # secret reads, so an unscoped install read of its own .env raised. Its sources were hydrated at boot.
-    launch = Path(get_hermes_home())
-    installed = recover_left_core_in(launch, hydrate_secrets=False)
-    root = Path(get_default_hermes_root())
-    if root.resolve() != launch.resolve():
-        installed += recover_left_core_in(root)
-    return any(feature.platform and feature.plugin in installed for feature in LEFT_CORE)
-
-
-
 def _own_policy_envs(platform) -> Optional[tuple]:
     """``(dm_policy_env, group_policy_env, allow_all_env)`` for a platform that declares
     ``own_policy_env``, else None. The live entry wins; a bundled platform whose entry is absent
@@ -723,22 +694,8 @@ class GatewayStartupMixin:
             await self._startup_teardown_adapter(adapter, platform)
         stop_task = self._stop_task
         current_task = asyncio.current_task()
-        restart_task = getattr(self, "_restart_task", None)
-        if (
-            stop_task is None
-            and restart_task is not None
-            and restart_task is not current_task
-            and not restart_task.done()
-        ):
-            # Startup noticed the restart request and is about to run the
-            # shutdown path inline; the delayed restart helper would only race
-            # this same stop() call. Cancel it before it can create/await a
-            # second stop waiter.
-            restart_task.cancel()
-            try:
-                await restart_task
-            except asyncio.CancelledError:
-                pass
+        from gateway.run_startup_restart_race import cancel_pending_restart
+        await cancel_pending_restart(self, stop_task, current_task)
         if stop_task is not None and stop_task is not current_task:
             await stop_task
         elif not self._shutdown_event.is_set():
@@ -1797,11 +1754,7 @@ class GatewayStartupMixin:
         self._install_plugin_message_injector()
         # A boot with parked platforms is serving in a degraded state, not fully running.
         self._update_runtime_status(self._serving_state())
-        if not hasattr(self, "_background_tasks"):
-            self._background_tasks = set()
-        route_manifest_task = asyncio.create_task(self._http_route_manifest_watcher())
-        self._background_tasks.add(route_manifest_task)
-        route_manifest_task.add_done_callback(self._background_tasks.discard)
+        self._start_http_route_manifest_watcher()
         await self._start_finish_wiring(connected_count)
         self._start_spawn_background_watchers()
         from hermes_cli.observability.shared_metrics_startup import record_process_ready

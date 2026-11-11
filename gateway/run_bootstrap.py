@@ -821,7 +821,7 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
     try:
         _start_gateway_configure_logging(verbosity)
 
-        from gateway.run_startup import recover_left_core_at_gateway_start
+        from gateway.run_startup_left_core import recover_left_core_at_gateway_start
         if await asyncio.to_thread(recover_left_core_at_gateway_start) and config is None:
             resolved_config = _reload_config_keeping_multiplex_verdict(resolved_config)
 

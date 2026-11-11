@@ -29,7 +29,20 @@ class StructuredProgressMixin:
         try:
             return json.loads(json.dumps(value, ensure_ascii=False, default=str))
         except Exception:
+            # ``default=str`` runs arbitrary ``__str__``: the payload still goes out, as text.
+            logger.debug("structured progress value is not JSON-safe", exc_info=True)
             return str(value)
+
+    def bind_structured_progress(self) -> None:
+        """Use the status adapter for structured activity when it implements that rail."""
+        from gateway.platforms.base import BasePlatformAdapter
+        turn_ctx = self._ctx
+        turn_ctx._structured_progress_adapter = turn_ctx._status_adapter
+        turn_ctx._structured_progress_supported = (
+            turn_ctx._status_adapter is not None
+            and getattr(type(turn_ctx._status_adapter), "send_invocation_progress", BasePlatformAdapter.send_invocation_progress)
+            is not BasePlatformAdapter.send_invocation_progress
+        )
 
     def _schedule_structured_progress(self, event: dict[str, Any]) -> None:
         ctx = self._ctx
@@ -90,6 +103,7 @@ class StructuredProgressMixin:
 
             label = build_tool_preview(function_name, function_args) or function_name
         except Exception:
+            logger.debug("tool preview failed for %s", function_name, exc_info=True)
             label = function_name
         self._schedule_structured_progress(
             {
