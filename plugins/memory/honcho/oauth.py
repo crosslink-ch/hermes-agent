@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.redact import redact_sensitive_text, register_redaction_patterns
+from plugins.memory.honcho.client_errors import http_errors
 from utils import read_json_or_empty
 
 logger = logging.getLogger(__name__)
@@ -271,7 +272,7 @@ def _rotate_and_persist(
         return None
     try:
         rotated = _exchange_with_retry(cred, now=now)
-    except Exception as exc:
+    except (OAuthRefreshError, *http_errors()) as exc:
         if isinstance(exc, OAuthRefreshError) and exc.permanent:
             # The file lock is best-effort: a sibling may have rotated first, so adopt what it wrote instead.
             disk = _load_cred(path, host)

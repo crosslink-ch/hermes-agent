@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from agent.redact import redact_sensitive_text as _redact_sensitive_text
+from plugins.memory.honcho.client_errors import CONFIG_ERRORS, connect_errors
 
 logger = logging.getLogger("plugins.memory.honcho.session")
 
@@ -91,7 +92,7 @@ class SessionAuthMixin:
             # Fast path: runs before every SDK call, so skip path resolution when nothing is dead.
             host = getattr(self._config, "host", "") or ""
             return bool(oauth.any_dead_grants() and host and oauth.reauth_required(self._bound_config_path(), host))
-        except Exception:
+        except CONFIG_ERRORS:
             return False
 
     def _force_reauth(self, failed_access_token: str | None = None) -> bool:
@@ -131,7 +132,7 @@ class SessionAuthMixin:
         # Snapshot the bearer first: after a 401 the client's api_key may already hold a sibling's rotation.
         try:
             failed_token = getattr(getattr(self.honcho, "_http", None), "api_key", None)
-        except Exception:
+        except connect_errors():  # the client could not be built; operation() reports it
             failed_token = None
         try:
             result = operation()

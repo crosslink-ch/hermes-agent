@@ -15,6 +15,7 @@ import os
 import threading
 from typing import TYPE_CHECKING
 
+from plugins.memory.honcho.client_errors import CONFIG_ERRORS
 from plugins.plugin_utils import SingletonSlot
 
 if TYPE_CHECKING:
@@ -64,7 +65,7 @@ def _credential_fingerprint(config: HonchoClientConfig | None) -> str:
             from agent.secret_scope import get_secret
             basis = _fingerprint_basis(block, lambda: block.get("apiKey") or raw.get("apiKey") or get_secret("HONCHO_API_KEY") or "")
         return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16] if basis else ""
-    except Exception:
+    except CONFIG_ERRORS:
         return ""
 
 
@@ -126,10 +127,10 @@ def _config_yaml_timeout() -> float | None:
     try:
         from hermes_cli.config import load_config_readonly
         honcho_cfg = load_config_readonly().get("honcho", {})
-        if isinstance(honcho_cfg, dict):
-            return _resolve_optional_float(honcho_cfg.get("timeout"), honcho_cfg.get("request_timeout"))
-    except Exception:
-        pass
+    except CONFIG_ERRORS:
+        return None
+    if isinstance(honcho_cfg, dict):
+        return _resolve_optional_float(honcho_cfg.get("timeout"), honcho_cfg.get("request_timeout"))
     return None
 
 
@@ -153,7 +154,7 @@ def _honcho_json_timeout() -> float | None:
             timeout = _resolve_optional_float(*_HostLookup(host_block, raw).vals("timeout", "requestTimeout"))
         _honcho_json_timeout_memo[path_key] = (mtime_ns, timeout)
         return timeout
-    except Exception:
+    except CONFIG_ERRORS:
         return None
 
 

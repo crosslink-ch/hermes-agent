@@ -12,6 +12,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli.profiles import _get_default_hermes_home
 from plugins.memory.honcho.client import _first_parsed, _host_block, profile_host_key, resolve_active_host, resolve_config_path, HOST
 from plugins.memory.honcho.client import resolve_global_config_path, spawn_context_thread
+from plugins.memory.honcho.client_errors import CONFIG_ERRORS, PROFILE_ERRORS, connect_errors
 from plugins.memory.honcho.session_peers import sanitize_peer_id
 from hermes_cli.config import cfg_get
 from utils import read_json_or_empty
@@ -265,7 +266,7 @@ def _ensure_peer_exists(host_key: str | None = None) -> bool:
         if hcfg.peer_name:
             client.peer(hcfg.peer_name)
         return True
-    except Exception:
+    except connect_errors():
         return False
 
 
@@ -370,7 +371,7 @@ def _sync_profiles(verbose: bool) -> int:
     try:
         from hermes_cli.profiles import list_profiles
         profiles = list_profiles()
-    except Exception as e:
+    except PROFILE_ERRORS as e:
         return say(f"  Could not list profiles: {e}\n") or 0
     cfg = _read_config()
     if not cfg:
@@ -489,7 +490,7 @@ def _gateway_platforms() -> list[str] | None:
     try:
         from gateway.config import load_gateway_config
         return [p.value for p in load_gateway_config().get_connected_platforms()]
-    except Exception:
+    except (ImportError, *CONFIG_ERRORS):
         return None
 
 
@@ -657,7 +658,7 @@ def _device_login_available() -> bool:
     try:
         from plugins.memory.honcho.oauth_flow import resolve_endpoints, supports_device_login
         return supports_device_login(resolve_endpoints())
-    except Exception:
+    except connect_errors():
         return False
 
 
@@ -666,7 +667,7 @@ def _headless() -> tuple[bool, bool]:
     try:
         from hermes_cli.auth import _can_open_graphical_browser, _is_remote_session
         return _is_remote_session(), _can_open_graphical_browser()
-    except Exception:
+    except ImportError:
         return False, True
 
 
@@ -729,7 +730,7 @@ def _setup_device_login(cfg: dict, hermes_host: dict, write_path: Path, *, open_
         print("\n  Device code expired before approval.\n  Re-run 'hermes honcho setup' to get a new code.\n")
     except AccessDenied:
         print("\n  Sign-in was denied on the approval page.\n" + _RETRY_HINT)
-    except Exception as e:
+    except connect_errors() as e:  # DeviceFlowError is a RuntimeError
         print("\n  Too many device-code requests — wait a minute and re-run setup.\n"
               if isinstance(e, DeviceFlowError) and e.error == "http_429" else f"\n  Device sign-in failed: {e}\n" + _RETRY_HINT)
     else:
@@ -752,7 +753,7 @@ def _setup_browser_login(cfg: dict, hermes_host: dict, write_path: Path) -> bool
     print("\n  Starting browser sign-in…")
     try:
         cred = authorize_via_loopback(config_path=write_path, source="hermes-cli", apply_config=False, open_url=_open)
-    except Exception as e:
+    except connect_errors() as e:
         print(f"  OAuth sign-in failed: {e}\n" + _RETRY_HINT)
         return False
     _apply_grant_to_host(cfg, hermes_host, cred)
@@ -937,14 +938,14 @@ def _setup_wizard(args) -> None:
         hermes_config.setdefault("memory", {})["provider"] = "honcho"
         save_config(hermes_config)
         print("  Memory provider set to 'honcho' in config.yaml")
-    except Exception as e:
+    except (OSError, ValueError, TypeError, RuntimeError) as e:  # save_config refuses with RuntimeError
         print(f"  Could not auto-enable in config.yaml: {e}\n  Run: hermes config set memory.provider honcho")
 
     print("  Testing connection... ", end="", flush=True)
     try:
         hcfg, _client = _connect(_host_key(), reset=True)
         print("OK")
-    except Exception as e:
+    except connect_errors() as e:
         return print(f"FAILED\n  Error: {e}")
 
     print(f"""
@@ -983,7 +984,7 @@ def _active_profile_name() -> str:
     try:
         from hermes_cli.profiles import get_active_profile_name
         return get_active_profile_name()
-    except Exception:
+    except PROFILE_ERRORS:
         return "default"
 
 
@@ -992,7 +993,7 @@ def _all_profile_host_configs() -> list[tuple[str, str, dict]]:
     try:
         from hermes_cli.profiles import list_profiles
         profiles = list_profiles()
-    except Exception:
+    except PROFILE_ERRORS:
         return [(_active_profile_name(), _host_key(), {})]
     cfg = _read_config()
     # _host_block (not hosts.get) keeps legacy dot-form keys ("hermes.work") readable.
@@ -1020,7 +1021,7 @@ def cmd_status(args) -> None:
     not_found = f"  No Honcho config found at {active_path}\n  Run 'hermes honcho setup' to configure.\n"
     try:
         hcfg = HonchoClientConfig.from_global_config(host=_host_key())
-    except Exception as e:
+    except CONFIG_ERRORS as e:
         return print(not_found if not cfg else f"  Config error: {e}\n")
     if not cfg and not (hcfg.api_key or hcfg.base_url):  # file missing and no env-var fallback either
         return print(not_found)
@@ -1070,7 +1071,7 @@ def cmd_status(args) -> None:
     try:
         _show_peer_cards(hcfg, get_honcho_client(hcfg))
         print("OK")
-    except Exception as e:
+    except connect_errors() as e:
         print(f"FAILED ({e})\n")
 
 
@@ -1087,7 +1088,7 @@ def _show_peer_cards(hcfg, client) -> None:
         if ai_text:
             print(f"\n  AI peer representation:\n    {ai_text[:200] + ('...' if len(ai_text) > 200 else '')}")
         print("" if card or ai_text else "\n  No peer data yet (accumulates after first conversation)\n")
-    except Exception as e:
+    except connect_errors() as e:
         print(f"\n  Peer data unavailable: {e}\n")
 
 
@@ -1115,8 +1116,8 @@ def _state_db_path() -> Path:
         try:
             from hermes_cli.profiles import get_profile_dir
             return get_profile_dir(_profile_override) / "state.db"
-        except Exception:
-            pass
+        except PROFILE_ERRORS:
+            pass  # not a resolvable profile: the active home's state.db is used
     return get_hermes_home() / "state.db"
 
 
@@ -1156,7 +1157,7 @@ def _seen_gateway_accounts(db_path: Path) -> list[dict]:
     for source, user_id, display_name, origin_json, count, profiles in rows:
         try:
             origin = dict(json.loads(origin_json)) if origin_json else {}
-        except Exception:
+        except (ValueError, TypeError):
             origin = {}
         accounts.append({
             "platform": source or "?",
@@ -1212,7 +1213,7 @@ def _peers_map_client(workspace: str | None = None):
         if workspace and workspace != hcfg.workspace_id:
             hcfg = replace(hcfg, workspace_id=workspace)
         return get_honcho_client(hcfg), hcfg
-    except Exception:
+    except connect_errors():
         return None, None
 
 
@@ -1229,7 +1230,7 @@ def _api_workspace_peers(client) -> list[str] | None:
             if len(peers) >= _PEERS_MAP_FETCH_CAP or not page.has_next_page():
                 return peers[:_PEERS_MAP_FETCH_CAP]
             page = page.get_next_page()
-    except Exception:
+    except connect_errors():
         return None
 
 
@@ -1239,7 +1240,7 @@ def _api_workspaces(client) -> list[str] | None:
         return None
     try:
         return [str(w) for w in client.workspaces(size=50).items]
-    except Exception:
+    except connect_errors():
         return None
 
 
@@ -1251,7 +1252,7 @@ def _api_peer_detail(client, peer_id: str) -> str:
             text = str(card).strip()
             return text[:400] + ("…" if len(text) > 400 else "")
         return "(no peer card yet)"
-    except Exception as e:
+    except connect_errors() as e:
         return f"(peer detail unavailable: {e})"
 
 
@@ -1686,7 +1687,7 @@ def cmd_identity(args) -> None:
     try:
         hcfg, client = _connect(_host_key())
         mgr, session_key = _session_manager(hcfg, client)
-    except Exception as e:
+    except connect_errors() as e:
         return print(f"  Honcho connection failed: {e}\n")
 
     if getattr(args, "show", False):
@@ -1759,7 +1760,7 @@ def _offer(question: str, action, files: list[Path]) -> None:
         return
     try:
         action(*_session_manager(*_connect(None, reset=True)), files)
-    except Exception as e:
+    except connect_errors() as e:
         print(f"  Failed: {e}")
 
 
