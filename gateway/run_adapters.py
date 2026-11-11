@@ -1892,6 +1892,14 @@ class GatewayAdapterLifecycleMixin(GatewaySecondaryReconnectMixin):
         except Exception as exc:
             logger.warning("Failed to publish HTTP route manifest: %s", exc)
 
+    def _start_http_route_manifest_watcher(self) -> None:
+        """Keep the manifest current for as long as the gateway runs."""
+        if not hasattr(self, "_background_tasks"):
+            self._background_tasks = set()
+        route_manifest_task = asyncio.create_task(self._http_route_manifest_watcher())
+        self._background_tasks.add(route_manifest_task)
+        route_manifest_task.add_done_callback(self._background_tasks.discard)
+
     async def _http_route_manifest_watcher(self) -> None:
         """Periodically republish routes in case an adapter changes live config."""
         from gateway.run import _float_env

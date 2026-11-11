@@ -723,22 +723,8 @@ class GatewayStartupMixin:
             await self._startup_teardown_adapter(adapter, platform)
         stop_task = self._stop_task
         current_task = asyncio.current_task()
-        restart_task = getattr(self, "_restart_task", None)
-        if (
-            stop_task is None
-            and restart_task is not None
-            and restart_task is not current_task
-            and not restart_task.done()
-        ):
-            # Startup noticed the restart request and is about to run the
-            # shutdown path inline; the delayed restart helper would only race
-            # this same stop() call. Cancel it before it can create/await a
-            # second stop waiter.
-            restart_task.cancel()
-            try:
-                await restart_task
-            except asyncio.CancelledError:
-                pass
+        from gateway.run_startup_restart_race import cancel_pending_restart
+        await cancel_pending_restart(self, stop_task, current_task)
         if stop_task is not None and stop_task is not current_task:
             await stop_task
         elif not self._shutdown_event.is_set():
@@ -1797,11 +1783,7 @@ class GatewayStartupMixin:
         self._install_plugin_message_injector()
         # A boot with parked platforms is serving in a degraded state, not fully running.
         self._update_runtime_status(self._serving_state())
-        if not hasattr(self, "_background_tasks"):
-            self._background_tasks = set()
-        route_manifest_task = asyncio.create_task(self._http_route_manifest_watcher())
-        self._background_tasks.add(route_manifest_task)
-        route_manifest_task.add_done_callback(self._background_tasks.discard)
+        self._start_http_route_manifest_watcher()
         await self._start_finish_wiring(connected_count)
         self._start_spawn_background_watchers()
         from hermes_cli.observability.shared_metrics_startup import record_process_ready
