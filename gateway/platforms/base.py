@@ -439,6 +439,7 @@ if (_checkout_root := str(Path(__file__).resolve().parents[2])) not in sys.path:
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import fence_state_after, typing_metadata_for_turn
 from gateway.platforms.base_post_delivery import run_post_delivery_callback
+from gateway.platforms.base_invocation_hooks import InvocationHooksMixin
 from gateway.platforms.base_exec_approval import (
     approval_timeout_seconds, ea_action_labels, ea_default_reason_text, ea_header_text,
     ea_reason_label_text, ea_smart_deny_line_text, exec_approval_cmd_budget, format_approval_deadline_line,
@@ -1803,7 +1804,7 @@ def _lazy_attr(obj: Any, name: str, factory: Callable[[], Any]) -> Any:
 _strip_media_directives = _strip_media_tag_directives
 
 
-class BasePlatformAdapter(ABC):
+class BasePlatformAdapter(InvocationHooksMixin, ABC):
     """Base class for platform adapters: connect/auth, receive, send, handle media."""
 
     # ``format_message`` renders ``` fences as real code blocks (tool-progress then sends a bare
@@ -4825,65 +4826,3 @@ class BasePlatformAdapter(ABC):
         if len(chunks) > 1:
             chunks = [f"{chunk} ({i + 1}/{len(chunks)})" for i, chunk in enumerate(chunks)]
         return chunks
-
-    def public_http_routes(self) -> list[dict]:
-        """Return public HTTP routes exposed by this adapter, if any.
-
-        Managed deployments can publish these routes to a local reverse proxy
-        sidecar. Most adapters do not run an HTTP listener, so the default is
-        an empty list.
-        """
-        return []
-
-    async def send_invocation_progress(
-        self,
-        chat_id: str,
-        event: dict[str, Any],
-        metadata: Optional[dict[str, Any]] = None,
-    ) -> SendResult:
-        """Send a structured in-progress event for a platform invocation.
-
-        This is for first-party platforms that can render tool progress outside
-        the chat message history. Most chat platforms only support messages and
-        edits, so the default is unsupported.
-        """
-        return SendResult(success=False, error="Not supported")
-
-    async def _dispatch_inline_with_processing_lifecycle(self, event: MessageEvent, session_key: str, cmd: str | None = None) -> None:
-        """Close the bypass event's invocation without releasing the active turn's guard."""
-        if not self._message_handler:
-            return
-        await self._run_processing_hook("on_processing_start", event)
-        try:
-            delivered = await self._dispatch_inline_reply(event, log_cmd=cmd)
-        except Exception:
-            await self._run_processing_hook("on_processing_complete", event, ProcessingOutcome.FAILURE)
-            raise
-        await self._run_processing_hook(
-            "on_processing_complete", event,
-            ProcessingOutcome.SUCCESS if delivered else ProcessingOutcome.FAILURE,
-        )
-
-    async def _complete_absorbed_active_session_event(
-        self,
-        event: MessageEvent,
-        session_key: str,
-    ) -> None:
-        """Close an active-session event that will not run as its own turn."""
-        pending_event = self._pending_messages.get(session_key)
-        is_command = bool(event.get_command()) or event.message_type == MessageType.COMMAND
-        if pending_event is event and not is_command:
-            return
-        try:
-            await self._run_processing_hook("on_processing_start", event)
-            await self._run_processing_hook(
-                "on_processing_complete",
-                event,
-                ProcessingOutcome.SUCCESS,
-            )
-        except Exception:
-            logger.debug(
-                "[%s] Failed to complete absorbed active-session event",
-                self.name,
-                exc_info=True,
-            )
