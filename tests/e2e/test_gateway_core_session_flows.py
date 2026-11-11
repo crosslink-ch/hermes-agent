@@ -22,6 +22,7 @@ from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.run import GatewayRunner
 from gateway.session import SessionSource
+from tests.waiting import async_wait_until
 
 pytestmark = pytest.mark.asyncio
 
@@ -68,11 +69,9 @@ async def wait_for_adapter_idle(adapter: RecordingAdapter, *, timeout: float = 5
     deadlocks like the TheChat branch-parent lookup hang.
     """
 
-    async def _wait() -> None:
-        while adapter._background_tasks or adapter._active_sessions:
-            await asyncio.sleep(0.01)
-
-    await asyncio.wait_for(_wait(), timeout=timeout)
+    await async_wait_until(
+        lambda: not (adapter._background_tasks or adapter._active_sessions),
+        timeout=timeout, what="adapter background processing to drain")
 
 
 def write_minimal_gateway_config() -> None:

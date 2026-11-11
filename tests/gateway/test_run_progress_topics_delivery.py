@@ -4,7 +4,6 @@ rollover, TheChat structured activity and interim commentary."""
 import importlib
 import pytest
 import sys
-import time
 import types
 
 from gateway.config import Platform
@@ -13,6 +12,7 @@ from gateway.platforms.base import SendResult
 from gateway.platforms.event import MessageEvent
 from gateway.platforms.event import MessageType
 from gateway.session import SessionSource
+from tests.waiting import wait_until
 from tests.gateway.test_run_progress_topics import (
     CommentaryAgent,
     FakeAgent,
@@ -80,14 +80,15 @@ class RetryableEditProgressAgent:
     def run_conversation(self, message, conversation_history=None, task_id=None, **kwargs):
         callback = self.tool_progress_callback
         assert callback is not None
+        adapter = _ACTIVE_ADAPTER["adapter"]
         callback("tool.started", "terminal", "first command", {})
-        time.sleep(0.5)
+        wait_until(lambda: adapter.sent, what="the first progress bubble")
+        # The edit throttle only fires on a later line, so two lines are owed before it is tried.
         callback("tool.started", "terminal", "second command", {})
-        time.sleep(1.7)
         callback("tool.started", "terminal", "third command", {})
-        time.sleep(0.5)
+        wait_until(lambda: adapter.edit_outcomes, what="the transient edit failure")
         callback("tool.started", "terminal", "fourth command", {})
-        time.sleep(0.6)
+        wait_until(lambda: any(adapter.edit_outcomes[1:]), what="the retried progress edit")
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
@@ -104,7 +105,8 @@ class StatusAndToolProgressAgent:
         assert self.tool_progress_callback is not None
         self.status_callback("lifecycle", "Compacting context for test")
         self.tool_progress_callback("tool.started", "terminal", "pwd", {})
-        time.sleep(0.4)
+        adapter = _ACTIVE_ADAPTER["adapter"]
+        wait_until(lambda: len(adapter.sent) >= 2, what="the status and tool-progress sends")
         return {
             "final_response": "done",
             "messages": [],
