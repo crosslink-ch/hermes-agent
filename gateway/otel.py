@@ -6,14 +6,19 @@ emit spans when opentelemetry-api is present in the runtime.
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping
 
+logger = logging.getLogger(__name__)
+
 try:  # pragma: no cover - exercised implicitly when opentelemetry is installed
     from opentelemetry import trace
     from opentelemetry.trace import Status, StatusCode
-except Exception:  # pragma: no cover - default lightweight install
+except Exception as _exc:  # pragma: no cover - default lightweight install
+    if not isinstance(_exc, ImportError):  # installed but unusable: say so, run without tracing
+        logger.warning("OpenTelemetry API failed to import; tracing disabled", exc_info=True)
     trace = None  # type: ignore[assignment]
     Status = None  # type: ignore[assignment]
     StatusCode = None  # type: ignore[assignment]
@@ -23,7 +28,9 @@ try:  # pragma: no cover - depends on optional SDK installation
     from opentelemetry.sdk.resources import Resource
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
-except Exception:  # pragma: no cover - default lightweight install
+except Exception as _exc:  # pragma: no cover - default lightweight install
+    if not isinstance(_exc, ImportError):
+        logger.warning("OpenTelemetry SDK failed to import; span export disabled", exc_info=True)
     OTLPSpanExporter = None  # type: ignore[assignment]
     Resource = None  # type: ignore[assignment]
     TracerProvider = None  # type: ignore[assignment]

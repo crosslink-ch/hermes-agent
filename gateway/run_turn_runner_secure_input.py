@@ -1,11 +1,14 @@
 """v3 prompt callbacks owned by one admitted TheChat executor turn."""
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from contextlib import contextmanager
 
 from gateway.run_turn_runner_vault import _publish
+
+logger = logging.getLogger(__name__)
 
 
 class TurnSecureInput:
@@ -68,6 +71,7 @@ class TurnSecureInput:
                         if not future.result().success:
                             broker.cancel(record, outcome="failed")
                     except Exception:
+                        logger.debug("secure input prompt was not delivered", exc_info=True)
                         broker.cancel(record, outcome="failed")
             if not self.live(kind):
                 broker.cancel(record)
@@ -94,6 +98,7 @@ class TurnSecureInput:
                 if resolved is not None:
                     resolution_accepted = resolved.result(timeout=3).success is True
             except Exception:
+                logger.warning("secure input resolution was not published", exc_info=True)
                 if resolved is not None:
                     resolved.cancel()
             finally:
@@ -124,7 +129,9 @@ class TurnSecureInput:
             if not answer or not self.live("skill.secret"):
                 return {"success": False, "skipped": True}
             return {**save_env_value_secure(name, answer["value"], preserve_exact=True), "skipped": False}
-        except Exception:
+        # health: allow BLE001 -- secret-capture path: the error text is not proven free of the value being stored, so only its type is logged
+        except Exception as exc:
+            logger.warning("skill secret %s was not stored (%s)", name, type(exc).__name__)
             return {"success": False, "skipped": True}
         finally:
             if answer:

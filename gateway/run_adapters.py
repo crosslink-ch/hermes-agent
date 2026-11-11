@@ -1864,6 +1864,7 @@ class GatewayAdapterLifecycleMixin(GatewaySecondaryReconnectMixin):
                     "Failed to collect HTTP routes from %s: %s",
                     platform.value,
                     exc,
+                    exc_info=True,
                 )
                 continue
             if adapter_routes:
@@ -1890,7 +1891,7 @@ class GatewayAdapterLifecycleMixin(GatewaySecondaryReconnectMixin):
             self._http_route_manifest_signature = signature
             logger.debug("Published HTTP route manifest to %s", path)
         except Exception as exc:
-            logger.warning("Failed to publish HTTP route manifest: %s", exc)
+            logger.warning("Failed to publish HTTP route manifest: %s", exc, exc_info=True)
 
     def _start_http_route_manifest_watcher(self) -> None:
         """Keep the manifest current for as long as the gateway runs."""

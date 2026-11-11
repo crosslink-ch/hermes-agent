@@ -29,6 +29,8 @@ class StructuredProgressMixin:
         try:
             return json.loads(json.dumps(value, ensure_ascii=False, default=str))
         except Exception:
+            # ``default=str`` runs arbitrary ``__str__``: the payload still goes out, as text.
+            logger.debug("structured progress value is not JSON-safe", exc_info=True)
             return str(value)
 
     def bind_structured_progress(self) -> None:
@@ -101,6 +103,7 @@ class StructuredProgressMixin:
 
             label = build_tool_preview(function_name, function_args) or function_name
         except Exception:
+            logger.debug("tool preview failed for %s", function_name, exc_info=True)
             label = function_name
         self._schedule_structured_progress(
             {
