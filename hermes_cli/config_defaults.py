@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- fork delta is one 4-line DEFAULT_CONFIG entry (platforms.thechat.secure_input); defaults must live in this registry, and the cap equals upstream's exact size
 """Default configuration data for Hermes Agent: DEFAULT_CONFIG and OPTIONAL_ENV_VARS.
 
 Pure-data leaf module — must not import from hermes_cli.config. Comments are the user-facing

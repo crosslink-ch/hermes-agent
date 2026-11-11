@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- fork delta is 14 lines woven into upstream functions (N-1 updater stale-sibling drop, CONTAINER_IMAGE import, preserve_exact .env writes); moving upstream code out to offset it would make every later upstream merge conflict here
 """Configuration management for Hermes Agent: config.yaml / .env loading, saving,
 validation, migration, and the ``hermes config`` command."""
 
