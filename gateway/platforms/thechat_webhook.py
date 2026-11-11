@@ -153,6 +153,11 @@ class TheChatWebhookMixin:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                # Any ledger failure is retried: the interaction itself is already resolved.
+                logger.debug(
+                    "TheChat: direct interaction ledger completion attempt failed",
+                    exc_info=True,
+                )
                 completed = False
             if completed:
                 return
@@ -277,6 +282,10 @@ class TheChatWebhookMixin:
                 lease_owner=self._webhook_lease_owner,
             )
         except Exception:
+            logger.debug(
+                "TheChat: direct interaction ledger completion failed; retrying off the response path",
+                exc_info=True,
+            )
             completed = False
         if not completed:
             # Resolution is already final. A transient ledger failure must not
@@ -425,7 +434,7 @@ class TheChatWebhookMixin:
                     return web.json_response({"ok": True, "duplicate": duplicate})
                 except SecureInputError as exc:
                     return web.json_response({"error": "Invalid or stale secure input interaction"}, status=exc.status)
-                except Exception:
+                except Exception:  # health: allow BLE001 -- secret-bearing lane: resolve() runs the turn's authority callback, so no type list is knowable; it fails closed with a fixed answer and logs neither text nor traceback
                     return web.json_response({"error": "Secure input interaction failed"}, status=409)
             if isinstance(payload, dict) and payload.get("type") == "thechat.hermes_platform.vault_unlock":
                 try:
@@ -433,7 +442,7 @@ class TheChatWebhookMixin:
                     return web.json_response({"ok": True, "duplicate": duplicate})
                 except VaultUnlockError as exc:
                     return web.json_response({"error": "Invalid or stale vault unlock interaction"}, status=exc.status)
-                except Exception:
+                except Exception:  # health: allow BLE001 -- secret-bearing lane: any other broker failure fails closed with a fixed answer and logs neither text nor traceback
                     return web.json_response({"error": "Vault unlock interaction failed"}, status=409)
             if isinstance(payload, dict) and payload.get("type") == "thechat.bot_request.answered":
                 # Answers are durable in TheChat; a lost reply is simply pushed again, and the
@@ -452,6 +461,7 @@ class TheChatWebhookMixin:
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except Exception:
+            logger.exception("TheChat: signed webhook payload could not be handled")
             return web.json_response({"error": "Invalid JSON"}, status=400)
 
         try:

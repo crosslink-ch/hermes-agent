@@ -268,7 +268,7 @@ class TheChatAttachmentsMixin:
                     raise _AttachmentError("Attachment content failed validation")
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # health: allow BLE001 -- transport/validator errors of any type may embed a presigned URL; only the class name is logged, and an escape would reach the event failure report that echoes the text to TheChat
                 logger.warning(
                     "TheChat: inbound attachment was rejected (%s)",
                     exc.__class__.__name__,
@@ -635,7 +635,7 @@ class TheChatAttachmentsMixin:
             )
         path = Path(safe_path)
         try:
-            declared_size = path.stat().st_size
+            declared_size = (await asyncio.to_thread(path.stat)).st_size
         except OSError:
             return SendResult(
                 success=False,
@@ -703,7 +703,7 @@ class TheChatAttachmentsMixin:
         except asyncio.CancelledError:
             await self._discard_attachment(attachment_id)
             raise
-        except Exception as exc:
+        except Exception as exc:  # health: allow BLE001 -- transport errors of any type may embed a presigned URL (credential in the query); the result and log carry only the class name, never the text or traceback
             if not (
                 isinstance(exc, _AttachmentError)
                 and exc.preserve_attachment
@@ -944,9 +944,12 @@ class TheChatAttachmentsMixin:
                     status,
                 )
         except Exception as exc:
+            # Best-effort cleanup that runs inside other handlers and must not mask their
+            # error. The request goes to TheChat's API, not to a presigned URL.
             logger.debug(
                 "TheChat: attachment cleanup failed (%s)",
                 exc.__class__.__name__,
+                exc_info=True,
             )
 
     @staticmethod

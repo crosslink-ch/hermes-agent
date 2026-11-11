@@ -155,6 +155,8 @@ class TheChatAdapter(
             self._bot_requests.capture_capabilities(health)
             self._capture_secure_input_capability(health)
         except Exception:
+            # Whatever the probe raised, a failed connect must not leave a half-open client.
+            logger.debug("TheChat: outbound health probe failed", exc_info=True)
             await self._client.aclose()
             self._client = None
             return False
@@ -194,7 +196,7 @@ class TheChatAdapter(
                 await self._register_webhook()
             await self._register_commands()
         except Exception as exc:
-            logger.error("TheChat: connection setup failed: %s", exc)
+            logger.error("TheChat: connection setup failed: %s", exc, exc_info=True)
             await self.disconnect()
             return False
 
@@ -332,8 +334,12 @@ class TheChatAdapter(
                     message_id=str(data.get("messageId") or ""),
                     raw_response=data,
                 )
-            except Exception as exc:
+            except httpx.HTTPError as exc:
                 logger.error("TheChat: failed to send response: %s", exc)
+                return SendResult(success=False, error=str(exc), retryable=True)
+            except Exception as exc:
+                # Not a transport failure: unexpected, so keep the traceback.
+                logger.error("TheChat: failed to send response: %s", exc, exc_info=True)
                 return SendResult(success=False, error=str(exc), retryable=True)
 
     def _resolve_send_target(
@@ -799,8 +805,11 @@ class TheChatAdapter(
                     await self._handle_platform_event(item)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except httpx.HTTPError as exc:
+                # Routine while TheChat is unreachable: one line per poll, no traceback.
                 logger.warning("TheChat: polling failed: %s", exc)
+            except Exception as exc:
+                logger.warning("TheChat: polling failed: %s", exc, exc_info=True)
             await asyncio.sleep(self.poll_interval)
 
     async def _handle_platform_event_safely(self, item: dict[str, Any]) -> bool:
