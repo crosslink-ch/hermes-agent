@@ -238,13 +238,13 @@ async def test_inbound_file_uses_configured_transfer_deadline(
     adapter = TheChatAdapter(PlatformConfig.from_dict({
         "enabled": True,
         "base_url": "https://thechat.example",
-        "attachment_transfer_timeout_seconds": 0.15,
+        "attachment_transfer_timeout_seconds": 5.0,
     }))
     monkeypatch.setattr(thechat_attachments, "_ATTACHMENT_TRANSFER_TIMEOUT_SECONDS", 0.01)
 
     async def slow_content(request: httpx.Request) -> httpx.Response:
-        assert request.extensions["timeout"]["read"] == 0.15
-        await asyncio.sleep(0.03)
+        assert request.extensions["timeout"]["read"] == 5.0
+        await asyncio.sleep(0.03)  # health: allow HX013 -- the delay is the behaviour under test: the transfer must outlast the patched 10 ms default deadline to show the configured one governs
         return httpx.Response(200, content=body, request=request)
 
     adapter._client = httpx.AsyncClient(
@@ -405,7 +405,7 @@ async def test_inbound_batch_uses_configured_total_deadline(
     adapter = TheChatAdapter(PlatformConfig.from_dict({
         "enabled": True,
         "base_url": "https://thechat.example",
-        "attachment_batch_timeout_seconds": 0.15,
+        "attachment_batch_timeout_seconds": 5.0,
     }))
     monkeypatch.setattr(thechat_attachments, "_ATTACHMENT_INBOUND_TOTAL_TIMEOUT_SECONDS", 0.01)
     descriptors = [
@@ -420,7 +420,7 @@ async def test_inbound_batch_uses_configured_total_deadline(
     ]
 
     async def slow_download(_descriptor: dict[str, Any]) -> bytes:
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0.03)  # health: allow HX013 -- the delay is the behaviour under test: two downloads must outlast the patched 10 ms default batch deadline to show the configured one governs
         return b"x"
 
     adapter._download_attachment_bytes = cast(Any, slow_download)

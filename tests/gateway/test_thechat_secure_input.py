@@ -123,28 +123,34 @@ def test_context_and_wire_mismatch_never_consumes_waiter(override):
     assert record.take_response() == {"code": "retry"}
 
 
+def _revoke_authority(record):
+    record.authorized = lambda: False
+
+
+# How a handoff ends before its submit arrives.
+_HANDOFF_ENDINGS = {
+    "cancel": lambda broker, record: broker.resolve(relay(record, action="cancel")),
+    "expire": lambda broker, record: setattr(record, "deadline", 0),
+    "revoke": lambda broker, record: _revoke_authority(record),
+    "disconnect": lambda broker, record: broker.close(),
+}
+
+
 def test_cancellation_expiry_revocation_and_shutdown_clear_handoffs():
     from gateway.platforms.thechat_secure_input import SecureInputError
-    for lifecycle in ("cancel", "expire", "revoke", "disconnect", "finalize"):
+    for end in _HANDOFF_ENDINGS.values():
         broker, record = make_record()
         envelope = relay(record, {"code": "synthetic"})
-        if lifecycle == "cancel":
-            broker.resolve(relay(record, action="cancel"))
-        elif lifecycle == "expire":
-            record.deadline = 0
-        elif lifecycle == "revoke":
-            record.authorized = lambda: False
-        elif lifecycle == "disconnect":
-            broker.close()
-        else:
-            broker.resolve(envelope)
-            broker.cancel_invocation(record.context["invocation_id"])
-            assert not record.take_response()
-            continue
+        end(broker, record)
         with pytest.raises(SecureInputError):
             broker.resolve(envelope)
         assert record.event.is_set() and record._private_key is None
         assert not record.take_response()
+    # Finalize: a submitted answer nobody consumed does not outlive its invocation.
+    broker, record = make_record()
+    broker.resolve(relay(record, {"code": "synthetic"}))
+    broker.cancel_invocation(record.context["invocation_id"])
+    assert not record.take_response()
 
 
 @pytest.mark.parametrize("values,accepted", [({"code": "é" * 2048}, True), ({"code": "é" * 2049}, False),
