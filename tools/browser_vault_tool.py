@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import secrets
 import logging
+import subprocess
 from typing import Any, Dict, Optional
 
 from tools.browser_vault_context import plugin_errors_as_refusal, saved_origins, snapshot_refusal, write_backend_code
@@ -267,6 +268,14 @@ def _bound_page_origin(task_id: str, meta: Any, probe_kind: str) -> str | dict[s
 # Handlers
 # ---------------------------------------------------------------------------
 
+def _ask_surface(prompt, *args) -> tuple[bool, Any]:
+    """``(answered, value)`` from a surface's secure prompt; a prompt that raised is ``(False, None)``."""
+    try:
+        return True, prompt(*args)
+    except Exception:  # health: allow BLE001 -- surface-supplied prompt whose error may quote the typed secret
+        return False, None
+
+
 def _external_vault_denial(*, handle: str = "", backend: str = "") -> Optional[str]:
     from agent.vault_backends.unlock import external_access_allowed
     name = backend or ("bitwarden" if handle.startswith("bw:") else "onepassword" if handle.startswith("op:") else "")
@@ -346,17 +355,19 @@ def browser_vault_unlock(backend_name: str) -> str:
     prompt = get_unlock_prompt_callback()
     # Fence BEFORE the human-length prompt, not merely before the manager child starts.
     with unlock_attempt(backend.name):
-        master = ""
+        # A CLI (or prompt transport) exception may contain the master or stderr.
+        failed = json.dumps({"success": False, "error_type": "unlock_failed",
+                             "error": "Password manager unlock failed. Retry from the secure prompt."})
+        answered, master = _ask_surface(prompt, backend.name, backend.display_name) if prompt else (True, "")
         try:
-            master = prompt(backend.name, backend.display_name) if prompt else ""
+            if not answered:
+                return failed
             if not master:
                 return json.dumps({"success": False, "error_type": "unlock_cancelled",
                                    "error": f"The user declined to unlock {backend.display_name}."})
             backend.unlock(master)  # type: ignore[attr-defined]
-        except Exception:
-            # A CLI (or prompt transport) exception may contain the master or stderr.
-            return json.dumps({"success": False, "error_type": "unlock_failed",
-                               "error": "Password manager unlock failed. Retry from the secure prompt."})
+        except (RuntimeError, OSError, ValueError, TypeError):  # the backend's fixed-text failure, or CLI path resolution
+            return failed
         finally:
             del master
     return json.dumps({"success": True, "backend": backend.name})
@@ -366,7 +377,7 @@ def browser_vault_save_login(label: str = "", task_id: Optional[str] = None) -> 
     """Ask the user (masked prompt on their surface) for the login of the CURRENT page, store it in the local
     vault bound to that origin, and fill the password at once. The values never enter the conversation."""
     from agent.vault_backends.unlock import can_prompt_here, get_save_login_prompt_callback, external_access_allowed
-    from agent.vault_store import get_vault_store
+    from agent.vault_store import VaultError, get_vault_store
 
     denied = {"success": False, "error_type": "save_not_authorized",
               "error": "This invocation is not authorized to save a login."}
@@ -386,9 +397,8 @@ def browser_vault_save_login(label: str = "", task_id: Optional[str] = None) -> 
                                      f"`hermes vault add` or use Desktop → Settings → Passwords & Logins for {origin}.")})
     host = origin.split("://", 1)[-1]
     site = label.strip() or host
-    try:
-        answer = prompt(origin, host)
-    except Exception:
+    answered, answer = _ask_surface(prompt, origin, host)
+    if not answered:
         return json.dumps({"success": False, "error_type": "prompt_failed", "error": "Secure login prompt failed."})
     if not external_access_allowed():
         if isinstance(answer, dict):
@@ -405,7 +415,7 @@ def browser_vault_save_login(label: str = "", task_id: Optional[str] = None) -> 
             return json.dumps(denied)
         meta = store.add_item("login", site, {"identifier_type": id_type, "identifier": identifier,
                                                         "password": str(answer["password"])}, origin=origin)
-    except Exception:
+    except (VaultError, OSError, ValueError):  # validation/key/corruption, file I/O, a malformed Fernet key
         return json.dumps({"success": False, "error_type": "save_failed", "error": "Login could not be saved securely."})
     finally:
         answer.clear()
@@ -479,7 +489,7 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
         try:
             fills = build_otp_fills(otp_controls, code)
             result = _eval_js_secret(effective_task_id, build_fill_js(fills, expected_origin=origin, nonce=nonce))
-        except Exception:
+        except (RuntimeError, OSError, ValueError, TypeError, subprocess.SubprocessError):  # lease/screen probes, CDP
             return json.dumps({"success": False, "error": "Secure code fill failed."})
         finally:
             del code
@@ -503,12 +513,15 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
         return json.dumps({"success": False, "error_type": "prompt_unavailable",
                            "error": (f"{site} asks for a one-time code and this session cannot ask the user (headless/cron/API). "
                                      "Save an authenticator key for this login so codes can be generated automatically.")})
-    try:
+    def ask_code() -> str:
         code = prompt(site, "") or ""
         from agent.vault_backends.unlock import code_values_are_exact
         if not code_values_are_exact():
             code = code.strip().replace(" ", "").replace("-", "")
-    except Exception:
+        return code
+
+    answered, code = _ask_surface(ask_code)
+    if not answered:
         return json.dumps({"success": False, "error_type": "prompt_failed",
                            "error": "Secure code prompt failed. Retry from the secure prompt."})
     if not code:
