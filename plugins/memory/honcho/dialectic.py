@@ -6,12 +6,24 @@ import logging
 import re
 import threading
 import time
+from typing import Callable
 
 from plugins.memory.honcho.client import spawn_context_thread
+from plugins.memory.honcho.client_errors import is_unexpected
 
 logger = logging.getLogger("plugins.memory.honcho")
 
 _STRUCTURE_RE = re.compile(r"^(?:[*-] |\s*\d+\. )", re.MULTILINE)  # bullet / ordered-list line
+
+
+def rewrite_query(rewriter: Callable[[str], str], query: str) -> str:
+    """The rewriter's retrieval query for ``query``, or "" when it fails."""
+    try:
+        return rewriter(query).strip()
+    # health: allow BLE001 -- the rewriter is injected (any callable), and its error can quote the user's message: no traceback
+    except Exception as exc:
+        logger.debug("Honcho query rewriter failed: %s", exc)
+        return ""
 
 
 class DialecticMixin:
@@ -71,8 +83,8 @@ class DialecticMixin:
         def _run() -> None:
             try:
                 r = self._run_dialectic_depth(query, use_query_rewrite=use_query_rewrite)
-            except Exception as exc:
-                logger.debug("Honcho %s failed: %s", log_label, exc)
+            except Exception as exc:  # thread boundary: any failed cycle widens the backoff
+                logger.debug("Honcho %s failed: %s", log_label, exc, exc_info=is_unexpected(exc))
                 self._note_dialectic_failure(exc)
                 return
             if r and r.strip():
@@ -160,10 +172,7 @@ class DialecticMixin:
         results: list[str] = []
         rewritten_query = ""
         if use_query_rewrite and self._query_rewrite_enabled and self._query_rewriter:
-            try:
-                rewritten_query = self._query_rewriter(query).strip()
-            except Exception as exc:
-                logger.debug("Honcho query rewriter failed: %s", exc)
+            rewritten_query = rewrite_query(self._query_rewriter, query)
 
         depth = self._dialectic_depth
         for i in range(depth):

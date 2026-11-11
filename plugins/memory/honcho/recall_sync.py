@@ -8,6 +8,8 @@ import threading
 import time
 
 from plugins.memory.honcho.client import spawn_context_thread
+from plugins.memory.honcho.client_errors import is_unexpected
+from plugins.memory.honcho.dialectic import rewrite_query
 
 logger = logging.getLogger("plugins.memory.honcho")
 
@@ -68,12 +70,7 @@ def prefetch_sync(provider, query: str) -> str:
                     return
                 dialectic = ""
                 if dialectic_due:
-                    rewritten = ""
-                    if rewriter:
-                        try:
-                            rewritten = rewriter(query).strip()
-                        except Exception as exc:
-                            logger.debug("Honcho query rewriter failed: %s", exc)
+                    rewritten = rewrite_query(rewriter, query) if rewriter else ""
                     results = []
                     for i, level in enumerate(levels):
                         if expired():
@@ -89,8 +86,8 @@ def prefetch_sync(provider, query: str) -> str:
                             results.append(result)
                     dialectic = results[-1] if results else ""
                 holder["result"] = (base, dialectic)
-            except Exception as exc:
-                logger.debug("Honcho synchronous recall failed: %s", exc)
+            except Exception as exc:  # thread boundary
+                logger.debug("Honcho synchronous recall failed: %s", exc, exc_info=is_unexpected(exc))
 
         worker = spawn_context_thread(retrieve, name="honcho-recall-sync", owner=provider)
         provider._recall_sync_thread = worker

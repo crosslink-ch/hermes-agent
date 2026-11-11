@@ -12,6 +12,7 @@ from typing import Any, TYPE_CHECKING
 
 from plugins.memory.honcho.client import spawn_context_thread
 from plugins.memory.honcho.client import get_honcho_client
+from plugins.memory.honcho.client_errors import is_unexpected
 from plugins.memory.honcho.session_auth import HonchoAuthError, SessionAuthMixin
 from plugins.memory.honcho.session_context import SessionContextMixin
 from plugins.memory.honcho.session_migration import SessionMigrationMixin
@@ -215,8 +216,9 @@ class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMi
                           "Honcho get_peer_configuration failed (using local config): %s")
         except HonchoAuthError:
             return None
-        except Exception as e:
-            logger.warning("Honcho session '%s' add_peers failed (non-fatal): %s", session_id, e)
+        except Exception as e:  # non-fatal by contract: the session works without the observation sync
+            logger.warning("Honcho session '%s' add_peers failed (non-fatal): %s", session_id, e,
+                           exc_info=is_unexpected(e))
         return synced
 
     def _load_existing_messages(self, session_id: str) -> list:
@@ -238,8 +240,9 @@ class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMi
             return existing_messages
         except HonchoAuthError:
             logger.warning("Honcho session '%s' loaded without server context: auth failed", session_id)
-        except Exception as e:
-            logger.warning("Honcho session '%s' loaded (failed to fetch context: %s)", session_id, e)
+        except Exception as e:  # history is optional: the session still opens without it
+            logger.warning("Honcho session '%s' loaded (failed to fetch context: %s)", session_id, e,
+                           exc_info=is_unexpected(e))
         return []
 
     def _get_or_create_honcho_session(self, session_id: str, user_peer: Any, assistant_peer: Any) -> tuple[Any, list, dict[str, bool] | None]:
@@ -382,9 +385,9 @@ class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMi
             observe_me, observe_others = self._join_observation_flags(honcho_session_id)
             config = SessionPeerConfig(observe_me=observe_me, observe_others=observe_others)
             honcho_session.add_peers([(peer, config)])
-        except Exception as e:
+        except Exception as e:  # the join is optional, the write is not
             # The write still lands under the right peer. Only the membership (observe config) is missing.
-            logger.debug("Honcho author peer join failed for %s: %s", author_peer_id, e)
+            logger.debug("Honcho author peer join failed for %s: %s", author_peer_id, e, exc_info=is_unexpected(e))
             return peer
         with self._cache_lock:
             self._joined_author_peers.setdefault(honcho_session_id, set()).add(author_peer_id)
@@ -453,8 +456,8 @@ class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMi
         try:
             logger.debug("Synced %d messages to Honcho for %s", self._authed_call("message sync", _sync_messages), session.key)
             ok = True
-        except Exception as e:
-            logger.error("Failed to sync messages to Honcho: %s", e)
+        except Exception as e:  # the batch must be marked unsynced whatever failed, so flush_all() retries it
+            logger.error("Failed to sync messages to Honcho: %s", e, exc_info=is_unexpected(e))
             ok = False
         for msg in new_messages:
             msg["_synced"] = ok
@@ -470,8 +473,8 @@ class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMi
             if self._flush_session(session):
                 return True
             logger.log(level, msg)
-        except Exception as e:
-            logger.log(level, msg + ": %s", e)
+        except Exception as e:  # call errors end in _flush_session_locked; what arrives here is a bug
+            logger.log(level, msg + ": %s", e, exc_info=is_unexpected(e))
         return False
 
     def _async_writer_loop(self) -> None:
@@ -490,8 +493,8 @@ class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMi
                     self._try_flush(item, logging.ERROR, "Honcho async write retry failed, dropping batch")
             except queue.Empty:
                 continue
-            except Exception as e:
-                logger.error("Honcho async writer error: %s", e)
+            except Exception as e:  # thread boundary: the writer survives a bug in one batch
+                logger.error("Honcho async writer error: %s", e, exc_info=is_unexpected(e))
 
     def _reclaim_key_locked(self, session: HonchoSession) -> HonchoSession | None:
         """Put a session with unsynced messages back where flush_all() looks. Returns the newer object that
@@ -559,8 +562,8 @@ class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMi
             try:
                 if not self._flush_session_before(session, deadline):
                     skipped.append(session)
-            except Exception as e:
-                logger.error("Honcho flush_all error for %s: %s", session.key, e)
+            except Exception as e:  # a bug in one session's flush must not skip the others
+                logger.error("Honcho flush_all error for %s: %s", session.key, e, exc_info=is_unexpected(e))
         with self._cache_lock:
             self._retry_sessions = [s for s in self._retry_sessions if self._has_unsynced(s)]
         return skipped

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from plugins.memory.honcho.client_errors import is_unexpected
 from plugins.memory.honcho.session_auth import HonchoAuthError
 
 logger = logging.getLogger("plugins.memory.honcho.session")
@@ -69,7 +70,7 @@ class SessionMigrationMixin:
             except HonchoAuthError:
                 logger.error("Honcho memory migration stopped after %s: auth failed", filename)
                 break
-            except Exception as e:
-                logger.error("Failed to upload %s to Honcho: %s", filename, e)
+            except Exception as e:  # one file's failure must not stop the remaining uploads
+                logger.error("Failed to upload %s to Honcho: %s", filename, e, exc_info=is_unexpected(e))
 
         return uploaded
