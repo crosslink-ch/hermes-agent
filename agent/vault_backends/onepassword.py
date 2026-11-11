@@ -80,7 +80,7 @@ class OnePasswordLoginBackend(LoginBackend):
             cmd += ["--account", account]
         try:
             proc = run_with_stdin_secret(cmd, env=self._env(None), secret=master_password, timeout=_TIMEOUT, label="op")
-        except Exception:
+        except (RuntimeError, OSError, ValueError, TypeError, subprocess.SubprocessError):
             raise RuntimeError("1Password unlock failed") from None
         token = (proc.stdout or "").strip()
         if proc.returncode != 0 or not token:
@@ -95,7 +95,7 @@ class OnePasswordLoginBackend(LoginBackend):
         try:
             proc = run_cli([str(self._op()), *args], env=self._env(token), timeout=_TIMEOUT, label="op",
                            timeout_message="op timed out", stdin=subprocess.DEVNULL)
-        except Exception:
+        except (RuntimeError, OSError, ValueError, TypeError, subprocess.SubprocessError):
             raise RuntimeError("1Password operation failed") from None
         if proc.returncode != 0:
             err = _scrub(proc.stderr or "")

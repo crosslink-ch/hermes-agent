@@ -63,7 +63,7 @@ class BitwardenLoginBackend(LoginBackend):
             proc = run_with_secret_env([str(self._bw()), "unlock", "--raw", "--nointeraction", "--passwordenv", "HERMES_BW_MASTER"],
                                       env=self._env(None), secret_env="HERMES_BW_MASTER", secret=master_password,
                                       timeout=_TIMEOUT, label="bw")
-        except Exception:
+        except (RuntimeError, OSError, ValueError, TypeError, subprocess.SubprocessError):
             raise RuntimeError("Bitwarden unlock failed") from None
         token = (proc.stdout or "").strip()
         if proc.returncode != 0 or not token:
@@ -78,7 +78,7 @@ class BitwardenLoginBackend(LoginBackend):
         try:
             proc = run_cli([str(self._bw()), *args, "--nointeraction"], env=self._env(token), timeout=_TIMEOUT,
                            label="bw", timeout_message="bw timed out", stdin=subprocess.DEVNULL)
-        except Exception:
+        except (RuntimeError, OSError, ValueError, TypeError, subprocess.SubprocessError):
             raise RuntimeError("Bitwarden operation failed") from None
         if proc.returncode != 0:
             err = scrub_ansi(proc.stderr or "")

@@ -127,6 +127,7 @@ def _capture_required_environment_variables(
         metadata = {"skill_name": skill_name, **{k: entry[k] for k in ("help", "required_for") if entry.get(k)}}
         try:
             callback_result = callback(entry["name"], entry["prompt"], metadata)
+        # health: allow BLE001 -- surface-supplied callback whose error may quote the typed secret
         except Exception:
             logger.warning("Secret capture callback failed")
             callback_result = {"success": False, "stored_as": entry["name"], "validated": False, "skipped": True}

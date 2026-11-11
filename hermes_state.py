@@ -52,6 +52,7 @@ from hermes_state_guard import (
 from hermes_state_readpool import _READ_POOL_MAX, _proc_fd_targets, _read_budget_for
 from hermes_state_sessions import SessionSessionsMixin
 from hermes_state_fts import SessionFtsSetupMixin
+from hermes_state_fts_write_retry import fts_fail_open_for_write
 from hermes_state_portability import SessionPortabilityMixin
 from hermes_state_telegram import SessionTelegramTopicsMixin
 from hermes_state_profile_repair import SessionProfileRepairMixin
@@ -1122,20 +1123,12 @@ class SessionDB(
                     ):
                         with self._lock:
                             self._raise_if_db_replaced()
-                    # A bare constraint is ambiguous: only a rollback-only trigger-on/off
-                    # probe can attribute it to legacy inline FTS. Canonical constraints stay errors.
-                    fts_failure = self._is_fts_write_corruption_error(exc)
-                    if not fts_failure and str(exc).strip().lower() == "constraint failed":
-                        fts_failure = self._probe_fts_trigger_failure()
-                        if (not fts_failure and not fts_fail_open_retry_attempted
-                                and self._adopt_peer_fts_fail_open()):
-                            fts_fail_open_retry_attempted = True
-                            continue
-                    # Never rebuild on the live write path; one retry after durable detach.
-                    if (fts_failure and not fts_fail_open_retry_attempted
-                            and self._enter_fts_fail_open(
-                                exc, confirmed=True, deadline=deadline, patience_s=patience_s,
-                            )):
+                    # Corrupt FTS shadow tables fail every write via the sync triggers while canonical
+                    # rows are intact: detach the derived indexes atomically and retry (never rebuild here).
+                    if fts_fail_open_for_write(
+                        self, exc, retry_attempted=fts_fail_open_retry_attempted,
+                        deadline=deadline, patience_s=patience_s,
+                    ):
                         fts_fail_open_retry_attempted = True
                         continue
                     # What survives both checks is structural damage: quarantine.

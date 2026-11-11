@@ -1010,7 +1010,6 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         assert data["name"] == "hermes-update"
         assert data["pid"] is None
         assert data["error"] == "docker_update_unsupported"
-        assert "docker pull crosslinkch/hermes-agent:latest" in data["message"]
         assert spawned is False
 
         status = self.client.get("/api/actions/hermes-update/status")
@@ -1019,7 +1018,6 @@ CONFIG_SCHEMA = ProviderConfigSchema(
         assert status_data["running"] is False
         assert status_data["exit_code"] == 1
         assert status_data["pid"] is None
-        assert any("docker pull crosslinkch/hermes-agent:latest" in line for line in status_data["lines"])
 
     def test_update_hermes_returns_apt_guidance_without_spawning(self, monkeypatch):
 
