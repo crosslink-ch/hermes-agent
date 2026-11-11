@@ -171,7 +171,7 @@ else:
     executable.chmod(0o700)
     backend = BitwardenLoginBackend({"binary_path": str(executable)})
     monkeypatch.setattr("agent.vault_backends.enabled_backends", lambda: [backend])
-    monkeypatch.setattr("gateway.platforms.thechat.accept_inbound_event", lambda **kw: pytest.fail("unlock reached durable inbox"))
+    monkeypatch.setattr("gateway.platforms.thechat_webhook.accept_inbound_event", lambda **kw: pytest.fail("unlock reached durable inbox"))
     observed = []
     class Agent:
         is_interrupted = False
@@ -511,7 +511,7 @@ async def test_signature_precedes_memory_dispatch_and_errors_do_not_echo_ciphert
     adapter._owner_user_id = "owner"
     record = adapter._vault_unlock.create(context=_context(), profile_id="A", session_key="A")
     relay = _relay(record)
-    monkeypatch.setattr("gateway.platforms.thechat.accept_inbound_event", lambda **kw: pytest.fail("unlock reached inbox"))
+    monkeypatch.setattr("gateway.platforms.thechat_webhook.accept_inbound_event", lambda **kw: pytest.fail("unlock reached inbox"))
     request = _signed(adapter, relay)
     request.headers["X-Webhook-Signature"] = "invalid"
     response = await adapter._handle_webhook(request)

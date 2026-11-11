@@ -13,7 +13,7 @@ from gateway.run import GatewayRunner
 from gateway.session import SessionSource, build_session_key
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.base import ProcessingOutcome
-from gateway.platforms import thechat
+from gateway.platforms import thechat, thechat_webhook
 from gateway.platforms.thechat import TheChatAdapter
 
 
@@ -1639,7 +1639,7 @@ async def test_direct_webhook_acks_when_ledger_completion_needs_retry(
         SESSION_KEY,
         request_id=entry.request_id,
     )
-    real_complete = thechat.complete_inbound_event
+    real_complete = thechat_webhook.complete_inbound_event
     completion_attempts = 0
 
     def flaky_complete(**kwargs):
@@ -1649,7 +1649,7 @@ async def test_direct_webhook_acks_when_ledger_completion_needs_retry(
             raise OSError("temporary ledger failure")
         return real_complete(**kwargs)
 
-    monkeypatch.setattr(thechat, "complete_inbound_event", flaky_complete)
+    monkeypatch.setattr(thechat_webhook, "complete_inbound_event", flaky_complete)
     payload = _interaction_payload(
         interaction_id="ledger-retry",
         request_id=entry.request_id,
@@ -2134,7 +2134,7 @@ async def test_signed_webhook_fails_closed_when_replay_ledger_is_unavailable(
     def fail_reservation(**_kwargs):
         raise OSError("state database unavailable")
 
-    monkeypatch.setattr(thechat, "accept_inbound_event", fail_reservation)
+    monkeypatch.setattr(thechat_webhook, "accept_inbound_event", fail_reservation)
     payload = {
         "type": "thechat.hermes_platform.event",
         "event": _platform_item(),

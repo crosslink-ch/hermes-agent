@@ -73,7 +73,7 @@ def test_exact_masked_values_and_replay_fence(kind, target, values):
 async def test_signed_lane_negotiation_and_no_durable_inbox(monkeypatch):
     from tests.gateway.test_thechat_vault_unlock import _adapter, _signed
     adapter = _adapter()
-    monkeypatch.setattr("gateway.platforms.thechat.accept_inbound_event", lambda **kw: pytest.fail("secret in inbox"))
+    monkeypatch.setattr("gateway.platforms.thechat_webhook.accept_inbound_event", lambda **kw: pytest.fail("secret in inbox"))
     broker, record = make_record()
     adapter._secure_input = broker
     envelope = relay(record, {"code": "synthetic-recovery-code"})
@@ -202,7 +202,7 @@ async def test_real_loopback_health_and_signed_http_lane(monkeypatch):
         adapter._webhook_secret = "synthetic-signing-key"
         receiver = web.Application()
         receiver.router.add_post("/thechat/webhook", adapter._handle_webhook)
-        monkeypatch.setattr("gateway.platforms.thechat.accept_inbound_event", lambda **_: pytest.fail("persisted ciphertext"))
+        monkeypatch.setattr("gateway.platforms.thechat_webhook.accept_inbound_event", lambda **_: pytest.fail("persisted ciphertext"))
         try:
             async with TestServer(receiver) as ingress, httpx.AsyncClient() as http:
                 record = adapter._secure_input.create(context=context(), profile_id="A", session_key="session",
