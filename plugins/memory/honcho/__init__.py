@@ -26,6 +26,7 @@ from plugins.memory.honcho.client import HonchoClientConfig, resolve_config_path
 from plugins.memory.honcho.config_panel import read_fields, write_fields
 from plugins.memory.honcho.client import _host_block, _HostLookup
 from plugins.memory.honcho.client import join_plugin_threads, spawn_context_thread
+from plugins.memory.honcho.client_errors import CONFIG_ERRORS, is_unexpected
 from plugins.memory.honcho.dialectic import DialecticMixin
 from plugins.memory.honcho.session_peers import assistant_peer_id_for, sanitize_peer_id
 from plugins.memory.honcho.session_context import usable_honcho_summary
@@ -119,7 +120,7 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         try:
             from .client import resolve_global_config_path
             return [str(resolve_global_config_path().parent)]
-        except Exception:
+        except RuntimeError:  # Path.home() found no home directory
             return []
 
     def __init__(self, query_rewriter: Optional[Callable[[str], str]] = None):
@@ -191,7 +192,7 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         try:
             from plugins.memory.honcho.client import HonchoClientConfig
             return _cfg_usable(HonchoClientConfig.from_global_config())
-        except Exception:
+        except CONFIG_ERRORS:
             return False
 
     def save_config(self, values, hermes_home):
@@ -292,8 +293,8 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
                 logger.debug("Honcho tools-only mode — deferring session init until first tool call")
         except ImportError:
             logger.debug("honcho-ai package not installed — plugin inactive")
-        except Exception as e:
-            logger.warning("Honcho init failed: %s", e)
+        except Exception as e:  # provider boundary: a failed init leaves the plugin inactive, never the agent
+            logger.warning("Honcho init failed: %s", e, exc_info=not isinstance(e, CONFIG_ERRORS))
             self._manager = None
 
     def _resolve_session_key(self, cfg, session_id: str, **kwargs) -> str:
@@ -322,7 +323,7 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
             return self._manager is not None
         try:
             self._do_session_init(self._config, self._lazy_init_session_id or "hermes-default", **dict(init_kwargs))
-        except Exception as e:
+        except Exception as e:  # thread target and tool-dispatch path: any failure leaves the same failed state
             self._manager = None
             self._session_initialized = False
             detail: object = e
@@ -335,7 +336,7 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
                 self._init_peer_failure = str(e)
                 self._init_peer_platform = str(dict(init_kwargs).get("platform") or "cli")
                 self._lazy_init_kwargs = self._lazy_init_session_id = None
-            logger.warning("Honcho %s session init failed: %s", label, detail)
+            logger.warning("Honcho %s session init failed: %s", label, detail, exc_info=is_unexpected(e))
             return False
         self._lazy_init_kwargs = self._lazy_init_session_id = None
         if self._init_auth_failure is not None:
@@ -400,8 +401,8 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
                 from hermes_constants import get_hermes_home
                 self._manager.migrate_memory_files(self._session_key, str(get_hermes_home() / "memories"))
                 logger.debug("Honcho memory file migration attempted for new session: %s", self._session_key)
-            except Exception as e:
-                logger.debug("Honcho memory file migration skipped: %s", e)
+            except Exception as e:  # optional step: session init continues without it
+                logger.debug("Honcho memory file migration skipped: %s", e, exc_info=is_unexpected(e))
 
         # Generic dialectic prewarm is incompatible with latest-message query rewriting,
         # which needs the first substantive user message.
@@ -509,7 +510,7 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
                 with os.fdopen(fd, "a", encoding="utf-8") as fh:
                     fh.write(record + "\n")
-        except Exception as e:
+        except (OSError, ValueError, TypeError) as e:
             logger.debug("Honcho injection log write failed: %s", e)
         return payload
 
@@ -687,7 +688,7 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
             self._last_context_turn = self._turn_count
             try:
                 self._manager.prefetch_context(self._session_key, query)
-            except Exception as e:
+            except RuntimeError as e:  # the prefetch thread could not start
                 logger.debug("Honcho context prefetch failed: %s", e)
 
         # Dialectic layer: a hung call older than timeout × multiplier counts as dead.
@@ -736,7 +737,7 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
             }
             self._identity_signature_memo = {memo_key: values}
             return dict(values)
-        except Exception:
+        except CONFIG_ERRORS:
             return {}
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
@@ -872,8 +873,8 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         def _run():
             try:
                 fn()
-            except Exception as e:
-                logger.debug(fail_msg, e)
+            except Exception as e:  # thread boundary
+                logger.debug(fail_msg, e, exc_info=is_unexpected(e))
 
         thread = spawn_context_thread(_run, name=name, owner=self)
         thread.start()
@@ -904,8 +905,8 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
             self._sync_thread.join(timeout=10.0)
         try:
             self._manager.flush_all()
-        except Exception as e:
-            logger.debug("Honcho session-end flush failed: %s", e)
+        except Exception as e:  # flush_all() absorbs call errors per session; what arrives here is a bug
+            logger.debug("Honcho session-end flush failed: %s", e, exc_info=is_unexpected(e))
 
     # ----- Tools -----
 
@@ -971,8 +972,8 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
             )
         except HonchoAuthError:
             raise  # rendered by handle_tool_call's auth-specific handler
-        except Exception as e:
-            logger.warning("honcho_reasoning failed: %s", e)
+        except Exception as e:  # every failure of an explicit query is reported to the model as an error
+            logger.warning("honcho_reasoning failed: %s", e, exc_info=is_unexpected(e))
             return tool_error(
                 f"Honcho reasoning query failed ({e}). This is a backend error, not an empty result — "
                 "the peer may still have relevant context. Slow dialectic calls at higher reasoning levels "
@@ -1050,8 +1051,8 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
             # Never report an auth failure as an empty result; the model would read it as "no memory".
             logger.error("Honcho tool %s failed: authentication rejected", tool_name)
             return tool_error(f"Honcho memory authentication failed: {e}")
-        except Exception as e:
-            logger.error("Honcho tool %s failed: %s", tool_name, e)
+        except Exception as e:  # dispatch boundary: a backend error, a malformed argument or a bug all answer the model
+            logger.error("Honcho tool %s failed: %s", tool_name, e, exc_info=is_unexpected(e))
             return tool_error(f"Honcho {tool_name} failed: {e}")
 
     # Shutdown never joins for less than this. A thread blocked in httpx can hold the HTTP timeout.

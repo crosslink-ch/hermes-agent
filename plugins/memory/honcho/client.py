@@ -32,6 +32,7 @@ from hermes_cli.profiles import _get_default_hermes_home
 from hermes_constants import get_hermes_home
 from hermes_state_common import TITLE_SOURCE_DERIVED, TITLE_SOURCE_LLM
 
+from plugins.memory.honcho.client_errors import CONFIG_ERRORS, PROFILE_ERRORS
 from plugins.memory.honcho.client_cache import (
     _DEFAULT_HTTP_TIMEOUT, _client_cache_key, _client_slots, _client_slots_lock,
     _honcho_json_timeout_memo, _refresh_oauth, _slot_for,
@@ -83,12 +84,12 @@ def resolve_active_host() -> str:
     try:
         from hermes_cli.profiles import get_active_profile_name
         profile_host = profile_host_key(get_active_profile_name())
-    except Exception:
+    except PROFILE_ERRORS:
         profile_host = HOST
     if profile_host == HOST:
         try:
             default_host = str(_read_config(resolve_config_path()).get("defaultHost", "")).strip()
-        except Exception:
+        except CONFIG_ERRORS:
             default_host = ""
         if default_host:
             return default_host
@@ -243,7 +244,7 @@ def _is_local_base_url(base_url: str | None) -> bool:
         return False
     try:
         host = (urlparse(base_url).hostname or "").strip().lower()
-    except Exception:
+    except ValueError:  # a malformed bracketed host
         host = ""
     if host in {"localhost", "127.0.0.1", "::1"}:
         return True

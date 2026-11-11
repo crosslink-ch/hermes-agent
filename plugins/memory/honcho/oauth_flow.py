@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 from plugins.memory.honcho import oauth
 from plugins.memory.honcho.client import HonchoClientConfig, resolve_active_host, resolve_config_path
+from plugins.memory.honcho.client_errors import CONFIG_ERRORS, http_errors, is_unexpected
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ def resolve_endpoints(environment: str | None = None, base_url: str | None = Non
             cfg = HonchoClientConfig.from_global_config()
             environment = environment or cfg.environment
             base_url = base_url if base_url is not None else cfg.base_url
-        except Exception:
+        except CONFIG_ERRORS:
             environment = environment or "production"
 
     is_loopback = bool(base_url) and any(h in base_url for h in ("localhost", "127.0.0.1", "::1"))
@@ -273,7 +274,7 @@ def supports_device_login(endpoints: OAuthEndpoints, *, timeout: float = 5.0) ->
     origin = endpoints.token_url.rsplit("/oauth/", 1)[0]
     try:
         body = oauth._http_json("GET", f"{origin}{_AS_METADATA_PATH}", timeout=timeout)[1]
-    except Exception:
+    except http_errors():
         return False
     grants = body.get("grant_types_supported") if isinstance(body, dict) else None
     return isinstance(grants, list) and DEVICE_GRANT_TYPE in grants
@@ -390,7 +391,7 @@ def _detect_connection() -> tuple[bool, str | None]:
         cfg = HonchoClientConfig.from_global_config()
         block = (cfg.raw.get("hosts") or {}).get(cfg.host) or {}
         auth = "oauth" if oauth.OAuthCredential.from_host_block(block) is not None else "apikey" if cfg.api_key else None
-    except Exception:
+    except CONFIG_ERRORS:
         auth = None
     return auth is not None, auth
 
@@ -426,8 +427,8 @@ def start_loopback_flow_background(
         try:
             authorize_via_loopback(config_path=config_path, host=host, source=source, timeout=timeout)
             _set_status(status, "connected", "Honcho connected")
-        except Exception as exc:
-            logger.warning("Honcho OAuth loopback flow failed: %s", exc)
+        except Exception as exc:  # thread boundary: the UI polls this status, so any failure must end "pending"
+            logger.warning("Honcho OAuth loopback flow failed: %s", exc, exc_info=is_unexpected(exc))
             _set_status(status, "error", str(exc))
 
     thread = threading.Thread(target=_run, name="honcho-oauth-loopback", daemon=True)

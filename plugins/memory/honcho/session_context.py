@@ -6,6 +6,7 @@ import logging
 import re
 from typing import Any, Callable
 
+from plugins.memory.honcho.client_errors import is_unexpected
 from plugins.memory.honcho.session_auth import HonchoAuthError
 
 logger = logging.getLogger("plugins.memory.honcho.session")
@@ -52,8 +53,8 @@ class SessionContextMixin:
             return fn()
         except HonchoAuthError:
             raise
-        except Exception as e:
-            logger.log(level, msg, *args, e)
+        except Exception as e:  # a guard by contract: any failure yields the default
+            logger.log(level, msg, *args, e, exc_info=is_unexpected(e))
             return default
 
     def _guarded_authed(self, label: str, fn: Callable[[], Any], default: Any, level: int, msg: str, *args: Any) -> Any:
@@ -357,8 +358,8 @@ class SessionContextMixin:
             return True
         try:
             return self._authed_call("identity seed", _seed)
-        except Exception as e:
-            logger.error("Failed to seed AI identity: %s", e)
+        except Exception as e:  # reports False by contract (the CLI prints it per file)
+            logger.error("Failed to seed AI identity: %s", e, exc_info=is_unexpected(e))
             return False
 
     def get_ai_representation(self, session_key: str) -> dict[str, str]:
