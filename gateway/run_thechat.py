@@ -40,7 +40,7 @@ class GatewayTheChatMixin:
             return False
         try:
             return abs((updated_at - created_at).total_seconds()) < 0.001
-        except Exception:
+        except (TypeError, AttributeError):  # not two comparable datetimes
             return False
 
     def _thechat_branch_parent_source(
@@ -177,7 +177,7 @@ class GatewayTheChatMixin:
                 parent_session_id=parent_session_id,
             )
         except Exception as exc:
-            logger.error("Failed to create TheChat branch session: %s", exc)
+            logger.error("Failed to create TheChat branch session: %s", exc, exc_info=True)
             return None
 
         for msg in history:
@@ -198,12 +198,23 @@ class GatewayTheChatMixin:
                     codex_message_items=msg.get("codex_message_items"),
                 )
             except Exception:
-                pass
+                logger.debug(
+                    "Failed to copy a message into TheChat branch session %s",
+                    new_session_id,
+                    exc_info=True,
+                )
 
         try:
             await self._session_db_call("set_session_title", new_session_id, title)
+        except ValueError:
+            # Conflict or validation failure. The message quotes the title, so it stays out.
+            logger.debug("TheChat branch session %s keeps no title: it was rejected", new_session_id)
         except Exception:
-            pass
+            logger.debug(
+                "Failed to set the title of TheChat branch session %s",
+                new_session_id,
+                exc_info=True,
+            )
 
         switched = await self.async_session_store.switch_session(session_key, new_session_id)
         if switched is None:
@@ -239,7 +250,7 @@ class GatewayTheChatMixin:
 
         try:
             copied_source = dataclasses.replace(source)
-        except Exception:
+        except (TypeError, ValueError):  # not a dataclass instance, or one replace() cannot rebuild
             copied_source = source
 
         metadata = self._thread_metadata_for_source(
