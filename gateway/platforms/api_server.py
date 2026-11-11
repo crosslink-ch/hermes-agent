@@ -6,8 +6,6 @@ OpenAI-compatible frontend connects at http://localhost:8642/v1 with API_SERVER_
 ``gateway.multiplex_profiles`` secondary profiles live at ``/p/<profile>/...``.
 """
 
-from gateway.http_routes import loopback_route
-
 import asyncio
 import errno
 import hashlib
@@ -4111,9 +4109,3 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         """Return basic info about the API server."""
         return {"name": "API Server", "type": "api", "host": self._host, "port": self._port}
-
-    def public_http_routes(self) -> list[dict]:
-        return [
-            loopback_route("api-server-v1", path_prefix="/v1", port=self._port),
-            loopback_route("api-server-jobs", path_prefix="/api/jobs", port=self._port),
-        ]
