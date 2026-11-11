@@ -180,7 +180,7 @@ def test_the_launch_homes_migration_reads_its_own_secrets_on_a_multiplexing_star
         return []
 
     monkeypatch.setattr("hermes_cli.left_core_migration.recover_at_startup", recover_at_startup)
-    from gateway.run_startup import recover_left_core_at_gateway_start
+    from gateway.run_startup_left_core import recover_left_core_at_gateway_start
     previous = is_multiplex_active()
     set_multiplex_active(True)
     try:

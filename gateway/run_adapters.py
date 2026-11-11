@@ -1088,7 +1088,7 @@ class GatewayAdapterLifecycleMixin(GatewaySecondaryReconnectMixin):
         # Hydrate external secret sources off-loop ONCE: sync hydration would stall every heartbeat.
         await asyncio.to_thread(hydrate_profile_secret_sources, profile_home)
         # A platform that left core for a catalog plugin is installed before discovery below.
-        from gateway.run_startup import recover_left_core_in
+        from gateway.run_startup_left_core import recover_left_core_in
         await asyncio.to_thread(recover_left_core_in, profile_home, hydrate_secrets=False)
         with _profile_runtime_scope(profile_home, hydrate_secrets=False):
             profile_runtime_cfg = _load_gateway_config()
