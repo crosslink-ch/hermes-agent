@@ -15,7 +15,7 @@ blocks on its in-memory ``threading.Event``; this module only connects the two s
   be resumed in a new process, so nothing tries to.
 
 Only used when TheChat advertises ``capabilities.botRequests``; older servers keep the legacy
-progress-event cards in ``gateway.platforms.thechat``.
+progress-event cards in ``gateway.platforms.thechat_interactions``.
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ def _order_group(session_key: str) -> str:
 def _error_text(response: Any) -> str:
     try:
         data = response.json()
-    except Exception:
+    except ValueError:  # not JSON
         return ""
     error = data.get("error") if isinstance(data, dict) else None
     return _bounded(error, 200) if isinstance(error, str) else ""
@@ -398,7 +398,7 @@ class BotRequestBridge:
                 if status in (200, 201):
                     try:
                         request = response.json().get("request")
-                    except Exception:
+                    except (ValueError, AttributeError):  # not JSON, or not an object
                         request = None
                     if isinstance(request, dict) and isinstance(request.get("id"), str):
                         pending.remote_id = request["id"]
@@ -546,7 +546,7 @@ class BotRequestBridge:
                     # not wait for a pickup that will never happen.
                     try:
                         current = response.json().get("request") or {}
-                    except Exception:
+                    except (ValueError, AttributeError):  # not JSON, or not an object
                         current = {}
                     if current.get("status") == "answered":
                         self._outcomes[remote_id] = (False, STALE_ACK_NOTE)

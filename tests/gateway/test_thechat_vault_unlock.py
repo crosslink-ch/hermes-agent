@@ -171,7 +171,7 @@ else:
     executable.chmod(0o700)
     backend = BitwardenLoginBackend({"binary_path": str(executable)})
     monkeypatch.setattr("agent.vault_backends.enabled_backends", lambda: [backend])
-    monkeypatch.setattr("gateway.platforms.thechat.accept_inbound_event", lambda **kw: pytest.fail("unlock reached durable inbox"))
+    monkeypatch.setattr("gateway.platforms.thechat_webhook.accept_inbound_event", lambda **kw: pytest.fail("unlock reached durable inbox"))
     observed = []
     class Agent:
         is_interrupted = False
@@ -408,8 +408,54 @@ async def test_health_owner_is_canonical_and_missing_owner_still_denies_onepassw
     await adapter.disconnect()
 
 
+async def _end_by_stop(waiting):
+    waiting.agent.is_interrupted = True
+
+
+async def _end_by_disconnect(waiting):
+    await waiting.adapter.disconnect()
+
+
+async def _end_by_new_run(waiting):
+    waiting.turn._ctx._run_still_current = lambda: False
+
+
+async def _end_by_expiry(waiting):
+    waiting.record.deadline = time.monotonic() - 1
+
+
+async def _end_by_cancel(waiting):
+    relay = _relay(waiting.record, action="cancel")
+    for key in ("wrappedKeyB64", "ivB64", "ciphertextB64"):
+        del relay["interaction"][key]
+    response = await waiting.adapter._handle_webhook(_signed(waiting.adapter, relay))
+    assert response.status == 200
+
+
+async def _end_by_lock(waiting):
+    from agent.vault_backends import unlock
+    unlock.lock("bitwarden")
+
+
+async def _end_by_release(waiting):
+    from agent.vault_backends import unlock
+    unlock.release_session("hermes-session")
+
+
+# How a waiting unlock prompt ends without an answer.
+_PROMPT_ENDINGS = {
+    "stop": _end_by_stop,
+    "disconnect": _end_by_disconnect,
+    "new-run": _end_by_new_run,
+    "expiry": _end_by_expiry,
+    "cancel": _end_by_cancel,
+    "lock": _end_by_lock,
+    "release": _end_by_release,
+}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("end", ["stop", "disconnect", "new-run", "expiry", "cancel", "lock", "release"])
+@pytest.mark.parametrize("end", list(_PROMPT_ENDINGS))
 async def test_waiting_prompt_cancels_on_lifecycle_end_without_secret_or_token(end, monkeypatch):
     from agent.vault_backends import unlock
     from agent.vault_backends.bitwarden import BitwardenLoginBackend
@@ -429,24 +475,7 @@ async def test_waiting_prompt_cancels_on_lifecycle_end_without_secret_or_token(e
     try:
         await asyncio.wait_for(client.request_ready.wait(), 3)
         record = next(iter(adapter._vault_unlock.pending.values()))
-        if end == "stop":
-            agent.is_interrupted = True
-        elif end == "disconnect":
-            await adapter.disconnect()
-        elif end == "new-run":
-            turn._ctx._run_still_current = lambda: False
-        elif end == "expiry":
-            record.deadline = time.monotonic() - 1
-        elif end == "lock":
-            unlock.lock("bitwarden")
-        elif end == "release":
-            unlock.release_session("hermes-session")
-        else:
-            relay = _relay(record, action="cancel")
-            for key in ("wrappedKeyB64", "ivB64", "ciphertextB64"):
-                del relay["interaction"][key]
-            response = await adapter._handle_webhook(_signed(adapter, relay))
-            assert response.status == 200
+        await _PROMPT_ENDINGS[end](SimpleNamespace(agent=agent, adapter=adapter, turn=turn, record=record))
         result = await asyncio.wait_for(task, 5)
         assert not result["success"] and not unlock.is_unlocked("bitwarden")
         assert record.take_response() == "" and record._private_key is None
@@ -511,7 +540,7 @@ async def test_signature_precedes_memory_dispatch_and_errors_do_not_echo_ciphert
     adapter._owner_user_id = "owner"
     record = adapter._vault_unlock.create(context=_context(), profile_id="A", session_key="A")
     relay = _relay(record)
-    monkeypatch.setattr("gateway.platforms.thechat.accept_inbound_event", lambda **kw: pytest.fail("unlock reached inbox"))
+    monkeypatch.setattr("gateway.platforms.thechat_webhook.accept_inbound_event", lambda **kw: pytest.fail("unlock reached inbox"))
     request = _signed(adapter, relay)
     request.headers["X-Webhook-Signature"] = "invalid"
     response = await adapter._handle_webhook(request)

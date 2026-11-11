@@ -61,6 +61,30 @@ def _b64(value, minimum, maximum):
     return decoded
 
 
+def _decrypt_password(record, cipher) -> str:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    key = plaintext = None
+    try:
+        wrapped, iv, ciphertext = cipher
+        key = record._private_key.decrypt(wrapped, padding.OAEP(
+            mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=record.aad))
+        if len(key) != 32:
+            raise ValueError
+        plaintext = AESGCM(key).decrypt(iv, ciphertext, record.aad)
+        if not 1 <= len(plaintext) <= 4096:
+            raise ValueError
+        return plaintext.decode("utf-8", errors="strict")
+    # ValueError: RSA unwrap, the length checks, UTF-8 decoding. InvalidTag: AES-GCM
+    # authentication. The cause is dropped, never logged: it describes decrypted input.
+    except (ValueError, InvalidTag):
+        raise VaultUnlockError() from None
+    finally:
+        key = plaintext = None
+
+
 @dataclass(repr=False)
 class PendingUnlock:
     payload: dict
@@ -178,25 +202,7 @@ class VaultUnlockBroker:
             if any(item[k] != record.context[v] for k, v in (
                     ("invocationId", "invocation_id"), ("conversationId", "conversation_id"), ("threadId", "thread_id"))):
                 raise VaultUnlockError()
-            response = ""
-            if cipher is not None:
-                from cryptography.hazmat.primitives import hashes
-                from cryptography.hazmat.primitives.asymmetric import padding
-                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-                try:
-                    wrapped, iv, ciphertext = cipher
-                    key = record._private_key.decrypt(wrapped, padding.OAEP(
-                        mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=record.aad))
-                    if len(key) != 32:
-                        raise ValueError
-                    plaintext = AESGCM(key).decrypt(iv, ciphertext, record.aad)
-                    if not 1 <= len(plaintext) <= 4096:
-                        raise ValueError
-                    response = plaintext.decode("utf-8", errors="strict")
-                except Exception:
-                    raise VaultUnlockError() from None
-                finally:
-                    key = plaintext = None
+            response = _decrypt_password(record, cipher) if cipher is not None else ""
             if record.deadline <= time.monotonic() or record.payload["expiresAt"] <= int(time.time() * 1000):
                 self.cancel(record, outcome="expired")
                 raise VaultUnlockError()

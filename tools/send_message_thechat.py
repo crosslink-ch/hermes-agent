@@ -175,4 +175,5 @@ async def _send_thechat(pconfig, chat_id: str, content: str, *, thread_id=None):
                     "message_id": str(data.get("messageId") or ""),
                 }
         except Exception as exc:
+            logger.debug("TheChat proactive send raised", exc_info=True)
             return {"error": f"TheChat send failed: {exc}"}

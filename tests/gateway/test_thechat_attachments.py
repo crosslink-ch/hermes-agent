@@ -17,7 +17,7 @@ import pytest
 
 from gateway.config import PlatformConfig
 from gateway.platforms import base as platform_base
-from gateway.platforms import thechat
+from gateway.platforms import thechat, thechat_attachments
 from gateway.platforms.event import MessageEvent, MessageType
 from gateway.platforms.base import SendResult
 from gateway.platforms.thechat import TheChatAdapter
@@ -127,7 +127,7 @@ def allow_object_store_urls(monkeypatch):
         checked.append(url)
         return True
 
-    monkeypatch.setattr(thechat, "async_is_safe_url", allow)
+    monkeypatch.setattr(thechat_attachments, "async_is_safe_url", allow)
     return checked
 
 
@@ -204,10 +204,10 @@ def test_inbound_attachment_timeout_defaults_and_http_client_contract(monkeypatc
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(thechat, "create_ssrf_safe_async_client", guarded_client)
+    monkeypatch.setattr(thechat_attachments, "create_ssrf_safe_async_client", guarded_client)
     adapter._new_object_store_client()
     assert captured["timeout"].read == 600
-    assert captured["timeout"].connect == thechat._ATTACHMENT_CONNECT_TIMEOUT_SECONDS
+    assert captured["timeout"].connect == thechat_attachments._ATTACHMENT_CONNECT_TIMEOUT_SECONDS
 
 
 @pytest.mark.parametrize("bad", [None, True, 0, -1, "oops", "nan", "inf", 100000])
@@ -238,13 +238,13 @@ async def test_inbound_file_uses_configured_transfer_deadline(
     adapter = TheChatAdapter(PlatformConfig.from_dict({
         "enabled": True,
         "base_url": "https://thechat.example",
-        "attachment_transfer_timeout_seconds": 0.15,
+        "attachment_transfer_timeout_seconds": 5.0,
     }))
-    monkeypatch.setattr(thechat, "_ATTACHMENT_TRANSFER_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(thechat_attachments, "_ATTACHMENT_TRANSFER_TIMEOUT_SECONDS", 0.01)
 
     async def slow_content(request: httpx.Request) -> httpx.Response:
-        assert request.extensions["timeout"]["read"] == 0.15
-        await asyncio.sleep(0.03)
+        assert request.extensions["timeout"]["read"] == 5.0
+        await asyncio.sleep(0.03)  # health: allow HX013 -- the delay is the behaviour under test: the transfer must outlast the patched 10 ms default deadline to show the configured one governs
         return httpx.Response(200, content=body, request=request)
 
     adapter._client = httpx.AsyncClient(
@@ -384,8 +384,8 @@ async def test_inbound_batch_limits_count_and_cumulative_bytes(
         return b"x"
 
     adapter._download_attachment_bytes = cast(Any, download)
-    monkeypatch.setattr(thechat, "_ATTACHMENT_INBOUND_MAX_COUNT", 3)
-    monkeypatch.setattr(thechat, "_ATTACHMENT_INBOUND_TOTAL_MAX_BYTES", 2)
+    monkeypatch.setattr(thechat_attachments, "_ATTACHMENT_INBOUND_MAX_COUNT", 3)
+    monkeypatch.setattr(thechat_attachments, "_ATTACHMENT_INBOUND_TOTAL_MAX_BYTES", 2)
 
     media_urls, media_types, media_kinds = (
         await adapter._download_inbound_attachments(descriptors)
@@ -405,9 +405,9 @@ async def test_inbound_batch_uses_configured_total_deadline(
     adapter = TheChatAdapter(PlatformConfig.from_dict({
         "enabled": True,
         "base_url": "https://thechat.example",
-        "attachment_batch_timeout_seconds": 0.15,
+        "attachment_batch_timeout_seconds": 5.0,
     }))
-    monkeypatch.setattr(thechat, "_ATTACHMENT_INBOUND_TOTAL_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(thechat_attachments, "_ATTACHMENT_INBOUND_TOTAL_TIMEOUT_SECONDS", 0.01)
     descriptors = [
         _descriptor(
             f"attachment-{index}",
@@ -420,7 +420,7 @@ async def test_inbound_batch_uses_configured_total_deadline(
     ]
 
     async def slow_download(_descriptor: dict[str, Any]) -> bytes:
-        await asyncio.sleep(0.03)
+        await asyncio.sleep(0.03)  # health: allow HX013 -- the delay is the behaviour under test: two downloads must outlast the patched 10 ms default batch deadline to show the configured one governs
         return b"x"
 
     adapter._download_attachment_bytes = cast(Any, slow_download)
@@ -437,7 +437,7 @@ async def test_inbound_batch_uses_configured_total_deadline(
 async def test_inbound_unsafe_and_oversize_descriptors_are_safe_warnings(
     monkeypatch,
 ):
-    monkeypatch.setattr(thechat, "_ATTACHMENT_MAX_BYTES", 8)
+    monkeypatch.setattr(thechat_attachments, "_ATTACHMENT_MAX_BYTES", 8)
     adapter = _adapter()
     network_requests: list[httpx.Request] = []
 
@@ -677,7 +677,7 @@ def test_object_store_client_uses_connect_time_ssrf_guard(monkeypatch):
         return guarded_client
 
     monkeypatch.setattr(
-        thechat,
+        thechat_attachments,
         "create_ssrf_safe_async_client",
         create_guarded_client,
     )
@@ -708,7 +708,7 @@ async def test_attachment_pipeline_retries_transient_pre_message_stage(
         return SendResult(success=True, message_id="message-1")
 
     monkeypatch.setattr(adapter, "_send_attachment_file_once", send_once)
-    monkeypatch.setattr(thechat, "_ATTACHMENT_SEND_RETRY_BASE_SECONDS", 0)
+    monkeypatch.setattr(thechat_attachments, "_ATTACHMENT_SEND_RETRY_BASE_SECONDS", 0)
 
     result = await adapter._send_attachment_file(
         CONVERSATION_ID,
@@ -934,12 +934,12 @@ async def test_outbound_rejected_and_timeout_cleanup_policy(
     expects_delete,
 ):
     monkeypatch.setattr(
-        thechat,
+        thechat_attachments,
         "_ATTACHMENT_POLL_TIMEOUT_SECONDS",
         poll_timeout,
     )
     monkeypatch.setattr(
-        thechat,
+        thechat_attachments,
         "_ATTACHMENT_POLL_INTERVAL_SECONDS",
         0.0,
     )
@@ -1035,7 +1035,7 @@ async def test_outbound_message_failure_discards_ready_attachment(
     allow_object_store_urls,
     monkeypatch,
 ):
-    monkeypatch.setattr(thechat, "_ATTACHMENT_SEND_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr(thechat_attachments, "_ATTACHMENT_SEND_RETRY_BASE_SECONDS", 0.0)
     document_path = attachment_scratch / "report.txt"
     document_path.write_bytes(b"report")
     object_client = _ObjectStoreClient()
@@ -1106,7 +1106,7 @@ async def test_outbound_message_retry_reuses_platform_message_id(
     allow_object_store_urls,
     monkeypatch,
 ):
-    monkeypatch.setattr(thechat, "_ATTACHMENT_SEND_RETRY_BASE_SECONDS", 0.0)
+    monkeypatch.setattr(thechat_attachments, "_ATTACHMENT_SEND_RETRY_BASE_SECONDS", 0.0)
     document_path = attachment_scratch / "report.txt"
     document_path.write_bytes(b"report")
     object_client = _ObjectStoreClient()
