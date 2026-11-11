@@ -197,6 +197,7 @@ class SecureInputBroker(VaultUnlockBroker):
 
     @staticmethod
     def _decrypt(record, cipher):
+        from cryptography.exceptions import InvalidTag
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -217,7 +218,10 @@ class SecureInputBroker(VaultUnlockBroker):
                 if not isinstance(value, str) or not 1 <= len(value.encode("utf-8")) <= (1024 if name == "identifier" else 4096):
                     raise ValueError
             return values
-        except Exception:
+        # ValueError: RSA unwrap, the length and shape checks, UTF-8 and JSON decoding,
+        # duplicate keys. InvalidTag: AES-GCM authentication. RecursionError: nesting depth.
+        # The cause is dropped, never logged: it describes decrypted input.
+        except (ValueError, InvalidTag, RecursionError):
             raise SecureInputError() from None
         finally:
             key = plaintext = None
