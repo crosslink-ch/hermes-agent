@@ -1039,8 +1039,14 @@ def _named_target_hints() -> str:
 
 
 def build_environment_hints(*, home_override: Path | str | None = None) -> str:
-    """Build profile-scoped hints for the selected default execution target."""
-    if home_override is not None:
+    """Build profile-scoped hints for the selected default execution target.
+
+    ``home_override`` scopes the target lookups to that profile home when it is an initialized
+    Hermes home (has a ``config.yaml``). A bare directory that only holds a ``state.db`` is not a
+    profile: binding it would make the config loader create a home skeleton there, and the skills
+    prompt would then treat that directory as a profile with its own plugin manager.
+    """
+    if home_override is not None and (Path(home_override) / "config.yaml").is_file():
         from hermes_constants import set_hermes_home_override, reset_hermes_home_override
         token = set_hermes_home_override(home_override)
         try:

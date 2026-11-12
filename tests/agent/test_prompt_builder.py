@@ -675,6 +675,7 @@ class TestEnvironmentHints:
         agent_home = tmp_path / "agent"
         outer_home.mkdir()
         agent_home.mkdir()
+        (agent_home / "config.yaml").write_text("{}\n", encoding="utf-8")
         seen_homes = []
         monkeypatch.setattr(
             targets_mod,
@@ -689,6 +690,27 @@ class TestEnvironmentHints:
             reset_hermes_home_override(token)
 
         assert seen_homes == [agent_home]
+
+    def test_home_override_without_config_keeps_ambient_home_and_creates_nothing(
+        self, monkeypatch, tmp_path,
+    ):
+        import agent.prompt_builder as _pb
+        import tools.execution_targets as targets_mod
+        from hermes_constants import get_hermes_home
+
+        db_dir = tmp_path / "db-only"
+        db_dir.mkdir()
+        seen_homes = []
+        monkeypatch.setattr(
+            targets_mod,
+            "list_execution_targets",
+            lambda: seen_homes.append(get_hermes_home()) or (),
+        )
+
+        _pb.build_environment_hints(home_override=db_dir)
+
+        assert seen_homes == [get_hermes_home()]
+        assert list(db_dir.iterdir()) == []
 
 
     def test_build_environment_hints_suppresses_host_on_docker_backend(self, monkeypatch):
