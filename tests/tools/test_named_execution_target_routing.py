@@ -1039,10 +1039,12 @@ def test_tool_output_persistence_uses_the_result_target(monkeypatch):
     messages = [selected, ordinary]
     identities = {"call-beta": ("beta", None, beta_env)}
     captured = []
+    spill_policy = []
 
-    def fake_enforce(turn_messages, *, env_resolver=None, config=None):
+    def fake_enforce(turn_messages, *, env_resolver=None, config=None, host_spill_allowed=None):
         assert callable(env_resolver)
         captured.extend(env_resolver(message) for message in turn_messages)
+        spill_policy.extend(host_spill_allowed(message) for message in turn_messages)
 
     monkeypatch.setattr(executor, "enforce_turn_budget", fake_enforce)
     agent = SimpleNamespace(
@@ -1053,6 +1055,7 @@ def test_tool_output_persistence_uses_the_result_target(monkeypatch):
         agent, messages, "session", len(messages), executor.DEFAULT_BUDGET,
     )
     assert captured == [beta_env, default_env]
+    assert spill_policy == [False, True]  # the named target's output never falls back to the host
     assert identities == {}
     assert "_execution_target" not in selected
 
