@@ -18,6 +18,7 @@ behaviour so neither path can regress.
 """
 
 import tools.terminal_tool as tt
+from tools import terminal_tool_config
 
 class TestIsUnusableContainerCwd:
     def test_windows_backslash_host_path_rejected(self):
@@ -45,7 +46,7 @@ class TestOverrideCwdSanitizedAtCallSite:
             "docker_mount_cwd_to_workspace": True,
         }
 
-        cwd = tt._apply_task_cwd_override(
+        cwd = terminal_tool_config._apply_task_cwd_override(
             config, str(tmp_path), str(tmp_path),
         )
 
