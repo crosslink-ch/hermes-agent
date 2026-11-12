@@ -12,6 +12,10 @@
         "description": "The shell command to execute",
         "type": "string"
       },
+      "execution_target": {
+        "description": "Named execution target from terminal.targets (for example 'local' or 'devbox'). Omit to use terminal.default_target; legacy flat config accepts only 'default'.",
+        "type": "string"
+      },
       "heartbeat": {
         "default": 0,
         "description": "With background=true: also notify every N seconds (min 60) with new output; quiet ticks are skipped. For bounded jobs you must react to mid-run, never servers. Implies notify=true; 0 = off.",

@@ -7,6 +7,10 @@
         "description": "Python code to execute. Import tools with `from hermes_tools import web_search, terminal, ...` and print your final result to stdout.",
         "type": "string"
       },
+      "execution_target": {
+        "description": "Optional named execution target. Uses terminal.default_target when omitted.",
+        "type": "string"
+      },
       "reset": {
         "description": "Discard the kernel's persistent state and start fresh before running this code.",
         "type": "boolean"

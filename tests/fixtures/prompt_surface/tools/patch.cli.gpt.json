@@ -3,6 +3,10 @@
   "name": "patch",
   "parameters": {
     "properties": {
+      "execution_target": {
+        "description": "Optional named execution target; uses terminal.default_target when omitted.",
+        "type": "string"
+      },
       "mode": {
         "default": "replace",
         "description": "Edit mode. 'replace' (default): requires path + old_string + new_string. 'patch': requires patch content only.",
