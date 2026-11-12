@@ -488,10 +488,16 @@ def _spill_largest_text_part(parts: list, tool_use_id: str, env, config: BudgetC
 
 
 def enforce_turn_budget(tool_messages: list[dict], env=None,
-                        config: BudgetConfig = DEFAULT_BUDGET, env_resolver=None) -> list[dict]:
+                        config: BudgetConfig = DEFAULT_BUDGET, env_resolver=None,
+                        host_spill_allowed=None) -> list[dict]:
     """Layer 3: persist the largest non-persisted results first until the turn's aggregate is
     under budget. Mutates the list in-place and returns it. A multimodal result (part list) counts its
-    text characters and spills its largest text part; its images stay inline."""
+    text characters and spills its largest text part; its images stay inline.
+
+    ``env_resolver(message)`` names the environment that produced each result. ``host_spill_allowed
+    (message)`` says whether that result may fall back to the host spillover when its environment is
+    gone; without it, a resolver that answers ``None`` refuses the host (a named target's output must
+    not leave its target)."""
     sizes = [_content_text_size(msg.get("content", "")) for msg in tool_messages]
     total_size = sum(sizes)
     candidates = [(i, size) for i, size in enumerate(sizes)
@@ -505,9 +511,11 @@ def enforce_turn_budget(tool_messages: list[dict], env=None,
         content = tool_messages[idx]["content"]
         tool_use_id = tool_messages[idx].get("tool_call_id", f"budget_{idx}")
         message_env = env_resolver(tool_messages[idx]) if callable(env_resolver) else env
+        allow_host = (not callable(env_resolver) or message_env is not None
+                      or (callable(host_spill_allowed) and bool(host_spill_allowed(tool_messages[idx]))))
         if isinstance(content, list):
             parts, saved = _spill_largest_text_part(content, tool_use_id, message_env, config,
-                allow_host_without_env=(not callable(env_resolver) or message_env is not None))
+                allow_host_without_env=allow_host)
             if saved:
                 total_size -= saved
                 tool_messages[idx]["content"] = parts
@@ -516,7 +524,7 @@ def enforce_turn_budget(tool_messages: list[dict], env=None,
         replacement = maybe_persist_tool_result(
             content=content, tool_name=_BUDGET_TOOL_NAME, tool_use_id=tool_use_id,
             env=message_env, config=config, threshold=0,
-            allow_host_without_env=(not callable(env_resolver) or message_env is not None))
+            allow_host_without_env=allow_host)
         if replacement != content:
             total_size += len(replacement) - size
             tool_messages[idx]["content"] = replacement

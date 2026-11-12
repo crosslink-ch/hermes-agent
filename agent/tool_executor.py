@@ -1237,9 +1237,14 @@ def _finalize_tool_batch(agent, messages: list, effective_task_id: str, num_tool
             return get_active_env(effective_task_id)
         target, scope, env = identity
         return env if env is not None else _result_environment(effective_task_id, target, scope)
+    def host_spill_allowed(message):
+        # Same rule as the per-result spill: only a named target's output must stay on its target.
+        identity = identities.get(message.get("tool_call_id"))
+        return identity is None or identity[0] is None
+
     batch = messages[-num_tools:]
     contents_before = [message.get("content") for message in batch]
-    enforce_turn_budget(batch, env_resolver=producing_env, config=budget)
+    enforce_turn_budget(batch, env_resolver=producing_env, config=budget, host_spill_allowed=host_spill_allowed)
     for message in batch:
         target, scope, _env = identities.pop(message.get("tool_call_id"), (None, None, None))
         message["content"] = _persisted_target_hint(message.get("content", ""), target, scope)
