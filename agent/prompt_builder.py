@@ -1046,7 +1046,8 @@ def build_environment_hints(*, home_override: Path | str | None = None) -> str:
     profile: binding it would make the config loader create a home skeleton there, and the skills
     prompt would then treat that directory as a profile with its own plugin manager.
     """
-    if home_override is not None and (Path(home_override) / "config.yaml").is_file():
+    from hermes_cli.config_backend import config_exists
+    if home_override is not None and config_exists(Path(home_override) / "config.yaml"):
         from hermes_constants import set_hermes_home_override, reset_hermes_home_override
         token = set_hermes_home_override(home_override)
         try:
