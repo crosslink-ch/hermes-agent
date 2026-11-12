@@ -9,12 +9,9 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.agent import test_run_agent as _base
-from tests.agent.test_run_agent import _mock_assistant_msg, _mock_tool_call
+from tests.agent.run_agent_fixtures import _mock_assistant_msg, _mock_tool_call
 
-# Reuse the facade's fixtures by name (an import would shadow-redefine ``agent`` — F811).
-agent = _base.agent
-_mock_plugin_discovery = _base._mock_plugin_discovery
+pytest_plugins = ["tests.agent.run_agent_fixtures"]
 
 
 class TestExecuteToolCallsInterruptHook:

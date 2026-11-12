@@ -1,24 +1,20 @@
-"""Headed-browser cleanup fallback parses a boolean, not token presence."""
+"""Per-turn cleanup: headed browsers are left to the idle reaper; the VM is always released."""
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
 
-@pytest.mark.parametrize("value,headed", [("false", False), ("0", False), ("", False), ("true", True), ("yes", True)])
-def test_browser_cleanup_fallback_respects_boolean_value(monkeypatch, value, headed):
+@pytest.mark.parametrize("headed", [False, True])
+def test_browser_cleanup_follows_headed_mode(monkeypatch, headed):
     from agent import chat_completion_helpers
-    from tools import browser_tool_cloud, terminal_tool_target_lifecycle
-
-    def optional_browser_unavailable():
-        raise ImportError("optional browser integration unavailable")
+    from tools import browser_session_cloud, terminal_tool_target_lifecycle
 
     runtime = SimpleNamespace(cleanup_vm=Mock(), cleanup_browser=Mock())
     monkeypatch.setattr(chat_completion_helpers, "_ra", lambda: runtime)
-    monkeypatch.setattr(browser_tool_cloud, "_is_headed_mode", optional_browser_unavailable)
+    monkeypatch.setattr(browser_session_cloud, "is_headed_mode", lambda: headed)
     monkeypatch.setattr(terminal_tool_target_lifecycle, "release_logical_environment_turn_for_cleanup", lambda _task: None)
     monkeypatch.setattr(terminal_tool_target_lifecycle, "active_environment_turns", lambda _task: 0)
-    monkeypatch.setenv("AGENT_BROWSER_HEADED", value)
 
     chat_completion_helpers.cleanup_task_resources(SimpleNamespace(verbose_logging=False), "task")
 
