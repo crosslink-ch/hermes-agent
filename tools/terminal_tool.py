@@ -802,39 +802,6 @@ def _resolve_config_cwd(env_type: str, mount_docker_cwd: bool) -> tuple:
     return cwd, host_cwd
 
 
-def _apply_task_cwd_override(
-    config: dict[str, Any], cwd: str, cwd_override: Optional[str],
-) -> str:
-    """Apply a task workspace cwd without leaking host paths into containers.
-
-    Docker's explicit mount-cwd mode is the exception: a registered host
-    workspace should become the bind source and commands should run in
-    ``/workspace``. Other container backends fall back to the target's already
-    sanitized configured cwd.
-    """
-    env_type = config.get("env_type")
-    if (
-        env_type == "docker"
-        and config.get("docker_mount_cwd_to_workspace")
-        and isinstance(cwd_override, str)
-        and cwd_override.strip()
-    ):
-        candidate = os.path.abspath(os.path.expanduser(cwd_override))
-        is_host_path = (
-            any(candidate.startswith(prefix) for prefix in _HOST_CWD_PREFIXES)
-            or (
-                os.path.isabs(candidate)
-                and os.path.isdir(candidate)
-            )
-        )
-        if is_host_path:
-            config["host_cwd"] = candidate
-            return "/workspace"
-    if _is_container_backend(env_type) and _is_unusable_container_cwd(cwd):
-        return config["cwd"]
-    return cwd
-
-
 def _get_env_config(terminal_config: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Return canonical terminal config for legacy env vars or a target mapping.
 

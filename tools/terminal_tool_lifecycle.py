@@ -21,7 +21,7 @@ from tools.terminal_tool_backends import (
     _local_config_from_config,
     _ssh_config_from_config,
 )
-from tools.terminal_tool_config import _quiet, _CONTAINER_BACKENDS, _is_unusable_container_cwd
+from tools.terminal_tool_config import _quiet, _CONTAINER_BACKENDS, _apply_task_cwd_override, _is_unusable_container_cwd
 
 def _environment_is_persistent(env: Any) -> bool:
     return bool(getattr(env, "_session_scoped", False) or getattr(env, "_persistent", False)
@@ -239,7 +239,7 @@ def ensure_task_env(
     otherwise a first-use image read can create an unscoped environment that a
     later terminal call cannot find or safely reuse.
     """
-    from tools.terminal_tool import _active_environments, _apply_task_cwd_override, _create_environment, _creation_locks, _creation_locks_lock, _docker_environment_is_session_scoped, _env_lock, _environment_scope_key, _get_env_config, _last_activity, _resolve_container_task_id, _resolve_task_host_cwd, _start_cleanup_thread, _target_resolution, get_session_cwd, resolve_task_overrides
+    from tools.terminal_tool import _active_environments, _create_environment, _creation_locks, _creation_locks_lock, _docker_environment_is_session_scoped, _env_lock, _environment_scope_key, _get_env_config, _last_activity, _resolve_container_task_id, _resolve_task_host_cwd, _start_cleanup_thread, _target_resolution, get_session_cwd, resolve_task_overrides
     from tools.terminal_tool_target_lifecycle import _EnvironmentReplacementError, _build_environment_constructor_configs, _cleanup_environment_resource, _environment_has_stable_storage, _environment_matches_target, _prepare_environment_replacement, _record_environment_lifetime, _record_environment_target, _retire_replaced_environment
     try:
         resolution = _target_resolution(target)
