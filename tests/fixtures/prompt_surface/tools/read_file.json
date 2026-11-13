@@ -3,6 +3,10 @@
   "name": "read_file",
   "parameters": {
     "properties": {
+      "execution_target": {
+        "description": "Optional named execution target; uses terminal.default_target when omitted.",
+        "type": "string"
+      },
       "limit": {
         "default": 2000,
         "description": "Maximum number of lines to read (default: 2000, max: 2000). Reads are additionally capped at a ~100K-character budget with a next_offset continuation.",
@@ -17,6 +21,10 @@
       },
       "path": {
         "description": "Path to the file to read (absolute, relative, or ~/path)",
+        "type": "string"
+      },
+      "runtime_scope": {
+        "description": "Immutable producing-runtime scope from a saved-output hint; pass only when supplied.",
         "type": "string"
       }
     },

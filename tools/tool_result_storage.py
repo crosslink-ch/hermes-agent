@@ -421,7 +421,7 @@ def extract_persisted_path(content: str) -> str | None:
 
 def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, env=None,
                               config: BudgetConfig = DEFAULT_BUDGET,
-                              threshold: float | None = None) -> str:
+                              threshold: float | None = None, allow_host_without_env: bool = True) -> str:
     """Layer 2: persist an oversized result, return preview + path. ``threshold`` overrides
     ``config.resolve_threshold(tool_name)``; falls back to inline truncation when no write
     location succeeds."""
@@ -441,7 +441,7 @@ def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, en
         return _build_persisted_message(preview, has_more, len(persisted_content), path)
 
     # Always persist host-side first: cache/spillover is the single canonical home.
-    host_path = _write_to_spillover(persisted_content, filename)
+    host_path = _write_to_spillover(persisted_content, filename) if env is not None or allow_host_without_env else None
     host_side = _is_host_side_env(env)
     if host_side and host_path is not None:
         return _persisted(host_path)
@@ -471,7 +471,8 @@ def _content_text_size(content) -> int:
     return len(content or "")
 
 
-def _spill_largest_text_part(parts: list, tool_use_id: str, env, config: BudgetConfig) -> tuple[list, int]:
+def _spill_largest_text_part(parts: list, tool_use_id: str, env, config: BudgetConfig,
+                             *, allow_host_without_env: bool = True) -> tuple[list, int]:
     """Persist the largest non-persisted text part of a multimodal list; ``(new parts, chars saved)``."""
     texts = [(i, p["text"]) for i, p in enumerate(parts) if isinstance(p, dict) and p.get("type") == "text"
              and isinstance(p.get("text"), str) and PERSISTED_OUTPUT_TAG not in p["text"]]
@@ -479,17 +480,24 @@ def _spill_largest_text_part(parts: list, tool_use_id: str, env, config: BudgetC
         return parts, 0
     idx, text = max(texts, key=lambda t: len(t[1]))
     replacement = maybe_persist_tool_result(content=text, tool_name=_BUDGET_TOOL_NAME,
-                                            tool_use_id=f"{tool_use_id}_part{idx}", env=env, config=config, threshold=0)
+                                            tool_use_id=f"{tool_use_id}_part{idx}", env=env, config=config, threshold=0,
+                                            allow_host_without_env=allow_host_without_env)
     if replacement == text:
         return parts, 0
     return [*parts[:idx], {**parts[idx], "text": replacement}, *parts[idx + 1:]], len(text) - len(replacement)
 
 
 def enforce_turn_budget(tool_messages: list[dict], env=None,
-                        config: BudgetConfig = DEFAULT_BUDGET) -> list[dict]:
+                        config: BudgetConfig = DEFAULT_BUDGET, env_resolver=None,
+                        host_spill_allowed=None) -> list[dict]:
     """Layer 3: persist the largest non-persisted results first until the turn's aggregate is
     under budget. Mutates the list in-place and returns it. A multimodal result (part list) counts its
-    text characters and spills its largest text part; its images stay inline."""
+    text characters and spills its largest text part; its images stay inline.
+
+    ``env_resolver(message)`` names the environment that produced each result. ``host_spill_allowed
+    (message)`` says whether that result may fall back to the host spillover when its environment is
+    gone; without it, a resolver that answers ``None`` refuses the host (a named target's output must
+    not leave its target)."""
     sizes = [_content_text_size(msg.get("content", "")) for msg in tool_messages]
     total_size = sum(sizes)
     candidates = [(i, size) for i, size in enumerate(sizes)
@@ -502,8 +510,12 @@ def enforce_turn_budget(tool_messages: list[dict], env=None,
             break
         content = tool_messages[idx]["content"]
         tool_use_id = tool_messages[idx].get("tool_call_id", f"budget_{idx}")
+        message_env = env_resolver(tool_messages[idx]) if callable(env_resolver) else env
+        allow_host = (not callable(env_resolver) or message_env is not None
+                      or (callable(host_spill_allowed) and bool(host_spill_allowed(tool_messages[idx]))))
         if isinstance(content, list):
-            parts, saved = _spill_largest_text_part(content, tool_use_id, env, config)
+            parts, saved = _spill_largest_text_part(content, tool_use_id, message_env, config,
+                allow_host_without_env=allow_host)
             if saved:
                 total_size -= saved
                 tool_messages[idx]["content"] = parts
@@ -511,7 +523,8 @@ def enforce_turn_budget(tool_messages: list[dict], env=None,
             continue
         replacement = maybe_persist_tool_result(
             content=content, tool_name=_BUDGET_TOOL_NAME, tool_use_id=tool_use_id,
-            env=env, config=config, threshold=0)
+            env=message_env, config=config, threshold=0,
+            allow_host_without_env=allow_host)
         if replacement != content:
             total_size += len(replacement) - size
             tool_messages[idx]["content"] = replacement

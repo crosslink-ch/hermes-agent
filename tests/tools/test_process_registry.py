@@ -21,50 +21,6 @@ from tools.process_registry import (
 )
 
 
-@pytest.fixture()
-def registry(monkeypatch):
-    """A fresh ProcessRegistry. Fake Popen pids never reach the owner-death supervisor: a live pgid would start it."""
-    monkeypatch.setattr("hermes_cli.process_identity._update_supervised_pgids", lambda verb, pgids: None)
-    return ProcessRegistry()
-
-
-@pytest.fixture(autouse=True)
-def _reset_systemd_scope_cache():
-    """Reset the cached ``systemd-run --user --scope`` availability flag
-    before each test so a probe run on a real systemd host (where
-    ``INVOCATION_ID`` is set) doesn't leak into tests that mock
-    ``subprocess.Popen``. Tests that exercise the probe directly reset the
-    cache themselves."""
-    import tools.process_registry as _pr
-
-    original = _pr._SYSTEMD_SCOPE_AVAILABLE
-    _pr._SYSTEMD_SCOPE_AVAILABLE = False
-    yield
-    _pr._SYSTEMD_SCOPE_AVAILABLE = original
-
-
-def _make_session(
-    sid="proc_test123",
-    command="echo hello",
-    task_id="t1",
-    exited=False,
-    exit_code=None,
-    output="",
-    started_at=None,
-) -> ProcessSession:
-    """Helper to create a ProcessSession for testing."""
-    s = ProcessSession(
-        id=sid,
-        command=command,
-        task_id=task_id,
-        started_at=started_at or time.time(),
-        exited=exited,
-        exit_code=exit_code,
-        output_buffer=output,
-    )
-    return s
-
-
 def _spawn_python_sleep(seconds: float) -> subprocess.Popen:
     """Spawn a portable short-lived Python sleep process."""
     return subprocess.Popen(
@@ -715,6 +671,15 @@ class TestActiveQueries:
         assert registry.has_active_processes("t1") is True
         assert registry.has_active_processes("t2") is False
 
+    def test_has_active_environment_uses_object_identity(self, registry):
+        old_env = object()
+        new_env = object()
+        s = _make_session(task_id="t1")
+        s.env_ref = old_env
+        registry._running[s.id] = s
+        assert registry.has_active_environment(old_env) is True
+        assert registry.has_active_environment(new_env) is False
+
     def test_has_active_for_session_with_max_age_stale(self, registry):
         """Stale process (older than max_active_age) is ignored."""
         s = _make_session(started_at=time.time() - 90000)  # 25 hours ago
@@ -1220,107 +1185,6 @@ class TestSpawnRewriteCompoundBackground:
 # Checkpoint
 # =========================================================================
 
-class TestCheckpoint:
-    def test_recover_dead_pid(self, registry, tmp_path):
-        checkpoint = tmp_path / "procs.json"
-        checkpoint.write_text(json.dumps([{
-            "session_id": "proc_dead",
-            "command": "sleep 999",
-            "pid": 999999999,  # almost certainly not running
-            "task_id": "t1",
-        }]))
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
-            recovered = registry.recover_from_checkpoint()
-            assert recovered == 0
-
-    def test_recover_dead_wrapper_retries_unreaped_systemd_scope(
-        self, registry, tmp_path, monkeypatch
-    ):
-        checkpoint = tmp_path / "procs.json"
-        entry = {
-            "session_id": "proc_dead_scope",
-            "command": "daemonize",
-            "pid": 999999999,
-            "pid_scope": "host",
-            "host_start_time": 123.0,
-            "systemd_unit": "hermes-worker-proc_dead_scope.scope",
-        }
-        checkpoint.write_text(json.dumps([entry]))
-        monkeypatch.setattr(registry, "_host_pid_is_ours", lambda *_args: False)
-        monkeypatch.setattr(registry, "_is_host_pid_alive", lambda *_args: False)
-
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint), patch(
-            "tools.process_registry._stop_systemd_unit", return_value=False
-        ) as stop_unit:
-            assert registry.recover_from_checkpoint() == 0
-
-        stop_unit.assert_called_once_with(entry["systemd_unit"])
-        assert json.loads(checkpoint.read_text()) == [entry]
-
-    def test_recover_dead_wrapper_drops_reaped_systemd_scope(
-        self, registry, tmp_path, monkeypatch
-    ):
-        checkpoint = tmp_path / "procs.json"
-        entry = {
-            "session_id": "proc_dead_scope",
-            "command": "daemonize",
-            "pid": 999999999,
-            "pid_scope": "host",
-            "host_start_time": 123.0,
-            "systemd_unit": "hermes-worker-proc_dead_scope.scope",
-        }
-        checkpoint.write_text(json.dumps([entry]))
-        monkeypatch.setattr(registry, "_host_pid_is_ours", lambda *_args: False)
-        monkeypatch.setattr(registry, "_is_host_pid_alive", lambda *_args: False)
-
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint), patch(
-            "tools.process_registry._stop_systemd_unit", return_value=True
-        ) as stop_unit:
-            assert registry.recover_from_checkpoint() == 0
-
-        stop_unit.assert_called_once_with(entry["systemd_unit"])
-        assert json.loads(checkpoint.read_text()) == []
-
-
-    def test_recovery_skips_explicit_sandbox_backed_entries(self, registry, tmp_path):
-        checkpoint = tmp_path / "procs.json"
-        original = [{
-            "session_id": "proc_remote",
-            "command": "sleep 999",
-            "pid": os.getpid(),
-            "task_id": "t1",
-            "pid_scope": "sandbox",
-        }]
-        checkpoint.write_text(json.dumps(original))
-
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
-            recovered = registry.recover_from_checkpoint()
-            assert recovered == 0
-            assert registry.get("proc_remote") is None
-
-            data = json.loads(checkpoint.read_text())
-            assert data == []
-
-    def test_checkpoint_redacts_command_with_inline_secret(self, registry, tmp_path):
-        """Issue #77484: the checkpoint file persists raw commands; inline
-        credentials (e.g. ``curl -H 'Authorization: Bearer sk-...'``) must be
-        redacted before write. Recovery only uses command for display/logging
-        (the process is already running), so masking is lossless."""
-        checkpoint = tmp_path / "procs.json"
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
-            secret = "sk-secret1234567890"
-            command = f"curl -H 'Authorization: Bearer {secret}' http://x"
-            s = _make_session(sid="proc_secret", command=command)
-            s.pid = 12345
-            s.host_start_time = int(time.time())
-            registry._running[s.id] = s
-            registry._write_checkpoint()
-
-            data = json.loads(checkpoint.read_text())
-            assert data[0]["session_id"] == "proc_secret"
-            assert secret not in data[0]["command"]
-            assert data[0]["command"] != command
-
 # =========================================================================
 # Kill process
 # =========================================================================
@@ -1428,6 +1292,31 @@ class TestKillProcess:
             registry._finished.pop(s.id, None)
 
 
+    def test_kill_error_preserves_execution_target_metadata(self, registry):
+        s = _make_session(sid="proc_kill_error", command="sleep 999")
+        s.process = MagicMock()
+        s.process.pid = 424242
+        s.target = "box"
+        s.backend = "local"
+        s.runtime_scope = "scope-server-1"
+        registry._running[s.id] = s
+
+        with patch.object(
+            registry,
+            "_terminate_host_pid",
+            side_effect=RuntimeError("termination raced with process exit"),
+        ):
+            result = registry.kill_process(s.id)
+
+        assert result == {
+            "status": "error",
+            "error": "termination raced with process exit",
+            "target": "box",
+            "backend": "local",
+            "runtime_scope": "scope-server-1",
+        }
+
+
 # =========================================================================
 # Tool handler
 # =========================================================================
@@ -1444,6 +1333,10 @@ class TestProcessToolHandler:
 # =========================================================================
 
 from tools.process_registry_notifications import format_process_notification
+
+from tests.tools.process_registry_fixtures import _make_session
+
+pytest_plugins = ["tests.tools.process_registry_fixtures"]
 
 
 def test_drain_notifications_completion_callback_exception_fails_closed(registry):

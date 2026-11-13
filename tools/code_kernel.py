@@ -57,6 +57,8 @@ def run_cell(request, execution_count):
     out, err = io.StringIO(), io.StringIO()
     status, trace = "ok", ""
     try:
+        if request.get("cwd"):
+            os.chdir(request["cwd"])
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             exec(compile(request["code"], "<cell>", "exec"), GLOBALS)
     except SystemExit as exc:
@@ -240,7 +242,11 @@ class CellAuthority:
             except Exception:
                 previous = None
         try:
-            return handle_function_call(tool_name, tool_args, task_id=self.task_id)
+            from tools.code_execution_rpc import _inherited_rpc_authority
+            from tools.code_execution_tool import _dispatch_rpc_tool, _inherit_execution_target
+            target, scope, config = _inherited_rpc_authority(None, None, None)
+            bound_args = _inherit_execution_target(tool_name, tool_args, target, scope)
+            return _dispatch_rpc_tool(handle_function_call, tool_name, bound_args, self.task_id, config)
         finally:
             if previous is not None:
                 try:

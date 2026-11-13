@@ -21,12 +21,102 @@ every known ``terminal.*`` key and comparing the env var it writes against
 cli.py's map; the config-set path is checked for key coverage only.
 """
 
+import json
+import subprocess
+import sys
 import os
 from unittest.mock import patch
 
 
+def test_classic_cli_bridges_named_default_target(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "terminal:\n"
+        "  default_target: devbox\n"
+        "  targets:\n"
+        "    devbox:\n"
+        "      backend: ssh\n"
+        "      cwd: ~/project\n"
+        "      ssh_host: example.invalid\n"
+        "      ssh_user: agent\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    for key in (
+        "_HERMES_GATEWAY", "TERMINAL_ENV", "TERMINAL_CWD", "HERMES_PROFILE",
+    ):
+        env.pop(key, None)
+    env.update({
+        "HERMES_HOME": str(tmp_path),
+        "HERMES_IGNORE_USER_CONFIG": "0",
+    })
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json, os, cli; "
+                "print(json.dumps([os.environ.get('TERMINAL_ENV'), "
+                "os.environ.get('TERMINAL_CWD')]))"
+            ),
+        ],
+        cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    assert json.loads(proc.stdout.strip().splitlines()[-1]) == ["ssh", "~/project"]
+
+    ignored_env = env.copy()
+    ignored_env["HERMES_IGNORE_USER_CONFIG"] = "1"
+    ignored = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json, cli; "
+                "from tools.execution_targets import resolve_execution_target; "
+                "r=resolve_execution_target(); "
+                "print(json.dumps([r.named, r.backend]))"
+            ),
+        ],
+        cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        env=ignored_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    assert json.loads(ignored.stdout.strip().splitlines()[-1]) == [False, "local"]
+
+    gateway_env = ignored_env.copy()
+    gateway_env["_HERMES_GATEWAY"] = "1"
+    gateway = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import json, cli; "
+                "from tools.execution_targets import resolve_execution_target; "
+                "r=resolve_execution_target(); "
+                "print(json.dumps([r.named, r.backend]))"
+            ),
+        ],
+        cwd=os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        env=gateway_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    assert json.loads(gateway.stdout.strip().splitlines()[-1]) == [True, "ssh"]
+
+
+
+
 def _cli_env_map() -> dict[str, str]:
-    """terminal config key -> env var bridged by cli.load_cli_config() (via _mirror_config_to_env)."""
+    """Terminal settings mirrored by the CLI."""
     import cli
     return dict(cli._TERMINAL_ENV_MAPPINGS)
 

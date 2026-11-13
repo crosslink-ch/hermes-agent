@@ -14,7 +14,15 @@ Primary files:
 - `model_tools.py`
 - `toolsets.py`
 - `tools/terminal_tool.py`
+- `tools/terminal_tool_session.py` — profile/target-scoped cwd, overrides and child aliases
+- `tools/terminal_tool_lifecycle.py` — environment creation, lookup and cleanup
+- `tools/process_registry_session.py` — background-process records and synchronized output buffers
 - `tools/environments/*`
+
+The terminal facade retains shared caches and the public entry points. Session and lifecycle
+siblings late-bind those caches and constructor seams rather than copying mutable state.
+Approval fallback text lives in `gateway/run_approval_render.py`; authorization remains in
+the approval and gateway dispatch owners, not the renderer.
 
 ## Tool registration model
 

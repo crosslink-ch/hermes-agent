@@ -59,6 +59,7 @@ from agent.tool_dispatch_helpers import (
 from tools.terminal_tool_lifecycle import get_active_env
 from tools.thread_context import propagate_context_to_thread
 from tools.tool_result_storage import (
+    PERSISTED_OUTPUT_TAG,
     maybe_persist_tool_result,
     enforce_turn_budget,
     extract_persisted_path,
@@ -81,57 +82,38 @@ def _tc_name(tool_call: Any) -> str:
     return getattr(getattr(tool_call, "function", None), "name", "") or "tool"
 
 
-def _record_persisted_path_for_stub(agent, tool_call_id: str, function_result) -> None:
-    """Record the spillover file path so a later result-reference stub can't dangle (best-effort)."""
-    try:
-        candidates = [function_result] if isinstance(function_result, str) else [
-            function_result.get("text_summary"),
-            *(p.get("text") for p in function_result.get("content") or [] if isinstance(p, dict)),
-        ] if _is_multimodal_tool_result(function_result) else []
-        path = next((p for p in map(extract_persisted_path, candidates) if p), None)
-        if path:
-            agent._tool_guardrails.record_persisted_result(tool_call_id, path)
-    except Exception as exc:
-        logger.debug("persisted-path record for result stub failed: %s", exc)
+from agent.tool_executor_storage import (
+    _record_persisted_path_for_stub,
+    _budget_for_agent,
+    _parse_tool_arguments,
+)
 
 
-def _ensure_file_checkpoint(agent, function_name: str, function_args: dict, effective_task_id: str) -> None:
-    """Checkpoint the same workspace path that the file tool will mutate, resolved the way
-    file tools do (against the task's live cwd, which differs from the process cwd in Docker)."""
-    file_path = function_args.get("path", "")
-    if not file_path:
-        return
-    from agent.file_safety import is_nt_namespace_path
-    from tools.file_tools_paths import _resolve_path_for_task, container_backend_for_task
-
-    if container_backend_for_task(effective_task_id or "default") is not None:
-        return  # container paths: nothing to checkpoint on the host
-
-    # Resolving an NT-namespace path is itself the NTLM-leak trigger; leave the
-    # tool's raw-string guard to refuse it without a checkpoint stat.
-    if is_nt_namespace_path(file_path):
-        return
-    resolved_path = _resolve_path_for_task(file_path, effective_task_id or "default")
-    agent._checkpoint_mgr.ensure_checkpoint(
-        agent._checkpoint_mgr.get_working_dir_for_path(str(resolved_path)), f"before {function_name}",
-    )
+from agent.tool_executor_targets import (
+    _TARGET_RESULT_TOOLS,
+    _ensure_file_checkpoint,
+    _result_target_identity,
+    _result_environment,
+    _active_env_for_tool_result,
+    _selected_local_target_cwd,
+    _target_subdirectory_hints,
+    _persisted_target_hint,
+)
 
 
-def _budget_for_agent(agent) -> BudgetConfig:
-    """Tool-result BudgetConfig scaled to the agent's context window. Unknown length goes
-    through ``budget_for_context_window(None)`` (not DEFAULT_BUDGET) so the MCP threshold
-    override still applies.
 
-    Large-context models keep the historical 100K/200K char defaults; small models (e.g. a 65K-token local
-    model switched into mid-session) get a budget proportional to their window so a single large tool result
-    can't push the request past the model's limit (#23767). Falls back to the default budget when the
-    context length isn't resolvable.
-    """
-    try:
-        ctx = getattr(getattr(agent, "context_compressor", None), "context_length", None)
-        return budget_for_context_window(int(ctx) if ctx else None)
-    except Exception:
-        return DEFAULT_BUDGET
+
+
+
+
+
+
+
+
+
+
+
+
 
 _MAX_TOOL_WORKERS = 8  # concurrent worker threads per batch
 _DEFAULT_IMAGE_PARALLEL_REQUESTS = 4
@@ -173,30 +155,9 @@ class _BatchAbandoned(BaseException):
     so ``except Exception`` handlers in the middleware chain can't swallow it."""
 
 
-def _parse_tool_arguments(raw_arguments: Any) -> tuple[dict, Optional[str]]:
-    """Parse model-emitted arguments without repairing or coercing them."""
-    try:
-        arguments = json.loads(raw_arguments)
-    except (json.JSONDecodeError, TypeError):
-        arguments = None
-    if isinstance(arguments, dict):
-        return arguments, None
-    return {}, json.dumps(
-        {"error": "Invalid tool arguments", "message": "Tool arguments must be a valid JSON object; tool was not executed."},
-        ensure_ascii=False,
-    )
 
 
-def _resolve_concurrent_tool_timeout() -> float | None:
-    """Per-batch concurrent deadline: ``timeouts.tools.concurrent_batch`` wins,
-    ``HERMES_CONCURRENT_TOOL_TIMEOUT_S`` is the legacy bridge, ``0``/negative disables."""
-    from agent.deadline import resolve_timeout
-
-    return resolve_timeout(
-        "tools.concurrent_batch",
-        default=_DEFAULT_CONCURRENT_TOOL_TIMEOUT_S,
-        env_var="HERMES_CONCURRENT_TOOL_TIMEOUT_S",
-    )
+from agent.tool_dispatch_helpers import _resolve_concurrent_tool_timeout
 
 
 def _flush_session_db_after_tool_progress(agent, messages: list, *, stage: str) -> bool:
@@ -705,6 +666,14 @@ def _dispatch_authorized_once(
         resolve = lambda: _pre_tool_block(agent, ref)
         block_message, ref.args = resolve() if authorization_gate is None else authorization_gate.run(resolve)
         state.args = ref.args
+        if block_message is None:
+            from tools.execution_targets import ExecutionTargetError, validate_execution_target_args
+            try:
+                validate_execution_target_args(ref.name, ref.args)
+            except ExecutionTargetError as exc:
+                block_message = str(exc)
+                block_error_type = "execution_target_validation"
+
     block_body = None if block_message is None else {"error": block_message}
 
     # Checked once, after plugin modify hooks (which may replace arguments) and
@@ -740,11 +709,12 @@ def _dispatch_authorized_once(
         agent._iters_since_skill = 0
 
     from agent.terminal_approval_batch import prepare_current_terminal
+    from tools.terminal_tool import environment_turn_usage, execution_environment_turn_key
     prepare_current_terminal(ref)
     _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
     from agent.tool_progress_relay import bound_tool_progress
     from tools.connectors.data_use import collect_data_use
-    with bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use:
+    with environment_turn_usage(ref.task_id, environment_key=execution_environment_turn_key(ref.name, ref.args, task_id=ref.task_id)), bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use:
         try:
             return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
         finally:
@@ -783,6 +753,12 @@ def _run_agent_tool_execution_middleware(
             state.dispatched = True
             state.blocked = False
             state.args = final_args
+        from tools.execution_targets import ExecutionTargetError, validate_execution_target_args
+        try:
+            validate_execution_target_args(function_name, final_args)
+        except ExecutionTargetError as exc:
+            state.blocked = True
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
         return _dispatch_authorized_once(
             agent,
             state,
@@ -794,8 +770,16 @@ def _run_agent_tool_execution_middleware(
             authorization_gate=authorization_gate,
         )
 
+    def _freeze_and_authorize(candidate_args: dict[str, Any]) -> Any:
+        target_config_scope = contextlib.nullcontext()
+        if function_name in _TARGET_RESULT_TOOLS:
+            from tools.execution_targets import frozen_execution_target_config
+            target_config_scope = frozen_execution_target_config()
+        with target_config_scope:
+            return _authorized_dispatch(candidate_args)
+
     from agent.terminal_approval_batch import bind_prepared_dispatch
-    _authorized_dispatch = bind_prepared_dispatch(_authorized_dispatch)
+    _freeze_and_authorize = bind_prepared_dispatch(_freeze_and_authorize)
 
     def _hermes_pipeline(relay_args: dict[str, Any]) -> Any:
         request_result = apply_tool_request_middleware(
@@ -808,10 +792,21 @@ def _run_agent_tool_execution_middleware(
         request_args = request_result.payload if isinstance(request_result.payload, dict) else relay_args
         trace.clear()
         trace.extend(request_result.trace)
+        # A removed/aliased selector must be rejected before execution hooks,
+        # guardrails, checkpointing, or any approval prompt sees it.
+        from tools.execution_targets import ExecutionTargetError, validate_execution_target_args
+        try:
+            validate_execution_target_args(function_name, request_args)
+        except ExecutionTargetError as exc:
+            state.args = request_args
+            state.blocked = True
+            if begin_execution is not None:
+                begin_execution()
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
         return run_tool_execution_middleware(
             function_name,
             request_args,
-            lambda next_args: _authorized_dispatch(next_args if isinstance(next_args, dict) else request_args),
+            lambda next_args: _freeze_and_authorize(next_args if isinstance(next_args, dict) else request_args),
             original_args=function_args,
             **tool_hook_ids(agent, effective_task_id, tool_call_id),
         )
@@ -1038,8 +1033,12 @@ def _begin_tool_execution(agent, ref: _ToolCallRef, display_index: int | None) -
         elif function_name == "terminal":
             command = function_args.get("command", "")
             if _is_destructive_command(command):
+                from tools.execution_targets import resolve_execution_target
                 from tools.file_tools_paths import container_backend_for_task
-                if container_backend_for_task(effective_task_id or "default") is None:
+                resolution = resolve_execution_target(function_args.get("execution_target"))
+                if resolution.backend == "local" and (
+                    resolution.named or container_backend_for_task(effective_task_id or "default") is None
+                ):
                     from agent.runtime_cwd import scope_terminal_cwd
                     cwd = function_args.get("workdir") or scope_terminal_cwd() or os.getcwd()
                     agent._checkpoint_mgr.ensure_checkpoint(cwd, f"before terminal: {command[:60]}")
@@ -1117,23 +1116,38 @@ def _commit_tool_result(
     _status_suffix = " (error)" if is_error else ""
     agent._touch_activity(f"tool completed: {function_name} ({tool_duration:.1f}s){_status_suffix}")
 
+    target, scope = _result_target_identity(function_name, function_args, function_result)
+    producing_env = _active_env_for_tool_result(
+        effective_task_id, function_name, function_args, function_result,
+    )
+    identities = getattr(agent, "_execution_target_by_tool_call", None)
+    if identities is None:
+        identities = {}
+        agent._execution_target_by_tool_call = identities
+    identities[tool_call_id] = (target, scope, producing_env)
     persisted_result = function_result
     if _is_multimodal_tool_result(persisted_result):
         persisted_result = _persist_multimodal_text_parts(
-            persisted_result, function_name, tool_call_id, get_active_env(effective_task_id), budget,
+            persisted_result, function_name, tool_call_id, producing_env, budget,
+            allow_host_without_env=(target is None or producing_env is not None),
         )
     else:
         persisted_result = maybe_persist_tool_result(
             content=persisted_result,
             tool_name=function_name,
             tool_use_id=tool_call_id,
-            env=get_active_env(effective_task_id),
+            env=producing_env,
             config=budget,
+            allow_host_without_env=(target is None or producing_env is not None),
         )
+        persisted_result = _persisted_target_hint(persisted_result, target, scope)
     _record_persisted_path_for_stub(agent, tool_call_id, persisted_result)
     note_tool_result(agent, function_name, tool_call_id, function_result, persisted_result)
 
-    subdir_hints = agent._subdirectory_hints.check_tool_call(function_name, function_args)
+    subdir_hints = _target_subdirectory_hints(
+        agent, effective_task_id, function_name, function_args, target,
+        runtime_scope=scope,
+    )
     if subdir_hints:
         if _is_multimodal_tool_result(persisted_result):
             # Hint goes on the text summary part so the model still sees it; image blocks untouched.
@@ -1177,7 +1191,10 @@ def _commit_tool_result(
     return persisted_result, function_result, tool_message.get("_tool_output_risk")
 
 
-def _persist_multimodal_text_parts(result: dict, tool_name: str, tool_call_id: str, env, budget: BudgetConfig) -> dict:
+def _persist_multimodal_text_parts(
+    result: dict, tool_name: str, tool_call_id: str, env, budget: BudgetConfig,
+    *, allow_host_without_env: bool = True,
+) -> dict:
     """Spill oversized TEXT parts of a multimodal envelope through the same persistence policy as
     string results (#95429). A ``browser_exec`` call that captured a screenshot bakes its full
     stdout into the envelope's text part, which used to bypass ``maybe_persist_tool_result``
@@ -1191,7 +1208,7 @@ def _persist_multimodal_text_parts(result: dict, tool_name: str, tool_call_id: s
             # One spill file per part: a second oversized part under the same id would overwrite the first's file.
             part_id = tool_call_id if not spilled else f"{tool_call_id}_part{spilled}"
             replaced = maybe_persist_tool_result(content=text, tool_name=tool_name, tool_use_id=part_id,
-                                                 env=env, config=budget)
+                                                 env=env, config=budget, allow_host_without_env=allow_host_without_env)
             if replaced != text:
                 part = {**part, "text": replaced}
                 first_replacement = first_replacement or replaced
@@ -1213,9 +1230,24 @@ def _finalize_tool_batch(agent, messages: list, effective_task_id: str, num_tool
     steer marker is never truncated/discarded when enforcement replaces a result."""
     if num_tools <= 0:
         return
+    identities = getattr(agent, "_execution_target_by_tool_call", {})
+    def producing_env(message):
+        identity = identities.get(message.get("tool_call_id"))
+        if identity is None:
+            return get_active_env(effective_task_id)
+        target, scope, env = identity
+        return env if env is not None else _result_environment(effective_task_id, target, scope)
+    def host_spill_allowed(message):
+        # Same rule as the per-result spill: only a named target's output must stay on its target.
+        identity = identities.get(message.get("tool_call_id"))
+        return identity is None or identity[0] is None
+
     batch = messages[-num_tools:]
     contents_before = [message.get("content") for message in batch]
-    enforce_turn_budget(batch, env=get_active_env(effective_task_id), config=budget)
+    enforce_turn_budget(batch, env_resolver=producing_env, config=budget, host_spill_allowed=host_spill_allowed)
+    for message in batch:
+        target, scope, _env = identities.pop(message.get("tool_call_id"), (None, None, None))
+        message["content"] = _persisted_target_hint(message.get("content", ""), target, scope)
     plugin_live_notes.keep_after_turn_budget(agent, batch)
     sync_rewritten_tool_rows(agent, batch, contents_before)
     record_tool_batch(agent, batch, contents_before)

@@ -1068,6 +1068,28 @@ class TestLifecycleGuardModule:
         )
         assert result is False
 
+    @pytest.mark.parametrize(
+        ("host_script", "selected_target_script", "expected"),
+        [
+            ("echo safe\n", "hermes gateway restart\n", True),
+            ("hermes gateway restart\n", "echo safe\n", False),
+        ],
+    )
+    def test_selected_target_reader_is_authoritative_over_host_twin(
+        self, tmp_path, host_script, selected_target_script, expected,
+    ):
+        from cron.lifecycle_guard import (
+            contains_gateway_lifecycle_command_or_referenced_script,
+        )
+
+        (tmp_path / "run.sh").write_text(host_script, encoding="utf-8")
+
+        assert contains_gateway_lifecycle_command_or_referenced_script(
+            "bash run.sh",
+            cwd=str(tmp_path),
+            read_remote_script=lambda _path: selected_target_script,
+        ) is expected
+
     def test_shell_script_reference_walk_still_works(self, tmp_path):
         """The referenced-script walk still applies to real shell scripts:
         a .sh script that itself invokes a lifecycle command is caught."""
@@ -1660,14 +1682,14 @@ class TestRestartLoopGuard:
 class TestTerminalToolGatewayLifecycleGuardRemote:
     """Remote-backend and two-session cwd regression coverage."""
 
-    def _patch_env(self, monkeypatch, fake_env, *, inside_gateway: bool):
+    def _patch_env(self, monkeypatch, fake_env, *, inside_gateway: bool, backend: str = "local"):
         import tools.terminal_tool as tt
         from tools import process_registry
         eid = "default"
         monkeypatch.setattr(tt, "_active_environments", {eid: fake_env})
         monkeypatch.setattr(tt, "_last_activity", {eid: 0.0})
         monkeypatch.setattr(tt, "_task_env_overrides", {})
-        monkeypatch.setattr(tt, "_get_env_config", lambda: {"env_type": "local", "cwd": "/tmp", "timeout": 60, "lifetime_seconds": 3600})
+        monkeypatch.setattr(tt, "_get_env_config", lambda: {"env_type": backend, "cwd": "/tmp", "timeout": 60, "lifetime_seconds": 3600})
         monkeypatch.setattr(
             process_registry, "_is_supervised_gateway_process",
             lambda: inside_gateway,
@@ -1692,7 +1714,7 @@ class TestTerminalToolGatewayLifecycleGuardRemote:
 
         fake_env = _RemoteEnv()
         fake_env.cwd = "/remote/workspace"
-        self._patch_env(monkeypatch, fake_env, inside_gateway=True)
+        self._patch_env(monkeypatch, fake_env, inside_gateway=True, backend="ssh")
 
         result = json.loads(tt.terminal_tool(command=f"/bin/bash {script}"))
 

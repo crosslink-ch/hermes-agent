@@ -198,6 +198,8 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
         "pattern_key": primary_key,
         "pattern_keys": list(approval_data.get("pattern_keys", [primary_key])),
         "session_key": session_key, "surface": surface,
+        **({"target": approval_data["target"]} if "target" in approval_data else {}),
+        **({"backend": approval_data["backend"]} if "backend" in approval_data else {}),
     }
     keys = list(approval_data.get("pattern_keys") or [])
     # Born Deny-only: the mark exists before the entry is published, so no tap can approve it in the window
@@ -222,6 +224,8 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
             if not preparing_terminal_approval():
                 leader = next((e for e in _approval._gateway_queues.get(session_key, [])
                                if e.data.get("command") == approval_data.get("command")
+                               and e.data.get("target") == approval_data.get("target")
+                               and e.data.get("backend") == approval_data.get("backend")
                                and list(e.data.get("pattern_keys") or []) == keys
                                and _same_answerers(e.authority, entry.authority)), None)
             if leader is None:

@@ -179,6 +179,15 @@ def _peel_bridge_call(tool_name: str, function_args: dict) -> tuple[str, dict]:
         return tool_name, function_args
 
 
+def _named_execution_targets_enabled() -> bool:
+    """Conservatively serialize file paths when different backends may alias."""
+    try:
+        from tools.execution_targets import list_execution_targets
+        return any(target.named for target in list_execution_targets())
+    except (ValueError, OSError):
+        return True
+
+
 def _batch_admission(tool_call, execution_cwd: Optional[Path]) -> tuple[str, list[Path], bool] | None:
     """Classify one call for the planner: ``None`` = sequential barrier, else
     ``(effective_name, scoped_paths, is_writer)`` (empty paths = unscoped parallel-safe)."""
@@ -202,6 +211,8 @@ def _batch_admission(tool_call, execution_cwd: Optional[Path]) -> tuple[str, lis
     if name in _NEVER_PARALLEL_TOOLS or _requires_extended_tool_deadline(name):
         return None
     if name in _PATH_SCOPED_TOOLS:
+        if args.get("execution_target") is not None or _named_execution_targets_enabled():
+            return None
         scoped = _extract_parallel_scope_paths(name, args, execution_cwd=execution_cwd)
         return (name, scoped, name in _PATH_SCOPED_WRITERS) if scoped else None
     if name in _PARALLEL_SAFE_TOOLS or name in _PARALLEL_SAFE_BRIDGE_LOOKUPS or _is_mcp_tool_parallel_safe(name):
@@ -625,3 +636,16 @@ __all__ = [
     "_trajectory_normalize_msg",
     "make_tool_result_message",
 ]
+
+
+def _resolve_concurrent_tool_timeout() -> float | None:
+    """Per-batch concurrent deadline: ``timeouts.tools.concurrent_batch`` wins,
+    ``HERMES_CONCURRENT_TOOL_TIMEOUT_S`` is the legacy bridge, ``0``/negative disables."""
+    from agent.deadline import resolve_timeout
+    from agent.tool_executor import _DEFAULT_CONCURRENT_TOOL_TIMEOUT_S
+
+    return resolve_timeout(
+        "tools.concurrent_batch",
+        default=_DEFAULT_CONCURRENT_TOOL_TIMEOUT_S,
+        env_var="HERMES_CONCURRENT_TOOL_TIMEOUT_S",
+    )

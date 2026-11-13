@@ -227,6 +227,9 @@ After each turn:
 | `agent/conversation_loop.py` | The agent loop (`run_conversation()` body) |
 | `agent/turn_*.py` | Turn phases: iteration_prep, api_call, api_error, overflow, truncation, recovery |
 | `agent/tool_executor.py` | Tool-call execution and agent-level tool interception |
+| `agent/tool_executor_targets.py` | Producer-bound checkpoints, saved-output routing and target context hints |
+| `agent/tool_executor_storage.py` | Tool-result bookkeeping, context-window budgets and argument parsing |
+| `agent/chat_completion_cleanup.py` | Logical-turn lease release and environment/browser cleanup |
 | `agent/prompt_builder.py` | System prompt assembly from memory, skills, context files, personality |
 | `agent/context_engine.py` | ContextEngine ABC — pluggable context management |
 | `agent/context_compressor.py` | Default engine — lossy summarization algorithm |
