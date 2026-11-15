@@ -1,4 +1,3 @@
-from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -83,14 +82,15 @@ async def test_thechat_adapter_title_progress_only_sends_title():
 async def test_thechat_ignores_non_current_session_intent_shapes():
     runner = object.__new__(GatewayRunner)
     runner._session_db = None
+    runner.session_store = SimpleNamespace(
+        lookup_by_session_key=lambda key: (_ for _ in ()).throw(
+            AssertionError("a non-branch intent must not look up the route")
+        )
+    )
     source = SessionSource(
         platform=Platform.THECHAT,
         chat_id=CONVERSATION_ID,
         user_id="user-1",
-    )
-    current_entry = SimpleNamespace(
-        session_id="current-session",
-        session_key="thechat-key",
     )
 
     for raw_message in (
@@ -105,13 +105,9 @@ async def test_thechat_ignores_non_current_session_intent_shapes():
             raw_message=raw_message,
         )
 
-        result = await runner._apply_thechat_session_intent_async(
-            event,
-            source,
-            current_entry,
-        )
+        result = await runner._prepare_thechat_branch_route(event, source)
 
-        assert result is current_entry
+        assert result is None
         assert not hasattr(event, "hermes_session")
 
 
@@ -145,11 +141,16 @@ async def test_thechat_branch_resolves_parent_from_current_source_thread_contrac
             session_key=session_key,
         )
 
+    materialized = []
     runner.session_store = SimpleNamespace(
+        # A new branch thread has no route until the branch materializes it.
+        lookup_by_session_key=lambda session_key: None,
+        get_or_create_session=lambda source: materialized.append(source.thread_id),
         get_session_for_source=get_session_for_source,
         load_transcript=lambda session_id: [{"role": "user", "content": "hello"}],
         switch_session=switch_session,
     )
+    runner._session_key_for_source = lambda source: "branch-thread-key"
     runner._clear_session_boundary_security_state = lambda session_key: None
     runner._evict_cached_agent = lambda session_key: None
 
@@ -171,20 +172,10 @@ async def test_thechat_branch_resolves_parent_from_current_source_thread_contrac
             },
         },
     )
-    current_entry = SimpleNamespace(
-        session_id="placeholder-session",
-        session_key="branch-thread-key",
-        created_at=datetime(2026, 1, 1, 12, 0, 0),
-        updated_at=datetime(2026, 1, 1, 12, 0, 0),
-    )
-
-    result = await runner._apply_thechat_session_intent_async(
-        event,
-        source,
-        current_entry,
-    )
+    result = await runner._prepare_thechat_branch_route(event, source)
 
     assert parent_sources[0].thread_id == "source-thread"
+    assert materialized == ["branch-thread"]
     assert created["parent_session_id"] == "parent-thread-session"
     assert created["model_config"] == {"_branched_from": "parent-thread-session"}
     assert created["session_id"] == result.session_id
@@ -198,11 +189,15 @@ async def test_thechat_branch_resolves_parent_from_current_source_thread_contrac
 async def test_thechat_persisted_branch_marker_is_ignored_after_branch_exists():
     runner = object.__new__(GatewayRunner)
     runner._session_db = None
+    existing_entry = SimpleNamespace(session_id="already-branched-session", session_key="branch-thread-key")
     runner.session_store = SimpleNamespace(
+        # TheChat keeps the marker on every message; the thread's route already exists.
+        lookup_by_session_key=lambda session_key: existing_entry,
         get_session_for_source=lambda source: (_ for _ in ()).throw(
             AssertionError("existing branch thread must not re-resolve parent")
-        )
+        ),
     )
+    runner._session_key_for_source = lambda source: "branch-thread-key"
 
     source = SessionSource(
         platform=Platform.THECHAT,
@@ -222,18 +217,7 @@ async def test_thechat_persisted_branch_marker_is_ignored_after_branch_exists():
             },
         },
     )
-    current_entry = SimpleNamespace(
-        session_id="already-branched-session",
-        session_key="branch-thread-key",
-        created_at=datetime(2026, 1, 1, 12, 0, 0),
-        updated_at=datetime(2026, 1, 1, 12, 5, 0),
-    )
+    result = await runner._prepare_thechat_branch_route(event, source)
 
-    result = await runner._apply_thechat_session_intent_async(
-        event,
-        source,
-        current_entry,
-    )
-
-    assert result is current_entry
+    assert result is None
     assert not hasattr(event, "hermes_session")

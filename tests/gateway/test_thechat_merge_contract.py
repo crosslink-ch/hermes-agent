@@ -49,16 +49,59 @@ async def test_thechat_branch_uses_real_async_session_database(tmp_path):
     db.create_session(session_id=parent.session_id, source="thechat")
     db.append_message(session_id=parent.session_id, role="user", content="Original request")
     branch_source = SessionSource(platform=Platform.THECHAT, chat_id="conversation", user_id="owner", thread_id="branch")
-    current = store.get_or_create_session(branch_source)
     event = MessageEvent(text="Try an alternative", message_type=MessageType.TEXT, source=branch_source,
                          raw_message={"sessionIntent": {"type": "branch", "fromThreadId": "parent", "title": "Alternative"}})
     try:
-        branched = await runner._apply_thechat_session_intent_async(event, branch_source, current)
+        # The thread's first message: it has no route yet, so the branch creates it.
+        assert store.get_session_for_source(branch_source) is None
+        branched = await runner._prepare_thechat_branch_route(event, branch_source)
         assert branched.session_id != parent.session_id
         assert db.get_session(branched.session_id)["parent_session_id"] == parent.session_id
         assert db.get_session_title(branched.session_id) == "Alternative"
         assert db.get_messages_as_conversation(branched.session_id)[0]["content"] == "Original request"
         assert store.get_session_for_source(branch_source).session_id == branched.session_id
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_thechat_branch_is_made_once_when_first_messages_race(tmp_path):
+    """TheChat sends the branch marker on every message; two arriving before either is admitted
+    still make one branch, and both land on it."""
+    import asyncio
+    import sqlite3
+
+    from hermes_state import AsyncSessionDB, SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    store = SessionStore(tmp_path / "sessions", GatewayConfig())
+    store._db = db
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig()
+    runner.session_store = store
+    runner._session_db = AsyncSessionDB(db)
+    runner._clear_session_boundary_security_state = lambda key: None
+    runner._evict_cached_agent = lambda key: None
+    parent_source = SessionSource(platform=Platform.THECHAT, chat_id="conversation", user_id="owner", thread_id="parent")
+    parent = store.get_or_create_session(parent_source)
+    db.create_session(session_id=parent.session_id, source="thechat")
+    db.append_message(session_id=parent.session_id, role="user", content="Original request")
+    branch_source = SessionSource(platform=Platform.THECHAT, chat_id="conversation", user_id="owner", thread_id="branch")
+    intent = {"sessionIntent": {"type": "branch", "fromThreadId": "parent", "title": None}}
+    events = [MessageEvent(text=text, message_type=MessageType.TEXT, source=branch_source, raw_message=intent)
+              for text in ("first", "second")]
+    try:
+        results = await asyncio.gather(*(runner._prepare_thechat_branch_route(e, branch_source) for e in events))
+        branched = [r for r in results if r is not None]
+        assert len(branched) == 1
+        reader = sqlite3.connect(f"file:{tmp_path / 'state.db'}?mode=ro", uri=True)
+        try:
+            children = reader.execute(
+                "SELECT id FROM sessions WHERE parent_session_id = ?", (parent.session_id,)).fetchall()
+        finally:
+            reader.close()
+        assert [row[0] for row in children] == [branched[0].session_id]
+        assert store.get_session_for_source(branch_source).session_id == branched[0].session_id
     finally:
         db.close()
 

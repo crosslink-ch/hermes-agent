@@ -1351,6 +1351,8 @@ class GatewayInboundMixin(GatewayInboundHooksMixin, GatewayInboundTranscriptionM
             return _paused_notice
 
         _quick_key = self._session_key_for_source(source)
+        # Before admission reserves the route: a new TheChat branch thread starts on its parent's copy.
+        await self._prepare_thechat_branch_route(event, source)
         _reply = None if is_internal else await self._hm_pending_reply_intercepts(event, source, _quick_key)
         if _reply is not None:
             return _reply

@@ -190,7 +190,6 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         if resolved is None:
             return
         source, session_entry, session_key = resolved
-        session_entry = await self._apply_thechat_session_intent_async(event, source, session_entry)
         prepared, _session_env_tokens = await self._hmwa_prepare_turn(
             event, source, session_entry, session_key, _quick_key, run_generation,
         )

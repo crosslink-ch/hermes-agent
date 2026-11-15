@@ -33,16 +33,6 @@ class GatewayTheChatMixin:
         text = value.strip()
         return text or None
 
-    def _session_entry_is_fresh(self, session_entry: Any) -> bool:
-        created_at = getattr(session_entry, "created_at", None)
-        updated_at = getattr(session_entry, "updated_at", None)
-        if not created_at or not updated_at:
-            return False
-        try:
-            return abs((updated_at - created_at).total_seconds()) < 0.001
-        except (TypeError, AttributeError):  # not two comparable datetimes
-            return False
-
     def _thechat_branch_parent_source(
         self,
         source: SessionSource,
@@ -61,55 +51,68 @@ class GatewayTheChatMixin:
             return await result
         return result
 
-    async def _apply_thechat_session_intent_async(
-        self,
-        event: MessageEvent,
-        source: SessionSource,
-        session_entry: Any,
-    ) -> Any:
-        if getattr(source, "platform", None) != Platform.THECHAT:
-            return session_entry
+    async def _prepare_thechat_branch_route(self, event: MessageEvent, source: SessionSource) -> Any:
+        """Start a new TheChat branch thread on a copy of its parent's conversation.
+
+        Runs on the inbound message before admission: the session authority reserves the thread's
+        route (and its SQLite row) when it admits the message, and executes the turn from the stored
+        payload, which does not keep the platform's raw event. Applied any later, the branch never
+        happens and the thread starts empty.
+
+        TheChat marks every message of a branch thread with ``sessionIntent`` and never clears it,
+        so the branch is made only while the thread has no route yet, i.e. on its first message.
+        Returns the branch's routing entry, or None when nothing was branched.
+        """
+        if getattr(source, "platform", None) != Platform.THECHAT or getattr(event, "internal", False):
+            return None
         session_intent = self._thechat_session_intent_for_event(event)
         if session_intent.get("type") != "branch":
-            return session_entry
+            return None
+        from gateway.session_authority import keyed_turn
+        session_key = self._session_key_for_source(source)
+        # Two first messages of one new thread must not both branch.
+        async with keyed_turn(self.__dict__.setdefault("_thechat_branch_locks", {}), session_key):
+            if await self.async_session_store.lookup_by_session_key(session_key) is not None:
+                return None  # a later message of the thread: its route (the branch) exists
+            return await self._branch_new_thechat_thread(source, session_key, session_intent)
 
-        session_key = getattr(session_entry, "session_key", None) or self._session_key_for_source(source)
-        if self._session_entry_is_fresh(session_entry):
-            branch_title = self._thechat_session_intent_text(session_intent, "title")
-            branch_from_thread_id = self._thechat_session_intent_text(
-                session_intent,
-                "fromThreadId",
+    async def _branch_new_thechat_thread(
+        self,
+        source: SessionSource,
+        session_key: str,
+        session_intent: dict[str, Any],
+    ) -> Any:
+        from_thread_id = self._thechat_session_intent_text(session_intent, "fromThreadId")
+        parent_source = self._thechat_branch_parent_source(source, from_thread_id)
+        try:
+            parent_entry = await self.async_session_store.get_session_for_source(parent_source)
+        except Exception:
+            parent_entry = None
+            logger.debug("Failed to resolve TheChat branch parent source", exc_info=True)
+        parent_session_id = str(getattr(parent_entry, "session_id", "") or "").strip()
+        if not parent_session_id:
+            logger.warning(
+                "TheChat branch thread %s starts empty: its source thread %s has no Hermes session",
+                source.thread_id, from_thread_id or "(main lane)",
             )
-            parent_source = self._thechat_branch_parent_source(source, branch_from_thread_id)
-            try:
-                parent_entry = await self.async_session_store.get_session_for_source(parent_source)
-            except Exception:
-                parent_entry = None
-                logger.debug(
-                    "Failed to resolve TheChat branch parent source",
-                    exc_info=True,
-                )
-            branch_parent_session_id = (
-                str(getattr(parent_entry, "session_id", "") or "").strip()
-                if parent_entry is not None
-                else None
+            return None
+        branched = await self._branch_session_from_parent(
+            source=source,
+            session_key=session_key,
+            parent_session_id=parent_session_id,
+            branch_title=self._thechat_session_intent_text(session_intent, "title"),
+        )
+        if branched is None:
+            logger.warning(
+                "TheChat branch thread %s starts empty: copying parent session %s failed",
+                source.thread_id, parent_session_id,
             )
-            if branch_parent_session_id:
-                branched_entry = await self._branch_session_from_parent(
-                    source=source,
-                    session_key=session_key,
-                    parent_session_id=branch_parent_session_id,
-                    branch_title=branch_title,
-                )
-                if branched_entry is not None:
-                    return branched_entry
         else:
-            logger.debug(
-                "Ignoring persisted TheChat branch sessionIntent for existing session key %s",
-                session_key,
+            logger.info(
+                "TheChat branch thread %s starts from parent session %s as %s",
+                source.thread_id, parent_session_id, getattr(branched, "session_id", None),
             )
-
-        return session_entry
+        return branched
 
     async def _branch_session_from_parent(
         self,
@@ -216,6 +219,9 @@ class GatewayTheChatMixin:
                 exc_info=True,
             )
 
+        if await self.async_session_store.lookup_by_session_key(session_key) is None:
+            # A new thread has no route to repoint yet; materialize it, as /branch does for a thread.
+            await self.async_session_store.get_or_create_session(source)
         switched = await self.async_session_store.switch_session(session_key, new_session_id)
         if switched is None:
             return None
