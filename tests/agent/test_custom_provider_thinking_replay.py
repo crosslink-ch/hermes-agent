@@ -16,6 +16,7 @@ import logging
 import pytest
 
 import hermes_yaml as yaml
+from agent import anthropic_thinking_policy as policy_mod
 from agent.anthropic_message_convert import _manage_thinking_signatures, convert_messages_to_anthropic
 from agent.anthropic_thinking_policy import anthropic_thinking_route, native_anthropic_preserves_prior_thinking
 from agent.anthropic_thinking_replay import tracks_rejected_thinking
@@ -193,6 +194,38 @@ def test_config_errors_fail_closed_to_third_party(cliproxy_native, monkeypatch):
     monkeypatch.setattr(config_mod, "load_config_readonly", _boom)
     assert anthropic_thinking_route(CLIPROXY, MODELS[0]) == "third_party"
     assert _signatures(_wire_blocks(CLIPROXY, MODELS[0])) == []
+
+
+def test_a_failed_lookup_is_logged_once_with_its_traceback(cliproxy_native, monkeypatch, caplog):
+    """Failing closed must not be silent: an operator who opted a relay into native replay sees why
+    signed thinking is being stripped again. The route is resolved several times per request, so one
+    record per kind of failure, and the base_url (which may embed credentials) stays out of it."""
+    secret_url = "http://user:hunter2@cliproxyapi.cliproxy-tp.svc.cluster.local:8317"
+
+    def _boom():
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr(policy_mod, "_LOGGED_REPLAY_LOOKUP_FAILURES", set())
+    monkeypatch.setattr(config_mod, "load_config_readonly", _boom)
+    with caplog.at_level(logging.WARNING, logger=policy_mod.logger.name):
+        for _ in range(3):
+            assert anthropic_thinking_route(secret_url, MODELS[0]) == "third_party"
+        assert _signatures(_wire_blocks(CLIPROXY, MODELS[0])) == []
+
+    records = [r for r in caplog.records if r.name == policy_mod.logger.name]
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is not None and record.exc_info[0] is RuntimeError
+    assert "RuntimeError" in record.getMessage()
+    assert "hunter2" not in caplog.text and "cliproxyapi" not in record.getMessage()
+
+
+def test_a_successful_lookup_logs_nothing(cliproxy_native, monkeypatch, caplog):
+    monkeypatch.setattr(policy_mod, "_LOGGED_REPLAY_LOOKUP_FAILURES", set())
+    with caplog.at_level(logging.DEBUG, logger=policy_mod.logger.name):
+        assert anthropic_thinking_route(CLIPROXY, MODELS[0]) == "native"
+    assert [r for r in caplog.records if r.name == policy_mod.logger.name] == []
 
 
 def test_route_lookup_does_not_mutate_the_cached_config(cliproxy_native):
