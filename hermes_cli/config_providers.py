@@ -108,7 +108,11 @@ _CAMEL_ALIASES: dict[str, str] = {
     "defaultModel": "default_model",
     "contextLength": "context_length",
     "rateLimitDelay": "rate_limit_delay",
-    "sessionAffinityHeader": "session_affinity_header"}
+    "sessionAffinityHeader": "session_affinity_header",
+    "thinkingReplay": "thinking_replay"}
+
+# ``thinking_replay`` values a provider entry may declare; anything else is ignored.
+_THINKING_REPLAY_MODES = frozenset({"native", "third_party"})
 
 
 _KNOWN_PROVIDER_KEYS = {
@@ -119,7 +123,7 @@ _KNOWN_PROVIDER_KEYS = {
     "api_mode", "transport", "model", "default_model", "models", "models_discovered",
     "context_length", "rate_limit_delay", "request_timeout_seconds", "stale_timeout_seconds",
     "discover_models", "extra_body", "extra_headers", "capabilities", "ssl_ca_cert", "ssl_verify",
-    "catalog_provider", "session_affinity_header"}
+    "catalog_provider", "session_affinity_header", "thinking_replay"}
 
 
 def _pick_provider_base_url(entry: dict[str, Any], provider_key: str) -> str:
@@ -271,6 +275,7 @@ def _normalize_custom_provider_entry(
     # Per-provider extra HTTP headers may carry credentials — never log them downstream.
     _put("extra_headers", normalize_extra_headers(entry.get("extra_headers")))
     _put("session_affinity_header", _stripped("session_affinity_header"))
+    _put("thinking_replay", _thinking_replay_mode(entry.get("thinking_replay")))
     _put("ssl_ca_cert", _stripped("ssl_ca_cert"))
 
     ssl_verify = entry.get("ssl_verify")
@@ -293,7 +298,8 @@ def _custom_provider_entry_to_provider_config(
     for field in (
         "name", "api_key", "key_env", "key_cmd", "models", "models_discovered", "context_length",
         "rate_limit_delay", "discover_models", "extra_body", "extra_headers",
-        "session_affinity_header", "ssl_ca_cert", "ssl_verify", "catalog_provider"):
+        "session_affinity_header", "thinking_replay", "ssl_ca_cert", "ssl_verify",
+        "catalog_provider"):
         if field in normalized:
             provider_entry[field] = normalized[field]
     if "model" in normalized:
@@ -526,6 +532,29 @@ def get_custom_provider_session_affinity_header(
         if isinstance(header, str) and header.strip():
             return header.strip()
     return ""
+
+
+def _thinking_replay_mode(value: Any) -> str:
+    """``value`` lowercased and stripped when it is a known ``thinking_replay`` mode, else ""."""
+    mode = value.strip().lower() if isinstance(value, str) else ""
+    return mode if mode in _THINKING_REPLAY_MODES else ""
+
+
+def get_custom_provider_thinking_replay(
+    base_url: str,
+    custom_providers: Optional[list[dict[str, Any]]] = None,
+    config: Optional[dict[str, Any]] = None) -> Optional[str]:
+    """``thinking_replay`` (``"native"`` / ``"third_party"``) of the route-matching entry, else None.
+
+    Opt-in per provider (default off): ``native`` declares a relay that forwards Anthropic-signed
+    thinking blocks to an upstream able to verify them, so Hermes replays them instead of
+    stripping. An omitted, empty or unknown value leaves the default endpoint rules in charge.
+    """
+    for entry in _entries_for_route(base_url, custom_providers, config):
+        mode = _thinking_replay_mode(entry.get("thinking_replay"))
+        if mode:
+            return mode
+    return None
 
 
 def get_custom_provider_context_length(
