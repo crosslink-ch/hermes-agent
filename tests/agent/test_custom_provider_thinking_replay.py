@@ -196,29 +196,42 @@ def test_config_errors_fail_closed_to_third_party(cliproxy_native, monkeypatch):
     assert _signatures(_wire_blocks(CLIPROXY, MODELS[0])) == []
 
 
-def test_a_failed_lookup_is_logged_once_with_its_traceback(cliproxy_native, monkeypatch, caplog):
+def test_a_failed_lookup_is_logged_once_without_private_exception_text(cliproxy_native, monkeypatch, caplog):
     """Failing closed must not be silent: an operator who opted a relay into native replay sees why
     signed thinking is being stripped again. The route is resolved several times per request, so one
-    record per kind of failure, and the base_url (which may embed credentials) stays out of it."""
+    record per kind of failure. A config error can quote the base_url (which may embed credentials)
+    or a config value, so the record names the exception type only: no message, no traceback."""
     secret_url = "http://user:hunter2@cliproxyapi.cliproxy-tp.svc.cluster.local:8317"
 
     def _boom():
-        raise RuntimeError("config unreadable")
+        raise RuntimeError(f"config unreadable: {secret_url}; api_key=private-config-value")
+
+    def _boom_differently():
+        raise ValueError(f"bad value at {secret_url}; api_key=private-config-value")
 
     monkeypatch.setattr(policy_mod, "_LOGGED_REPLAY_LOOKUP_FAILURES", set())
-    monkeypatch.setattr(config_mod, "load_config_readonly", _boom)
     with caplog.at_level(logging.WARNING, logger=policy_mod.logger.name):
+        monkeypatch.setattr(config_mod, "load_config_readonly", _boom)
         for _ in range(3):
             assert anthropic_thinking_route(secret_url, MODELS[0]) == "third_party"
         assert _signatures(_wire_blocks(CLIPROXY, MODELS[0])) == []
+        monkeypatch.setattr(config_mod, "load_config_readonly", _boom_differently)
+        for _ in range(3):
+            assert anthropic_thinking_route(secret_url, MODELS[0]) == "third_party"
+        monkeypatch.setattr(config_mod, "load_config_readonly", _boom)
+        assert anthropic_thinking_route(secret_url, MODELS[0]) == "third_party"
 
     records = [r for r in caplog.records if r.name == policy_mod.logger.name]
-    assert len(records) == 1
-    record = records[0]
-    assert record.levelno == logging.WARNING
-    assert record.exc_info is not None and record.exc_info[0] is RuntimeError
-    assert "RuntimeError" in record.getMessage()
-    assert "hunter2" not in caplog.text and "cliproxyapi" not in record.getMessage()
+    assert [r.levelno for r in records] == [logging.WARNING, logging.WARNING]
+    assert ["RuntimeError" in r.getMessage() for r in records] == [True, False]
+    assert ["ValueError" in r.getMessage() for r in records] == [False, True]
+    for record in records:
+        assert not record.exc_info and not record.exc_text and not record.stack_info
+        rendered = logging.Formatter().format(record) + repr(record.args)
+        for private in ("hunter2", "cliproxyapi", "private-config-value", "config unreadable",
+                        "bad value", "Traceback"):
+            assert private not in rendered
+            assert private not in caplog.text
 
 
 def test_a_successful_lookup_logs_nothing(cliproxy_native, monkeypatch, caplog):

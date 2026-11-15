@@ -94,21 +94,22 @@ def _custom_provider_declares_native(base_url: Any) -> bool:
     """Whether the custom provider entry serving ``base_url`` sets ``thinking_replay: native`` (a relay
     that forwards Anthropic-signed blocks to an upstream able to verify them). The config is read
     without mutation; any config or lookup error fails closed to the strip-all default and is logged
-    with its traceback, so an opted-in relay never loses replay without a trace."""
+    by exception type, so an opted-in relay never loses replay without a trace."""
     if not isinstance(base_url, str) or not base_url.strip():
         return False
     try:
         from hermes_cli.config import get_custom_provider_thinking_replay, load_config_readonly
 
         return get_custom_provider_thinking_replay(base_url, config=load_config_readonly()) == "native"
-    except Exception as exc:
-        # The base_url may embed credentials: never log it.
+    except Exception as exc:  # health: allow BLE001 -- fail closed on any error; its text may hold a credential, so only the type is logged
+        # The base_url may embed credentials and a config error can quote it or a config value:
+        # log the exception type only, never its message or traceback.
         kind = type(exc).__name__
         if kind not in _LOGGED_REPLAY_LOOKUP_FAILURES:
             _LOGGED_REPLAY_LOOKUP_FAILURES.add(kind)
             logger.warning(
                 "thinking_replay lookup failed (%s); custom Anthropic relays keep the default and "
-                "prior thinking is stripped there until the config loads again", kind, exc_info=True)
+                "prior thinking is stripped there until the config loads again", kind)
         return False
 
 
