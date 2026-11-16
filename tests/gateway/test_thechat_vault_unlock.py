@@ -230,6 +230,7 @@ else:
         # Another admitted human, in a fresh invocation, uses the real manager child path
         # after the initiating session is gone. Browser transport is the sole fake boundary.
         from agent.vault_backends.onepassword import OnePasswordLoginBackend
+        from agent.vault_store import VaultItemMeta
         from agent.secret_scope import is_multiplex_active, set_multiplex_active
         from gateway.run import _profile_runtime_scope
         other_context = _context()
@@ -238,7 +239,9 @@ else:
         onepassword._service_token = "synthetic-service-token"
         monkeypatch.setattr("agent.vault_backends.enabled_backends", lambda: [backend, onepassword])
         monkeypatch.setattr("agent.vault_backends.base.enabled_backends", lambda: [backend, onepassword])
-        monkeypatch.setattr(onepassword, "list_items", lambda: pytest.fail("shared Bitwarden widened 1Password"))
+        monkeypatch.setattr(onepassword, "list_items", lambda: [VaultItemMeta(
+            id="op:item", kind="login", label="Shared", origin="https://example.test", created_at="",
+            identifier="synthetic@example.test")])
         controls, fills = [], []
         monkeypatch.setattr(browser_vault_tool, "_focus_bound_origin", lambda *_: "https://example.test")
         monkeypatch.setattr(browser_vault_tool, "_current_page_origin", lambda *_: "https://example.test")
@@ -249,16 +252,13 @@ else:
         class OtherAgent:
             is_interrupted = False
             def run_conversation(self, *_a, **_kw):
-                # Cached ownership may disappear/change without restricting Bitwarden.
+                # TheChat bot ownership may disappear/change without restricting either manager.
                 adapter._owner_user_id = "changed-owner"
                 listed = json.loads(_dispatch("browser_vault_list", {}))
-                assert [item["handle"] for item in listed["items"]] == ["bw:item"]
-                assert listed["errors"][0]["backend"] == "onepassword"
+                assert [item["handle"] for item in listed["items"]] == ["bw:item", "op:item"]
+                assert not listed.get("errors"), listed
                 assert json.loads(_dispatch("browser_vault_unlock", {"backend": "bitwarden"}))["already_unlocked"]
-                for name, args in (("browser_vault_unlock", {"backend": "onepassword"}),
-                                   ("browser_vault_fill", {"handle": "op:item"}),
-                                   ("browser_vault_enter_code", {"handle": "op:item"})):
-                    assert json.loads(_dispatch(name, args))["error_type"] == "external_vault_access_denied"
+                assert "error_type" not in json.loads(_dispatch("browser_vault_unlock", {"backend": "onepassword"}))
                 controls[:] = [{"tag": "input", "type": "password", "name": "password", "id": "pw",
                                 "autocomplete": "current-password", "visible": True}]
                 filled = json.loads(_dispatch("browser_vault_fill", {"handle": "bw:item"}))
@@ -385,27 +385,50 @@ def test_cancel_expiry_duplicates_and_tombstones_are_bounded(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_health_owner_is_canonical_and_missing_owner_still_denies_onepassword(monkeypatch):
+@pytest.mark.parametrize("owner_metadata", ["owner", ""])
+@pytest.mark.parametrize("sender", ["owner", "colleague"])
+async def test_onepassword_follows_admission_not_thechat_bot_ownership(owner_metadata, sender, monkeypatch):
+    """Anyone admitted to talk to the agent lists and fills from its 1Password, whoever owns the TheChat bot."""
+    from agent.vault_backends.onepassword import OnePasswordLoginBackend
+    from agent.vault_store import VaultItemMeta
     from gateway.platforms import thechat
+    from tools import browser_vault_tool as tool
     adapter = _adapter()
     client = adapter._client
     adapter._client = None
     monkeypatch.setattr(thechat.httpx, "AsyncClient", lambda **_kw: client)
     assert await adapter.connect_outbound()
     assert adapter._owner_user_id == "owner"
-    adapter._capture_vault_owner({"ok": True})
+    adapter._capture_vault_owner({"ok": True, "ownerUserId": owner_metadata} if owner_metadata else {"ok": True})
+    backend = OnePasswordLoginBackend()
+    backend._service_token = "synthetic-service-token"
+    item = VaultItemMeta(id="op:item", kind="login", label="shared", origin="https://example.test",
+                         created_at="", identifier="dev@example.test")
+    monkeypatch.setattr(backend, "list_items", lambda: [item])
+    monkeypatch.setattr(backend, "get_meta", lambda handle: item if handle == item.id else None)
+    monkeypatch.setattr("agent.vault_backends.enabled_backends", lambda: [backend])
+    monkeypatch.setattr("agent.vault_backends.base.enabled_backends", lambda: [backend])
+    monkeypatch.setattr(tool, "_bound_page_origin", lambda *_: "https://example.test")
+    monkeypatch.setattr(tool, "snapshot_refusal", lambda *_: None)
+    fills = []
+    monkeypatch.setattr(tool, "_fill_bound_page", lambda _b, handle, *_: fills.append(handle) or '{"success": true}')
     context = _context()
-    from tools.browser_vault_tool import browser_vault_unlock
+    context["requester_user_id"] = sender
     class Agent:
         is_interrupted = False
         def run_conversation(self, *_a, **_kw):
-            return json.loads(browser_vault_unlock("onepassword"))
+            listed = json.loads(_dispatch("browser_vault_list", {}))
+            return listed, json.loads(_dispatch("browser_vault_fill", {"handle": item.id}))
     agent = Agent()
-    turn = _turn(adapter, context, agent)
-    result = await asyncio.to_thread(turn._run_conversation_with_approval, agent, [], None, None, None)
-    assert result["error_type"] == "external_vault_access_denied"
-    assert not client.posts
-    await adapter.disconnect()
+    turn = _turn(adapter, context, agent, sender=sender)
+    try:
+        listed, filled = await asyncio.to_thread(turn._run_conversation_with_approval, agent, [], None, None, None)
+        assert [entry["handle"] for entry in listed["items"]] == ["op:item"]
+        assert filled["success"], filled
+        assert fills == ["op:item"]
+        assert not client.posts
+    finally:
+        await adapter.disconnect()
 
 
 async def _end_by_stop(waiting):

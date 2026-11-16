@@ -9,14 +9,19 @@ shared-profile access semantics.
 
 | Prompt kind | Exact encrypted fields | Authority | Consumer |
 |---|---|---|---|
-| `onepassword.unlock` | `password` | Bot owner | Native `op signin`; master is never persisted |
-| `vault.save_login` | `identifier`, `password` | Bot owner, rechecked before persistence | Profile-local encrypted vault, bound to current browser origin |
+| `onepassword.unlock` | `password` | Original admitted human requester | Native `op signin`; master is never persisted |
+| `vault.save_login` | `identifier`, `password` | Original admitted human requester, rechecked before persistence | Profile-local encrypted vault, bound to current browser origin |
 | `vault.code` | `code` | Original admitted human requester | Origin-fenced browser fill; recovery codes are text, not numeric-only |
 | `sudo.password` | `password` | Bot owner + profile opt-in | Local POSIX authentication-only pipe, then separate noninteractive command |
 | `skill.secret` | `value` | Bot owner + profile opt-in | Existing profile-aware `.env` secret writer |
 
-1Password remains owner-only even when its manager is already unlocked. Save-login
-also checks owner authority after the prompt and immediately before the store call.
+Password-manager access follows gateway admission, as on every other platform:
+any human the gateway admits to the agent may list, fill, unlock and save logins
+with the password managers that profile is configured with. TheChat bot ownership
+does not narrow that; it only gates `sudo.password` and `skill.secret`. Each
+prompt is still bound to the human whose signed invocation started the turn, so
+one person cannot answer another person's prompt. Save-login rechecks that
+authority after the prompt and immediately before the store call.
 Identifiers retain their existing status as model-visible login metadata; passwords,
 codes, master passwords and skill secrets are not model-visible.
 
@@ -141,8 +146,9 @@ or publication exception clears the answer and releases its waiter, even when th
 connection-time owner cache is unchanged. A resolution is not best-effort UI
 cleanup for this handoff; no secret sink may ignore its failure.
 
-TheChat is responsible for current human/conversation/bot authorization, current
-owner validation, requester-only snapshot/realtime visibility, retention of pending
+TheChat is responsible for current human/conversation/bot authorization, bot-owner
+validation for `sudo.password` and `skill.secret`, requester-only snapshot/realtime
+visibility, retention of pending
 requests, and no-store client submission responses. No secret is sent through
 chat, clarification or durable bot requests. A failed/unavailable prompt has no
 plaintext fallback.

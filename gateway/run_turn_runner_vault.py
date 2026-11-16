@@ -113,9 +113,10 @@ def vault_turn_scope(turn):
     unlock.set_current_session_id(ctx.session_id)
     from gateway.run_turn_runner_secure_input import secure_input_turn_scope
     try:
-        with unlock.external_access_scope(
-                lambda: bool(owner and allowed and ctx.source.user_id == owner and adapter._owner_user_id == owner),
-                live=live, bitwarden_allowed=allowed), secure_input_turn_scope(
+        # Whoever the gateway admitted to talk to this agent may use the password managers the agent is
+        # configured with, as on every other platform. TheChat bot ownership does not narrow that; ``allowed``
+        # only binds the turn to the human whose signed invocation started it.
+        with unlock.external_access_scope(allowed, live=live, bitwarden_allowed=allowed), secure_input_turn_scope(
                     turn, adapter, context, profile_id, home, allowed, owner):
             yield
     finally:

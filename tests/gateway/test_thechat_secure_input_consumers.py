@@ -97,7 +97,8 @@ async def test_unsupported_v3_is_unavailable_not_user_cancellation(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.platforms("linux")
-async def test_onepassword_native_child_and_owner_guard(tmp_path, monkeypatch):
+@pytest.mark.parametrize("sender", ["owner", "colleague"])
+async def test_onepassword_native_child_unlocks_for_any_admitted_requester(sender, tmp_path, monkeypatch):
     from agent.vault_backends import unlock
     from agent.vault_backends.onepassword import OnePasswordLoginBackend
     master = "  synthetic é master "
@@ -110,36 +111,32 @@ async def test_onepassword_native_child_and_owner_guard(tmp_path, monkeypatch):
     monkeypatch.setattr("agent.vault_backends.enabled_backends", lambda: [backend])
     unlock.lock("onepassword")
     try:
-        result = await run_tool(adapter, "browser_vault_unlock", {"backend": "onepassword"})
+        result = await run_tool(adapter, "browser_vault_unlock", {"backend": "onepassword"}, sender=sender)
         assert result["success"], result
         assert unlock.get_session_token("onepassword") == "synthetic-op-session"
-        count = len(adapter._client.posts)
-        denied = await run_tool(adapter, "browser_vault_unlock", {"backend": "onepassword"}, sender="not-owner")
-        assert denied["error_type"] == "external_vault_access_denied"
-        assert len(adapter._client.posts) == count
+        request = next(p for _, p in adapter._client.posts if p.get("type") == "secure.input.request")
+        assert request["payload"]["requesterUserId"] == sender
     finally:
         unlock.lock("onepassword")
 
 
 @pytest.mark.asyncio
-async def test_save_login_persists_exact_values_only_for_owner(monkeypatch):
+@pytest.mark.parametrize("sender", ["owner", "colleague"])
+async def test_save_login_persists_exact_values_for_any_admitted_requester(sender, monkeypatch):
     from agent.vault_store import get_vault_store
     from tools import browser_vault_tool as tool
     values = {"identifier": " synthetic@example.test ", "password": "  é synthetic password\n"}
     adapter = prepare(monkeypatch, values)
     monkeypatch.setattr(tool, "browser_vault_fill", lambda *_a, **_kw: '{"success":true}')
-    result = await run_tool(adapter, "browser_vault_save_login", {})
+    result = await run_tool(adapter, "browser_vault_save_login", {}, sender=sender)
     assert result["success"], result
     meta = get_vault_store().get_meta(result["handle"])
     assert meta.identifier == values["identifier"] and meta.origin == "https://example.test"
     assert get_vault_store().resolve_secret(meta.id)["password"] == values["password"]
-    count = len(adapter._client.posts)
-    denied = await run_tool(adapter, "browser_vault_save_login", {}, sender="not-owner")
-    assert not denied["success"] and len(adapter._client.posts) == count
     assert len(get_vault_store().list_items()) == 1
 
 
-def test_save_login_rechecks_owner_after_answer_before_persistence(monkeypatch):
+def test_save_login_rechecks_authorization_after_answer_before_persistence(monkeypatch):
     from agent.vault_backends import unlock
     from agent.vault_store import get_vault_store
     from tools import browser_vault_tool as tool

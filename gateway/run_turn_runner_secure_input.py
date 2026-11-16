@@ -10,6 +10,10 @@ from gateway.run_turn_runner_vault import _publish
 
 logger = logging.getLogger(__name__)
 
+# Vault prompts belong to the admitted human who asked; host-level secrets (sudo, skill .env values) stay
+# with the TheChat bot owner and their per-profile opt-ins.
+REQUESTER_KINDS = frozenset({"vault.code", "vault.save_login", "onepassword.unlock"})
+
 
 class TurnSecureInput:
     def __init__(self, turn, adapter, context, profile_id, home, allowed, owner):
@@ -36,8 +40,8 @@ class TurnSecureInput:
                     and adapter._event_contexts.get(str(ctx.source.message_id or "")) == self.context
                     and (kind != "sudo.password" or self.opt_ins.get("allow_sudo") is True)
                     and (kind != "skill.secret" or self.opt_ins.get("allow_skill_secrets") is True)
-                    and (kind == "vault.code" or (self.owner and self.owner == ctx.source.user_id
-                                                  and adapter._owner_user_id == self.owner)))
+                    and (kind in REQUESTER_KINDS or (self.owner and self.owner == ctx.source.user_id
+                                                     and adapter._owner_user_id == self.owner)))
 
     def live(self, kind):
         from hermes_constants import get_hermes_home
