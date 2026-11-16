@@ -14,6 +14,7 @@ cached prefix on every call. Only the known last-turn-only generations
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -27,6 +28,8 @@ from agent.anthropic_endpoints import (
     _model_name_is_deepseek_thinking,
 )
 
+
+logger = logging.getLogger(__name__)
 
 _CLAUDE_VERSION_RE = re.compile(
     # Semantic minors are short version components. Snapshot dates such as
@@ -82,13 +85,46 @@ _ROUTE_RULES = (
 )
 
 
+# Exception types whose ``thinking_replay`` lookup failure was already logged. The route is resolved
+# several times per request, so each kind of failure is reported once per process.
+_LOGGED_REPLAY_LOOKUP_FAILURES: set[str] = set()
+
+
+def _custom_provider_declares_native(base_url: Any) -> bool:
+    """Whether the custom provider entry serving ``base_url`` sets ``thinking_replay: native`` (a relay
+    that forwards Anthropic-signed blocks to an upstream able to verify them). The config is read
+    without mutation; any config or lookup error fails closed to the strip-all default and is logged
+    by exception type, so an opted-in relay never loses replay without a trace."""
+    if not isinstance(base_url, str) or not base_url.strip():
+        return False
+    try:
+        from hermes_cli.config import get_custom_provider_thinking_replay, load_config_readonly
+
+        return get_custom_provider_thinking_replay(base_url, config=load_config_readonly()) == "native"
+    except Exception as exc:  # health: allow BLE001 -- fail closed on any error; its text may hold a credential, so only the type is logged
+        # The base_url may embed credentials and a config error can quote it or a config value:
+        # log the exception type only, never its message or traceback.
+        kind = type(exc).__name__
+        if kind not in _LOGGED_REPLAY_LOOKUP_FAILURES:
+            _LOGGED_REPLAY_LOOKUP_FAILURES.add(kind)
+            logger.warning(
+                "thinking_replay lookup failed (%s); custom Anthropic relays keep the default and "
+                "prior thinking is stripped there until the config loads again", kind)
+        return False
+
+
 def anthropic_thinking_route(base_url: Any, model: Any) -> str:
     """Which thinking-replay contract an Anthropic Messages request follows: ``kimi`` (replay as-is),
     ``deepseek`` (unsigned only), ``native`` (Anthropic-signed blocks: the direct API, Nous Portal,
     Bedrock, Vertex AI, Azure AI Foundry), ``minimax`` (its own signed blocks, returned unchanged on
     every turn as its docs require) or ``third_party`` (an unknown relay that cannot verify Anthropic
-    signatures: strip all). The converter, accounting and signature-rejection state share this."""
-    return next((route for route, matches in _ROUTE_RULES if matches(base_url, model)), "third_party")
+    signatures: strip all). A custom provider entry can opt its relay into ``native`` with
+    ``thinking_replay: native``; the built-in rules above still win. The converter, accounting and
+    signature-rejection state share this."""
+    route = next((route for route, matches in _ROUTE_RULES if matches(base_url, model)), None)
+    if route is not None:
+        return route
+    return "native" if _custom_provider_declares_native(base_url) else "third_party"
 
 
 def route_replays_prior_thinking(route: str, model: Any) -> bool:

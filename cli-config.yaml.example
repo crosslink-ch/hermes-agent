@@ -198,6 +198,17 @@ model:
   #   my-proxy:
   #     base_url: "http://127.0.0.1:4000/v1"
   #     session_affinity_header: x-litellm-session-id
+  #
+  # thinking_replay: "native" replays Anthropic-signed thinking blocks to an
+  # anthropic_messages relay that forwards them unmodified to Anthropic (a
+  # self-hosted Claude proxy). Off unless set: unknown relays cannot verify
+  # signatures, so Hermes strips prior thinking there by default.
+  #
+  # providers:
+  #   my-claude-proxy:
+  #     base_url: "http://127.0.0.1:8317"
+  #     api_mode: anthropic_messages
+  #     thinking_replay: native
 # providers:
 #   meta:
 #     base_url: https://api.meta.ai/v1
