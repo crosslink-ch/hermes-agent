@@ -5,7 +5,7 @@ import os
 import uuid
 from typing import cast
 from gateway.outbound.senders import _media_caption_split, _DEFAULT_CAPTION_LIMIT, _IMAGE_EXTS, _VIDEO_EXTS, _AUDIO_EXTS
-from plugins.platforms.thechat.target import CONVERSATION_RE
+from gateway.outbound.targets import _THECHAT_CONVERSATION_RE
 import logging
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ async def _send_thechat(pconfig, chat_id: str, content: str, *, thread_id=None):
     if not token:
         return {"error": "TheChat bot token is not configured"}
 
-    if not CONVERSATION_RE.fullmatch(str(chat_id or "").strip()):
+    if not _THECHAT_CONVERSATION_RE.fullmatch(str(chat_id or "").strip()):
         return {
             "success": False,
             "error": "TheChat chat_id must be the current conversation UUID",
