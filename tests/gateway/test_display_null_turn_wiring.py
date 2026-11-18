@@ -31,7 +31,6 @@ def _wire(user_config, **runner_attrs):
         _hooks_ref=types.SimpleNamespace(loaded_hooks=[]),
         _status_callback_sync=None,
         _event_callback_sync=None,
-        _status_adapter=None,
         session_key="",
         user_config=user_config,
         source=types.SimpleNamespace(platform="telegram"),
