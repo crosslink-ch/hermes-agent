@@ -28,16 +28,14 @@ class _ReusedAgent:
 def _turn(runner, chat_id, built):
     from gateway.config import Platform
     from gateway.run_turn_runner import TurnRunner
+    from gateway.turn_context import TurnContext
     turn = TurnRunner.__new__(TurnRunner)
     turn._runner = runner
     source = SimpleNamespace(platform=Platform.LOCAL, chat_id=chat_id, user_id='u', user_id_alt=None,
                              user_name=None, chat_name=None, chat_type='dm', thread_id=None)
-    turn._ctx = SimpleNamespace(source=source, session_key=chat_id, session_id=chat_id, user_config={},
-                                message='hi', inbound_message_id=None, enabled_toolsets=[], disabled_toolsets=None,
-                                AIAgent=lambda **kw: built.update({chat_id: kw}) or SimpleNamespace(),
-                                progress_callback=None, _voice_ack_guild=[None], _native_slack_task_cards=False,
-                                _hooks_ref=SimpleNamespace(loaded_hooks=[]), _status_callback_sync=None,
-                                _event_callback_sync=None)
+    turn._ctx = TurnContext(source=source, session_key=chat_id, session_id=chat_id, user_config={},
+                            message='hi', enabled_toolsets=[], _hooks_ref=SimpleNamespace(loaded_hooks=[]),
+                            AIAgent=lambda **kw: built.update({chat_id: kw}) or SimpleNamespace())
     turn._combined_ephemeral_prompt = lambda: None
     turn._setup_stream_consumer = lambda platform_key: (None, None, None, False)
     return turn
