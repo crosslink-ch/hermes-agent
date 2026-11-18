@@ -568,7 +568,7 @@ async def test_typed_clarify_answer_closes_the_card_without_echoing_the_answer()
     adapter = await _adapter(api)
     clarify_gateway.register("clarify-1", SESSION_KEY, "Password hint?", None)
     await adapter.send_clarify(CONVERSATION_ID, "Password hint?", None, "clarify-1", SESSION_KEY)
-    assert clarify_gateway.resolve_text_response_for_session(SESSION_KEY, "my secret answer")
+    assert clarify_gateway.attempt_text_response("clarify-1", "my secret answer") == clarify_gateway.TEXT_RESOLVED
 
     await adapter.send_clarify_resolution(CONVERSATION_ID, SESSION_KEY, "clarify-1", "my secret answer")
     await adapter.retire_clarify_card("clarify-1", "✅ answered: my secret answer")

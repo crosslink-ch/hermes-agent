@@ -302,7 +302,7 @@ def browser_vault_list() -> str:
             continue
         if backend.needs_unlock and not backend.is_unlocked():
             locked.append({"backend": backend.name, "display_name": backend.display_name,
-                           "unlock": "browser_vault action=unlock" if can_prompt_here(backend.name) else "unavailable_in_this_session"})
+                           "unlock": "browser_vault action=unlock" if can_prompt_here(backend=backend.name) else "unavailable_in_this_session"})
             continue
         try:
             metas = backend.list_items()
@@ -346,7 +346,7 @@ def browser_vault_unlock(backend_name: str) -> str:
         return json.dumps({"success": False, "error": f"No unlockable vault backend named {backend_name!r}."})
     if backend.is_unlocked():
         return json.dumps({"success": True, "backend": backend.name, "already_unlocked": True})
-    if not can_prompt_here(backend.name):
+    if not can_prompt_here(backend=backend.name):
         return json.dumps({"success": False, "error_type": "unlock_unavailable",
                            "error": (f"{backend.display_name} is locked and this session cannot prompt for the "
                                      "master password (headless/cron/API). Unlock it from an interactive Hermes "
@@ -509,7 +509,7 @@ def browser_vault_enter_code(handle: str = "", task_id: Optional[str] = None) ->
         if written is not None:
             return written
     prompt = get_code_prompt_callback()
-    if prompt is None or not can_prompt_here():
+    if prompt is None or not can_prompt_here(prompt):
         return json.dumps({"success": False, "error_type": "prompt_unavailable",
                            "error": (f"{site} asks for a one-time code and this session cannot ask the user (headless/cron/API). "
                                      "Save an authenticator key for this login so codes can be generated automatically.")})

@@ -114,6 +114,10 @@ _CAMEL_ALIASES: dict[str, str] = {
 # ``thinking_replay`` values a provider entry may declare; anything else is ignored.
 _THINKING_REPLAY_MODES = frozenset({"native", "third_party"})
 
+# Every field a provider entry may store its address under (v12 migrations write ``api``).
+ENDPOINT_ADDRESS_FIELDS = ("base_url", "url", "api",
+                           *(camel for camel, snake in _CAMEL_ALIASES.items() if snake == "base_url"))
+
 
 _KNOWN_PROVIDER_KEYS = {
     # ``provider`` duplicates the ``providers.<name>`` mapping key and is unused here, but Hermes'
@@ -123,7 +127,8 @@ _KNOWN_PROVIDER_KEYS = {
     "api_mode", "transport", "model", "default_model", "models", "models_discovered",
     "context_length", "rate_limit_delay", "request_timeout_seconds", "stale_timeout_seconds",
     "discover_models", "extra_body", "extra_headers", "capabilities", "ssl_ca_cert", "ssl_verify",
-    "catalog_provider", "session_affinity_header", "thinking_replay"}
+    "catalog_provider", "session_affinity_header", "thinking_replay",
+    "gemini_api"}  # read by the gemini provider plugin (which Gemini API a model's calls use)
 
 
 def _pick_provider_base_url(entry: dict[str, Any], provider_key: str) -> str:

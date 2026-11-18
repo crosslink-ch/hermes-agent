@@ -339,11 +339,11 @@ async def test_typed_clarify_winner_rejects_late_direct_callback_and_clears_card
         SESSION_KEY,
     )
     resolved = {}
-    assert clarify_gateway.resolve_text_response_for_session(
-        SESSION_KEY,
+    assert clarify_gateway.attempt_text_response(
+        request_id,
         "2",
         resolved=resolved,
-    ) is True
+    ) == clarify_gateway.TEXT_RESOLVED
 
     losing = await adapter._handle_webhook(
         _signed_webhook_request(

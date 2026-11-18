@@ -20,6 +20,7 @@ from hermes_cli.distribution import (
     REPOSITORY_HTTPS_URL,
     canonical_github_remote as _canonical_distribution_remote,
 )
+from hermes_cli._startup_fast import project_root_str
 
 # rich and prompt_toolkit are imported lazily: this module sits on the TUI gateway's critical
 # startup path purely for the lightweight update-check helpers, and eager rich/prompt_toolkit
@@ -157,7 +158,7 @@ def _resolve_repo_dir() -> Optional[Path]:
     Prefers the running code's location: ``$HERMES_HOME/hermes-agent/`` may be a stale copy
     carried over by ``--clone-all``.
     """
-    repo_dir = Path(__file__).parent.parent.resolve()
+    repo_dir = Path(project_root_str())
     if not (repo_dir / ".git").exists():
         repo_dir = get_hermes_home() / "hermes-agent"
     return repo_dir if (repo_dir / ".git").exists() else None

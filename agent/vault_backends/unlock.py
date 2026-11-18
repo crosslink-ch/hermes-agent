@@ -370,12 +370,19 @@ def is_unlocked(backend: str) -> bool:
     return _tokens.live(_key(backend), False) is not None
 
 
-def can_prompt_here(backend: str = "") -> bool:
-    """False in contexts where no human can answer (cron, webhook, api_server, -q)."""
+def can_prompt_here(prompt: Optional[Callable] = None, *, backend: str = "") -> bool:
+    """False in contexts where no human can answer (cron, webhook, api_server, -q). ``prompt`` is the
+    callback the caller is about to use (default: the unlock prompt): a chat surface installs only the
+    one-time-code prompt, and keying off the unlock prompt would report that nobody can answer.
+    ``backend`` names the manager an unlock prompt is for: a structured surface that declared its
+    unlock backends (``native_prompt_scope``) cannot prompt for any other."""
+    if isinstance(prompt, str):
+        # A backend name passed positionally would read as an installed prompt and answer True.
+        raise TypeError("can_prompt_here() takes the backend name as backend=, not positionally")
     from tools.approval_context import _no_user_can_answer
     if _no_user_can_answer():
         return False
     supported = _prompt_backends.get()
     if backend and supported is not None and backend not in supported:
         return False
-    return get_unlock_prompt_callback() is not None
+    return (prompt if prompt is not None else get_unlock_prompt_callback()) is not None

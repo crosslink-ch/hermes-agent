@@ -932,9 +932,9 @@ async def test_send_clarify_posts_structured_request_and_keeps_typed_fallback():
         )
         assert pending is not None
         assert pending.awaiting_text is True
-        assert clarify_gateway.resolve_text_response_for_session(
-            SESSION_KEY, "1, 2"
-        ) is True
+        assert clarify_gateway.attempt_text_response(
+            "clarify-request-1", "1, 2"
+        ) == clarify_gateway.TEXT_RESOLVED
         assert clarify_gateway.wait_for_response(
             "clarify-request-1", timeout=0.1
         ) == '["alpha", "beta"]'
