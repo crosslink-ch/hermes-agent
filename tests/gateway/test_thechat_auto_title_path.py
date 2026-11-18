@@ -130,7 +130,7 @@ def _configure_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(
         gateway_run,
         "_load_gateway_config",
-        lambda: {"agent": {"model": "test-model"}},
+        lambda path=None: {"agent": {"model": "test-model"}},
     )
     monkeypatch.setattr(
         gateway_run,

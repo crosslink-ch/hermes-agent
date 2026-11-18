@@ -7,7 +7,7 @@ def test_configured_thechat_reaches_delivery_and_authorization(monkeypatch):
     from gateway.platform_env import authz_field
     from gateway.platform_registry import platform_registry
     from cron.scheduler_delivery import _is_known_delivery_platform, _resolve_home_env_var
-    from tools.send_message_targets import resolve_send_target
+    from gateway.outbound.targets import resolve_send_target
 
     conversation = "12345678-1234-4234-8234-123456789abc"
     monkeypatch.setenv("THECHAT_BASE_URL", "https://thechat.example/")

@@ -5,8 +5,8 @@ from .gateway_env import AUTHZ, ENV_ENABLE_CREDENTIALS, ENV_OVERRIDES
 
 def _target(ref):
     from gateway.platforms.send_targets import NOT_EXPLICIT
-    from tools.send_message_targets import _THECHAT_CONVERSATION_RE
-    match = _THECHAT_CONVERSATION_RE.fullmatch(ref.strip())
+    from .target import CONVERSATION_RE
+    match = CONVERSATION_RE.fullmatch(ref.strip())
     return (match[1], None) if match else NOT_EXPLICIT
 
 

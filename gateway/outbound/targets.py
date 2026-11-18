@@ -1,13 +1,7 @@
 """Target parsing and resolution for send_message (platform:chat_id[:thread] → ids)."""
 
-import re
-
-_THECHAT_CONVERSATION_RE = re.compile(
-    r"^\s*([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\s*$",
-    re.IGNORECASE,
-)
-
 import logging
+import re
 
 logger = logging.getLogger("tools.send_message_tool")
 

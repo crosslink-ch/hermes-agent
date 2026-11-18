@@ -7,8 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 import pytest
 from gateway.config import Platform
-from tools.send_message_tool import send_message_tool
-from tools.send_message_targets import _parse_target_ref
+from gateway.outbound.send import send_message_tool
+from gateway.outbound.targets import _parse_target_ref
 from tools.send_message_thechat import _send_thechat
 
 def _run_async_immediately(coro):
@@ -112,7 +112,7 @@ def test_explicit_thechat_target_routes_without_directory_resolution():
          patch("tools.interrupt.is_interrupted", return_value=False), \
          patch("gateway.channel_directory.resolve_channel_name") as resolve_mock, \
          patch("model_tools._run_async", side_effect=_run_async_immediately), \
-         patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+         patch("gateway.outbound.send._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
         result = json.loads(
             send_message_tool(
                 {
@@ -154,7 +154,7 @@ def test_cron_thechat_duplicate_home_target_is_skipped():
          patch("gateway.config.load_gateway_config", return_value=config), \
          patch("tools.interrupt.is_interrupted", return_value=False), \
          patch("model_tools._run_async", side_effect=_run_async_immediately), \
-         patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+         patch("gateway.outbound.send._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
         result = json.loads(
             send_message_tool(
                 {

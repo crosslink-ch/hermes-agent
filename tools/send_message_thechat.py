@@ -4,8 +4,8 @@ from __future__ import annotations
 import os
 import uuid
 from typing import cast
-from tools.send_message_senders import _media_caption_split, _DEFAULT_CAPTION_LIMIT, _IMAGE_EXTS, _VIDEO_EXTS, _AUDIO_EXTS
-from tools.send_message_targets import _THECHAT_CONVERSATION_RE
+from gateway.outbound.senders import _media_caption_split, _DEFAULT_CAPTION_LIMIT, _IMAGE_EXTS, _VIDEO_EXTS, _AUDIO_EXTS
+from plugins.platforms.thechat.target import CONVERSATION_RE
 import logging
 logger = logging.getLogger(__name__)
 
@@ -24,11 +24,11 @@ async def _send_thechat_media(
     from gateway.config import Platform
     from gateway.platforms.thechat import TheChatAdapter
 
-    from tools.send_message_senders import _live_adapter
+    from gateway.outbound.senders import _live_adapter
 
     # The upstream resolver is profile-scoped and fails closed on a missing
     # secondary transport; never borrow the default profile's bot identity.
-    _, adapter = _live_adapter(Platform.THECHAT)
+    _, adapter = _live_adapter(Platform.THECHAT, chat_id, thread_id)
     owned_adapter = False
 
     if adapter is None:
@@ -126,7 +126,7 @@ async def _send_thechat(pconfig, chat_id: str, content: str, *, thread_id=None):
     if not token:
         return {"error": "TheChat bot token is not configured"}
 
-    if not _THECHAT_CONVERSATION_RE.fullmatch(str(chat_id or "").strip()):
+    if not CONVERSATION_RE.fullmatch(str(chat_id or "").strip()):
         return {
             "success": False,
             "error": "TheChat chat_id must be the current conversation UUID",

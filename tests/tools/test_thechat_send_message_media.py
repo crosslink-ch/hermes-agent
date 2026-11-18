@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.config import Platform
-from tools.send_message_tool import _send_to_platform
+from gateway.outbound.send import _send_to_platform
 
 
 CONVERSATION_ID = "11111111-1111-4111-8111-111111111111"
@@ -126,7 +126,11 @@ async def test_proactive_media_never_borrows_default_profile_bot(monkeypatch):
         selected.append((platform, profile))
         return secondary if profile == "secondary" else primary
 
-    runner = SimpleNamespace(adapters={Platform.THECHAT: primary}, _authorization_adapter=resolve)
+    def routed_to_profile(platform, profile, chat_id, thread_id):
+        return (platform, profile, chat_id, thread_id) == (Platform.THECHAT, "secondary", CONVERSATION_ID, None)
+
+    runner = SimpleNamespace(adapters={Platform.THECHAT: primary}, _authorization_adapter=resolve,
+                             _shared_bot_target_allowed=routed_to_profile)
     monkeypatch.setattr("gateway.run._gateway_runner_ref", lambda: runner)
     monkeypatch.setattr("hermes_cli.profiles.get_active_profile_name", lambda: "secondary")
     result = await _send_to_platform(

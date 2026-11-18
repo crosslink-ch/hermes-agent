@@ -23,7 +23,7 @@ from typing import Callable
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from plugins.memory.honcho import oauth
-from plugins.memory.honcho.client import HonchoClientConfig, resolve_active_host, resolve_config_path
+from plugins.memory.honcho.client import HonchoClientConfig, resolve_active_host, resolve_config_path, spawn_context_thread
 from plugins.memory.honcho.client_errors import CONFIG_ERRORS, http_errors, is_unexpected
 
 logger = logging.getLogger(__name__)
@@ -222,7 +222,7 @@ def authorize_via_loopback(
         import webbrowser
         open_url = webbrowser.open
     # Socket is already bound, so a fast redirect can't beat the browser thread.
-    threading.Thread(target=lambda: open_url(authorize_url), daemon=True).start()
+    spawn_context_thread(open_url, name="honcho-oauth-browser", args=(authorize_url,)).start()
     code, returned_state = capture_loopback_code(server, captured, timeout=timeout)
     if returned_state != state:
         raise ValueError("OAuth state mismatch — possible CSRF, aborting")
@@ -431,7 +431,7 @@ def start_loopback_flow_background(
             logger.warning("Honcho OAuth loopback flow failed: %s", exc, exc_info=is_unexpected(exc))
             _set_status(status, "error", str(exc))
 
-    thread = threading.Thread(target=_run, name="honcho-oauth-loopback", daemon=True)
+    thread = spawn_context_thread(_run, name="honcho-oauth-loopback")
     if target is None:
         _flow_thread = thread
     else:
