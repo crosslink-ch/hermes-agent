@@ -3,6 +3,10 @@
   "name": "patch",
   "parameters": {
     "properties": {
+      "execution_target": {
+        "description": "Optional named execution target; uses terminal.default_target when omitted.",
+        "type": "string"
+      },
       "new_string": {
         "description": "Changed replacement text; it must differ from old_string. Pass empty string '' to delete the matched text.",
         "type": "string"

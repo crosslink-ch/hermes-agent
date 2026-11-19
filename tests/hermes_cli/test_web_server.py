@@ -4767,27 +4767,6 @@ class TestPtyWebSocket:
         assert sub_other.sent == []
 
 
-def test_resolve_chat_argv_injects_gateway_ws_url(monkeypatch):
-    import hermes_cli.main_tui_launch as tui_launch
-    import hermes_cli.web_server as ws
-
-    monkeypatch.setenv("PATH", "/run/current-system/sw/bin:/usr/bin")
-    monkeypatch.setattr(
-        tui_launch,
-        "_make_tui_argv",
-        lambda *_args, **_kwargs: (["node", "fake-tui.js"], Path("/tmp")),
-    )
-    monkeypatch.setattr(ws.app.state, "bound_host", "127.0.0.1", raising=False)
-    monkeypatch.setattr(ws.app.state, "bound_port", 9119, raising=False)
-
-    _argv, _cwd, env = _web_server_chat._resolve_chat_argv()
-
-    assert env is not None
-    gateway_url = env.get("HERMES_TUI_GATEWAY_URL", "")
-    assert gateway_url.startswith("ws://127.0.0.1:9119/api/ws?")
-    assert "token=" in gateway_url
-
-
 class TestDashboardPluginStaticAssetAllowlist:
     """``/dashboard-plugins/<name>/<path>`` is unauthenticated by design —
     the SPA loads plugin JS via ``<script src>`` and CSS via

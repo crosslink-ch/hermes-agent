@@ -1,5 +1,5 @@
 {
-  "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.",
+  "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents. The target field selects search mode (content/files); execution_target separately selects the named terminal execution target.",
   "name": "search_files",
   "parameters": {
     "properties": {
@@ -7,6 +7,10 @@
         "default": 0,
         "description": "Content search only: lines of context before and after each match.",
         "type": "integer"
+      },
+      "execution_target": {
+        "description": "Optional named execution target, for example 'local' or 'devbox'. This is separate from target, which selects content/files search mode.",
+        "type": "string"
       },
       "file_glob": {
         "description": "Content search only: filter files by pattern (e.g. '*.py').",

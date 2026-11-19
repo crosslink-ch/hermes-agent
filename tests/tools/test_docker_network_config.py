@@ -6,6 +6,8 @@ expose it, so operators could not request networkless Docker execution from
 config.yaml.
 """
 
+import pytest
+
 from tools import terminal_tool
 from tools.environments import docker as docker_env
 
@@ -88,6 +90,9 @@ def _reuse_guard_harness(
             Result.stdout = "existing-container-id\trunning\t<no value>\n"
         elif len(cmd) > 1 and cmd[1] == "inspect":
             # Two probes share `inspect`: image identity (must match for reuse) and network mode.
+            if existing_mode is None:
+                Result.returncode = 1
+                Result.stderr = "temporary inspect failure"
             Result.stdout = f"{existing_image}\n" if ".Config.Image" in cmd[3] else f"{existing_mode}\n"
         elif len(cmd) > 2 and cmd[1:3] == ["image", "inspect"]:
             Result.returncode = 1  # never in the local store: the replacement must go through `pull`
@@ -123,6 +128,41 @@ def test_reuse_rejects_networked_container_when_lockdown_requested(monkeypatch):
     )
     run_cmd = next(cmd for cmd in commands if len(cmd) > 2 and cmd[1:3] == ["run", "-d"])
     assert "--network=none" in run_cmd
+
+
+def test_reuse_network_mismatch_refuses_to_remove_leased_container(monkeypatch):
+    monkeypatch.setattr(
+        docker_env,
+        "_acquire_exclusive_container_lease",
+        lambda container_id, lease_root=None: None,
+    )
+
+    with pytest.raises(RuntimeError, match="still used.*refusing removal"):
+        _reuse_guard_harness(
+            monkeypatch, existing_mode="bridge", network=False,
+        )
+
+
+def test_reuse_inspect_failure_fails_closed_without_removal(monkeypatch):
+    removal_attempted = False
+
+    def fail_if_removal_attempted(_self, container_id):
+        nonlocal removal_attempted
+        removal_attempted = True
+        raise AssertionError(container_id)
+
+    monkeypatch.setattr(
+        docker_env.DockerEnvironment,
+        "_retire_network_mismatched_container",
+        fail_if_removal_attempted,
+    )
+
+    with pytest.raises(RuntimeError, match="Could not verify NetworkMode"):
+        _reuse_guard_harness(
+            monkeypatch, existing_mode=None, network=False,
+        )
+
+    assert removal_attempted is False
 
 
 def test_reuse_keeps_airgapped_container_when_lockdown_requested(monkeypatch):
