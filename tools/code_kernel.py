@@ -311,11 +311,21 @@ class CellAuthority:
             except Exception:
                 previous = None
         try:
+            identity = {}
+            if self.session_id is not None:
+                identity["session_id"] = self.session_id
+            if self.turn_id is not None:
+                identity["turn_id"] = self.turn_id
+            if self.conversation_id is not None:
+                identity["conversation_id"] = self.conversation_id
             from tools.code_execution_rpc import _inherited_rpc_authority
             from tools.code_execution_tool import _dispatch_rpc_tool, _inherit_execution_target
             target, scope, config = _inherited_rpc_authority(None, None, None)
             bound_args = _inherit_execution_target(tool_name, tool_args, target, scope)
-            return _dispatch_rpc_tool(handle_function_call, tool_name, bound_args, self.task_id, config)
+            with programmatic_file_read():
+                return _dispatch_rpc_tool(
+                    lambda name, args, task_id: handle_function_call(name, args, task_id=task_id, **identity),
+                    tool_name, bound_args, self.task_id, config)
         finally:
             if previous is not None:
                 try:

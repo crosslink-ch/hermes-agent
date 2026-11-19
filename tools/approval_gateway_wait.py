@@ -229,7 +229,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
             leader = None
             if not preparing_terminal_approval():
                 leader = next((e for e in _approval._gateway_queues.get(session_key, [])
-                               if e.data.get("command") == approval_data.get("command")
+                               if e.owner is owner and e.identity == entry.identity
                                and e.data.get("target") == approval_data.get("target")
                                and e.data.get("backend") == approval_data.get("backend")
                                and list(e.data.get("pattern_keys") or []) == keys

@@ -169,8 +169,9 @@ def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     from tools.terminal_tool_target_lifecycle import _active_turns_for_environment_key, _cleanup_retired_environments
     current_time = time.time()
 
-    # Check the process registry -- skip cleanup for sandboxes with active
-    # background processes (their _last_activity gets refreshed to keep them alive).
+    # Sandboxes with active background processes stay alive (refresh activity). Match the
+    # environment key or object, never the spawning owner id: the key is ``session:<id>``,
+    # a workspace digest or ``default``, while ``owner_task_id`` is the raw task id.
     try:
         from tools.process_registry import process_registry
         for task_id in list(_last_activity.keys()):
@@ -251,6 +252,7 @@ def _is_workspace_key(key: str) -> bool:
 
 def get_active_env(task_id: str, target: Optional[str] = None):
     """Return the active BaseEnvironment for *task_id*, or None."""
+    from tools.environments.sandbox_scope import admit_env, hosted_scope
     from tools.terminal_tool import _active_environments, _env_lock, _environment_scope_key, _resolve_container_task_id, _target_resolution
     resolution = _target_resolution(target)
     lookup = _environment_scope_key(
@@ -259,6 +261,8 @@ def get_active_env(task_id: str, target: Optional[str] = None):
     )
     raw_lookup = _environment_scope_key(task_id, resolution)
     with _env_lock:
+        if hosted_scope() is not None:
+            return admit_env(_active_environments.get(lookup))
         return _active_environments.get(lookup) or _active_environments.get(raw_lookup)
 
 
@@ -531,7 +535,15 @@ def cleanup_vm(
     via this function), so persist-mode idle envs are similarly no-op'd —
     only the orphan reaper at next startup reclaims them.
     """
-    from tools.terminal_tool import _active_environments, _creation_locks, _creation_locks_lock, _env_lock, _last_activity, _resolve_container_task_id, _target_resolution
+    from tools.environments.sandbox_scope import current_sandbox_key
+    if sandbox := current_sandbox_key():
+        # A hosted agent's sandbox is shared by all its sessions and outlives each of them (the idle
+        # reaper and the backend's own suspend end it): a session's teardown releases nothing, and an
+        # explicit teardown reaches only this agent's sandbox, never an environment its task id names.
+        if not force_remove:
+            return
+        task_id = sandbox
+    from tools.terminal_tool import _active_environments, _creation_locks, _creation_locks_lock, _env_lock, _last_activity
     from tools.terminal_tool_target_lifecycle import _cleanup_retired_environments
     keys = _cleanup_keys(task_id, target, include_collapsed)
 
@@ -593,29 +605,7 @@ def cleanup_vm(
         return
 
     for key, env in envs:
-        try:
-            if hasattr(env, 'cleanup'):
-                # Pass force_remove only if the env's cleanup() accepts it
-                # (DockerEnvironment after issue #20561; other backends don't).
-                import inspect
-                sig = inspect.signature(env.cleanup)
-                if "force_remove" in sig.parameters:
-                    env.cleanup(force_remove=force_remove)
-                else:
-                    env.cleanup()
-            elif hasattr(env, 'stop'):
-                env.stop()
-            elif hasattr(env, 'terminate'):
-                env.terminate()
-
-            logger.info("Manually cleaned up environment for task: %s", key)
-
-        except Exception as e:
-            error_str = str(e)
-            if "404" in error_str or "not found" in error_str.lower():
-                logger.info("Environment for task %s already cleaned up", key)
-            else:
-                logger.warning("Error cleaning up environment for task %s: %s", key, e, exc_info=True)
+        _teardown_env(env, key, force_remove=force_remove, done_msg="Manually cleaned up environment for task: %s")
 
 
 def _evict_environment_for_task(
@@ -633,12 +623,12 @@ def _evict_environment_for_task(
         _get_env_config(dict(resolution.config))
         if resolution.named else _get_env_config()
     )
+    from tools.environments.sandbox_scope import hosted_scope
     raw_task_id = task_id or "default"
     base_task_id = _resolve_container_task_id(raw_task_id, config=config)
-    keys = {
-        _environment_scope_key(base_task_id, resolution),
-        _environment_scope_key(raw_task_id, resolution),
-    }
+    keys = {_environment_scope_key(base_task_id, resolution)}
+    if hosted_scope() is None:  # a hosted scope evicts only its own sandbox
+        keys.add(_environment_scope_key(raw_task_id, resolution))
     evicted = []
     seen = set()
     with _env_lock:
@@ -647,12 +637,9 @@ def _evict_environment_for_task(
             _last_activity.pop(key, None)
             if env is not None and id(env) not in seen:
                 seen.add(id(env))
-                evicted.append(env)
-    for env in evicted:
-        try:
-            env.cleanup()
-        except Exception:
-            logger.debug("cleanup of degraded environment failed", exc_info=True)
+                evicted.append((key, env))
+    for key, env in evicted:
+        _teardown_env(env, key, done_msg="Evicted degraded environment for task: %s")
 
 
 def get_environment_for_target_scope(

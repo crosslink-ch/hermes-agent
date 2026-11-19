@@ -141,8 +141,10 @@ def register_task_env_overrides(task_id: str, overrides: dict[str, Any]):
     Keyed like ``_session_cwd`` — routed-profile qualified (:func:`_qualify_task_key`) — so two
     profiles registering the same task id never read each other's image/cwd (#123989).
     """
-    from tools.terminal_tool import _active_environments, _env_lock, _profile_scoped_task_key, _resolve_container_task_id, _sanitize_cwd_for_live_env, _target_resolution, _task_env_overrides, record_session_cwd
-    _task_env_overrides[_profile_scoped_task_key(task_id)] = overrides
+    from tools.environments.sandbox_scope import hosted_scope
+    from tools.terminal_tool import _active_environments, _env_lock, _profile_scoped_task_key, _qualify_task_key, _resolve_container_task_id, _sanitize_cwd_for_live_env, _target_resolution, _task_env_overrides, record_session_cwd
+    hosted = hosted_scope() is not None
+    _task_env_overrides[_qualify_task_key(task_id) if hosted else _profile_scoped_task_key(task_id)] = overrides
     try:
         default_resolution = _target_resolution(None)
     except ValueError:
@@ -166,6 +168,9 @@ def register_task_env_overrides(task_id: str, overrides: dict[str, Any]):
                     default_resolution.environment_key(task_id),
                     default_resolution.environment_key(container_id),
                 }
+            elif hosted:
+                # A hosted scope's only environment is its sandbox; a raw task id may name anyone's.
+                candidate_keys = {container_id}
             else:
                 candidate_keys = {task_id, container_id}
             envs = [
@@ -181,8 +186,9 @@ def register_task_env_overrides(task_id: str, overrides: dict[str, Any]):
 
 def clear_task_env_overrides(task_id: str):
     """Drop a task's overrides, cwd record and container alias (rollout cleanup)."""
-    from tools.terminal_tool import _container_alias_key, _container_alias_lock, _container_aliases, _profile_scoped_task_key, _task_env_overrides, clear_session_cwd
+    from tools.terminal_tool import _container_alias_key, _container_alias_lock, _container_aliases, _profile_scoped_task_key, _qualify_task_key, _task_env_overrides, clear_session_cwd
     _task_env_overrides.pop(_profile_scoped_task_key(task_id), None)
+    _task_env_overrides.pop(_qualify_task_key(task_id), None)
     clear_session_cwd(task_id)
     alias_key = _container_alias_key(task_id)
     with _container_alias_lock:

@@ -84,37 +84,11 @@ def _tc_name(tool_call: Any) -> str:
     return getattr(getattr(tool_call, "function", None), "name", "") or "tool"
 
 
-from agent.tool_executor_storage import (
-    _record_persisted_path_for_stub,
-    _budget_for_agent,
-    _parse_tool_arguments,
-)
-
-
+from agent.tool_executor_storage import _budget_for_agent, _parse_tool_arguments, _record_persisted_path_for_stub
 from agent.tool_executor_targets import (
-    _TARGET_RESULT_TOOLS,
-    _ensure_file_checkpoint,
-    _result_target_identity,
-    _result_environment,
-    _active_env_for_tool_result,
-    _selected_local_target_cwd,
-    _target_subdirectory_hints,
-    _persisted_target_hint,
+    _TARGET_RESULT_TOOLS, _active_env_for_tool_result, _ensure_file_checkpoint, _persisted_target_hint,
+    _result_environment, _result_target_identity, _selected_local_target_cwd, _target_subdirectory_hints,
 )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 _MAX_TOOL_WORKERS = 8  # concurrent worker threads per batch
@@ -722,7 +696,10 @@ def _dispatch_authorized_once(
     _advance_start_order(lambda: _begin_tool_execution(agent, ref, display_index))
     from agent.tool_progress_relay import bound_tool_progress
     from tools.connectors.data_use import collect_data_use
-    with environment_turn_usage(ref.task_id, environment_key=execution_environment_turn_key(ref.name, ref.args, task_id=ref.task_id)), bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use:
+    from tools.mcp_elicitation_form import bound_form_asker  # MCP elicitation asks on this turn's clarify surface
+    with environment_turn_usage(ref.task_id, environment_key=execution_environment_turn_key(ref.name, ref.args, task_id=ref.task_id)), \
+            bound_tool_progress(agent.tool_progress_callback, ref.name, ref.call_id), collect_data_use() as data_use, \
+            bound_form_asker(getattr(agent, "clarify_callback", None)):
         try:
             return _run_with_activity_heartbeat(agent, ref.name, lambda: execute(ref.args))
         finally:

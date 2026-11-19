@@ -305,7 +305,9 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     """Create an execution environment (instance with ``execute()``) for *env_type*. ``image`` is ignored
     for local/ssh/vercel; ``container_config`` carries the container_*/docker_* resource keys; ``host_cwd`` is
     the host dir bound into Docker when cwd mounting is enabled. ``probe_only`` asks ssh for a throwaway
-    connection with no remote setup/sync (the prompt-time probe). Unknown types fall through to plugin backends."""
+    connection with no remote setup/sync (the prompt-time probe). Unknown types fall through to plugin backends.
+    Inside a hosted scope the environment is always the bound agent's sandbox (:func:`_build_hosted_env`)."""
+    from tools.environments.sandbox_scope import hosted_scope
     builder = _ENV_BUILDERS.get(env_type)
     if env_type == "docker" and session_scoped is None:
         # Only direct legacy callers derive isolation from ambient settings.
@@ -314,7 +316,9 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         session_scoped = bool(task_id != "default" and _docker_session_isolation_enabled())
     kwargs = dict(image=image, cwd=cwd, timeout=timeout, cc=container_config or {}, task_id=task_id,
                   ssh_config=ssh_config, local_config=local_config, host_cwd=host_cwd, probe_only=probe_only, session_scoped=session_scoped)
-    if builder is not None:
+    if hosted_scope() is not None:
+        env = _build_hosted_env(env_type=env_type, **kwargs)
+    elif builder is not None:
         env = builder(**kwargs)
     else:
         env = _build_plugin_env(env_type=env_type, **kwargs)

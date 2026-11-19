@@ -951,7 +951,7 @@ def test_process_metadata_survives_status_list_and_checkpoint(monkeypatch, tmp_p
     import tools.process_registry as process_mod
 
     checkpoint = tmp_path / "processes.json"
-    monkeypatch.setattr(process_mod, "CHECKPOINT_PATH", checkpoint)
+    monkeypatch.setattr(process_mod, "_checkpoint_path", lambda: checkpoint)
     registry = process_mod.ProcessRegistry()
     session = process_mod.ProcessSession(
         id="proc_targeted",

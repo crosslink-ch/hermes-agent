@@ -43,6 +43,34 @@ def _inherited_rpc_authority(execution_target, execution_target_scope,
     return target, resolution.security_scope, _frozen_target_config(resolution)
 
 
+def _default_dispatch(task_id, session_id=None, turn_id=None, conversation_id=None):
+    from model_tools import handle_function_call
+    from tools.file_tools_read_tracking import programmatic_file_read
+
+    def dispatch(tool_name, tool_args):
+        with programmatic_file_read():
+            return handle_function_call(tool_name, tool_args, task_id=task_id, session_id=session_id,
+                                        turn_id=turn_id, conversation_id=conversation_id)
+    return dispatch
+
+
+def _target_bound_dispatch(task_id, session_id=None, turn_id=None, conversation_id=None, *,
+                           execution_target=None, execution_target_scope=None,
+                           execution_target_config=None):
+    """The default dispatch, with every nested call bound to the execute_code target that owns the script."""
+    from tools.code_execution_tool import _dispatch_rpc_tool, _inherit_execution_target
+    execution_target, execution_target_scope, execution_target_config = _inherited_rpc_authority(
+        execution_target, execution_target_scope, execution_target_config)
+    inner = _default_dispatch(task_id, session_id, turn_id, conversation_id)
+
+    def dispatch(tool_name, tool_args):
+        bound_args = _inherit_execution_target(
+            tool_name, tool_args, execution_target, execution_target_scope)
+        return _dispatch_rpc_tool(lambda name, args, task_id=None: inner(name, args), tool_name, bound_args,
+                                  task_id, execution_target_config)
+    return dispatch
+
+
 def _private_dirs_cmd(root: str, *subdirs: str) -> str:
     """Shell command creating *root* (and optional *subdirs* under it) owner-only
     on a shared host. ``umask 077`` makes intermediates and leaves private at
@@ -160,16 +188,9 @@ def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: li
     carries the cell's context); session kernels rebind each call to the CURRENT cell's authority.
     """
     if dispatch is None:
-        from tools.code_execution_tool import _dispatch_rpc_tool, _inherit_execution_target
-        from model_tools import handle_function_call
-        execution_target, execution_target_scope, execution_target_config = _inherited_rpc_authority(
-            execution_target, execution_target_scope, execution_target_config)
-
-        def dispatch(tool_name, tool_args):
-            bound_args = _inherit_execution_target(
-                tool_name, tool_args, execution_target, execution_target_scope)
-            return _dispatch_rpc_tool(handle_function_call, tool_name, bound_args,
-                                      task_id, execution_target_config)
+        dispatch = _target_bound_dispatch(
+            task_id, execution_target=execution_target, execution_target_scope=execution_target_scope,
+            execution_target_config=execution_target_config)
     conn = None
     try:
         server_sock.settimeout(0.05)
@@ -221,22 +242,15 @@ def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: li
 
 
 def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_call_counter: list,
-                    max_tool_calls: int, allowed_tools: frozenset, stop_event: threading.Event,
-                    rpc_token: str, execution_target=None, execution_target_scope=None,
-                    execution_target_config=None):
+                   max_tool_calls: int, allowed_tools: frozenset, stop_event: threading.Event,
+                   rpc_token: str, session_id=None, turn_id=None, conversation_id=None,
+                   execution_target=None, execution_target_scope=None, execution_target_config=None):
     """Poll the remote filesystem for request files and answer them. Background thread; each
     ``env.execute()`` is an independent process, so this is safe alongside the script-execution
     thread. Malformed or unauthorized requests are removed without a response."""
-    from tools.code_execution_tool import _dispatch_rpc_tool, _inherit_execution_target
-    from model_tools import handle_function_call
-    execution_target, execution_target_scope, execution_target_config = _inherited_rpc_authority(
-        execution_target, execution_target_scope, execution_target_config)
-
-    def dispatch(tool_name, tool_args):
-        bound_args = _inherit_execution_target(
-            tool_name, tool_args, execution_target, execution_target_scope)
-        return _dispatch_rpc_tool(handle_function_call, tool_name, bound_args,
-                                  task_id, execution_target_config)
+    dispatch = _target_bound_dispatch(
+        task_id, session_id, turn_id, conversation_id, execution_target=execution_target,
+        execution_target_scope=execution_target_scope, execution_target_config=execution_target_config)
     poll_interval = 0.1
     quoted_rpc_dir = shlex.quote(rpc_dir)
     while not stop_event.is_set():

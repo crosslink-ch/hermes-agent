@@ -1983,10 +1983,11 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         if session is None:
             return {"status": "not_found", "error": f"No process with ID {session_id}"}
 
+        max_timeout = max_wait_timeout()
         try:
-            max_timeout = int(session.timeout_seconds or os.getenv("TERMINAL_TIMEOUT", "180"))
+            max_timeout = int(session.timeout_seconds) or max_timeout  # the spawning target's own timeout
         except (ValueError, TypeError):
-            max_timeout = 180
+            pass
         # The schema says minimum=1 but not every caller enforces it; timeout=0 is
         # falsy and would silently fall through to the default wait.
         if timeout is not None and timeout <= 0:

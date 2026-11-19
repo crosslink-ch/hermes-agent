@@ -151,7 +151,7 @@ def test_execute_code_approval_payload_includes_target_metadata(monkeypatch):
     seen = {}
     monkeypatch.setattr(
         approval_mod, "_await_gateway_decision",
-        lambda session_key, notify_cb, approval_data, surface: (
+        lambda session_key, notify_cb, approval_data, surface, **_kwargs: (
             seen.update(approval_data) or {"resolved": True, "choice": "once"}
         ),
     )

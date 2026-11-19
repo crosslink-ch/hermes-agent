@@ -350,6 +350,15 @@ def _check_protected_instruction_write(paths: list[str], task_id: str = "default
     return _request_protected_instruction_approval(reasons, task_id)
 
 
+# Approval key -> (prompt noun, why it is gated). One key per class so an approve-always for one
+# class never authorizes the other.
+_APPROVAL_WRITE_CLASSES = {
+    "ssh_config_write": ("SSH client config file(s)",
+                         "The SSH config can carry ProxyCommand / Match exec directives that run commands"),
+    "shell_rc_write": ("shell startup file(s)", "Shell startup files run their commands in every new login shell"),
+}
+
+
 def _check_approval_required_write(paths: list[str], task_id: str = "default",
                                    execution_target=None, *, _resolution=None) -> str | None:
     """Gate a write/patch touching an approval-required path (``~/.ssh/config`` can steer
@@ -385,27 +394,27 @@ def _check_approval_required_write(paths: list[str], task_id: str = "default",
         except Exception:
             return blocked.format(why=_APPROVAL_UNAVAILABLE)
 
-    from tools.approval import _execution_scoped_pattern_key
-    if _resolution is None and execution_target is not None:
-        from tools.execution_targets import resolve_execution_target
-        _resolution = resolve_execution_target(execution_target)
-    result = _approval._run_approval_gate(
-        pattern_key="ssh_config_write" if _resolution is None else _execution_scoped_pattern_key(
-            "ssh_config_write", _resolution.target, _resolution.named, _resolution.security_scope),
-        description=description,
-        display_target=f"<write to {display_targets}>",
-        cron_deny_message=blocked.format(why="requires approval but this cron session denies it."),
-        single_query_deny_message=blocked.format(
-            why="requires approval but single-query (-q) sessions run "
-                "without a user present to approve it. To allow flagged "
-                "actions in single-query mode, set approvals.single_query_mode: "
-                "approve in config.yaml."),
-        autoapprove_log_prefix="ssh_config_write",
-        fail_closed_when_no_human=True,
-        no_human_block_message=blocked.format(why=_NO_HUMAN))
-    if result.get("approved"):
-        return None
-    return result.get("message") or blocked.format(why="was denied.")
+        from tools.approval import _execution_scoped_pattern_key
+        if _resolution is None and execution_target is not None:
+            from tools.execution_targets import resolve_execution_target
+            _resolution = resolve_execution_target(execution_target)
+        result = _approval._run_approval_gate(
+            pattern_key=pattern_key if _resolution is None else _execution_scoped_pattern_key(
+                pattern_key, _resolution.target, _resolution.named, _resolution.security_scope),
+            description=description,
+            display_target=f"<write to {display_targets}>",
+            cron_deny_message=blocked.format(why="requires approval but this cron session denies it."),
+            single_query_deny_message=blocked.format(
+                why="requires approval but single-query (-q) sessions run "
+                    "without a user present to approve it. To allow flagged "
+                    "actions in single-query mode, set approvals.single_query_mode: "
+                    "approve in config.yaml."),
+            autoapprove_log_prefix=pattern_key,
+            fail_closed_when_no_human=True,
+            no_human_block_message=blocked.format(why=_NO_HUMAN))
+        if not result.get("approved"):
+            return result.get("message") or blocked.format(why="was denied.")
+    return None
 
 
 def _get_container_mirror_prefix_for_task(task_id: str = "default") -> str | None:
@@ -577,6 +586,11 @@ def _stale_overwrite_blocker(filepath: str, resolved: str | None, task_id: str,
     stale = file_state.check_stale(key, resolved, namespace=namespace) if resolved else None
     if stale:
         return stale
+    from tools.environments.sandbox_scope import hosted_scope
+    if hosted_scope() is not None:
+        # A hosted agent's path names its sandbox, where no host baseline can exist (as for any
+        # remote backend, whose files the host-side existence check below never finds).
+        return None
     if resolution is not None and resolution.backend != "local":
         if not resolved or file_ops is None or not operation_path:
             return "Cannot verify the selected backend file before overwriting it."

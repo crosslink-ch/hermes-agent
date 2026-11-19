@@ -116,12 +116,15 @@ class SSHEnvironment(BaseEnvironment):
                  timeout: int = 60, port: int = 22, key_path: str = "",
                  probe_only: bool = False, sync_files: bool = True, persistent: bool = True,
                  runtime_scope: str = "", profile_name: str | None = None):
-        super().__init__(cwd=cwd, timeout=timeout, persist_env=persistent)
+        from tools.terminal_tool_config import coerce_ssh_remote_cwd
+
+        # cwd may be a raw terminal.cwd naming a directory on the machine running Hermes; coercion is
+        # idempotent, so callers that already coerced are unaffected.
+        super().__init__(cwd=coerce_ssh_remote_cwd(cwd, "ssh"), timeout=timeout, persist_env=persistent)
         self.host, self.user, self.port, self.key_path = host, user, port, key_path
         self.runtime_scope = str(runtime_scope or "")
         self.profile_name = str(profile_name or _active_profile_identity())
-        self.control_dir = Path(tempfile.gettempdir()) / "hermes-ssh"
-        self.control_dir.mkdir(parents=True, exist_ok=True)
+        self.control_dir, self._owns_control_dir = _open_control_dir()
         # Short, deterministic socket name: the path must stay under macOS's 104-byte sun_path
         # limit (raw user@host:port + SSH's 16-byte suffix under a deep $TMPDIR exceeds it), and
         # stability across reconnects keeps ControlMaster reuse working. A probe gets its own

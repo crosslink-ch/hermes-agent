@@ -880,8 +880,13 @@ def _format_backend_probe(output: str) -> str:
 
 
 def _probe_remote_backend(env_type: str, terminal_config=None, target_name="", runtime_scope="") -> str | None:
-    """Describe the active non-local backend via a live probe; None if it failed (cached, failures included)."""
+    """Describe the active non-local backend via a live probe; None if it failed (cached, failures included).
+    None in a hosted scope: the probe builds and tears down a throwaway environment, and a hosted agent's
+    only environment is its own sandbox."""
     from hermes_constants import hermes_home_key
+    from tools.hosted_tool_policy import host_feature_enabled
+    if not host_feature_enabled("backend_probe"):
+        return None
     cache_key = (hermes_home_key(), env_type, runtime_scope or _tenv_read("TERMINAL_CWD", ""))
     formatted = _BACKEND_PROBE_CACHE.get(cache_key)
     if formatted is None:
@@ -1050,12 +1055,9 @@ def build_environment_hints(*, home_override: Path | str | None = None) -> str:
     """
     from hermes_cli.config_backend import config_exists
     if home_override is not None and config_exists(Path(home_override) / "config.yaml"):
-        from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-        token = set_hermes_home_override(home_override)
-        try:
+        from agent.runtime_scope import bind_profile_scope
+        with bind_profile_scope(home_override, hydrate_secrets=False):
             return build_environment_hints()
-        finally:
-            reset_hermes_home_override(token)
     selected = None
     try:
         from tools.execution_targets import resolve_execution_target

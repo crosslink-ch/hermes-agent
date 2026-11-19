@@ -32,7 +32,7 @@ from tools import file_state
 from hermes_platform.host import facts
 from agent.redact import _is_secret_file_arg, redact_sensitive_text
 from tools.file_tools_paths import (
-    _expand_tilde, _resolve_entry_for_task as _legacy_entry_path, _path_resolution_warning, _resolve_base_dir as _legacy_base_dir,
+    _expand_tilde, _hosted_tilde, _resolve_entry_for_task as _legacy_entry_path, _path_resolution_warning, _resolve_base_dir as _legacy_base_dir,
     _resolve_path_for_task as _legacy_resolve_path,
     _authoritative_workspace_root as _legacy_workspace_root)
 from tools.file_tools_write_guards import (
@@ -156,11 +156,13 @@ def _rewrite_v4a_patch_paths_for_host(patch: str, path_to_resolved: dict, path_t
     hosted = hosted_scope() is not None
     if not _file_ops_uses_host_paths(file_ops) and not hosted:
         return patch
-    return _rewrite_v4a_patch_paths_for_target(patch, path_to_resolved, path_to_entry)
+    return _rewrite_v4a_patch_paths_for_target(patch, path_to_resolved, path_to_entry, hosted=hosted, task_id=task_id)
 
 
-def _rewrite_v4a_patch_paths_for_target(patch: str, path_to_resolved: dict, path_to_entry: dict | None = None) -> str:
-    """Keep multi-file patch headers on the same selected backend paths we locked."""
+def _rewrite_v4a_patch_paths_for_target(patch: str, path_to_resolved: dict, path_to_entry: dict | None = None,
+                                        *, hosted: bool = False, task_id: str = "default") -> str:
+    """Keep multi-file patch headers on the same selected backend paths we locked. In a hosted scope only a
+    ``~`` header changes (to the sandbox's home); every other header is sent as written."""
     path_to_entry = path_to_entry if path_to_entry is not None else path_to_resolved
     def _res(raw: str, entry: bool = False) -> str:
         raw = raw.strip()
@@ -175,7 +177,8 @@ def _rewrite_v4a_patch_paths_for_target(patch: str, path_to_resolved: dict, path
         lambda m: m.group(0) if _as_written(m) else f"{m.group(1)}{_res(m.group(3), entry=m.group(2) == 'Delete')}",
         patch)
     return _V4A_MOVE_HEADER_RE.sub(
-        lambda m: f"{m.group(1)}{_res(m.group(2), entry=True)} -> {_res(m.group(3), entry=True)}", patch)
+        lambda m: m.group(0) if _as_written(m)
+        else f"{m.group(1)}{_res(m.group(2), entry=True)} -> {_res(m.group(3), entry=True)}", patch)
 
 
 def _backend_v4a_patch(patch: str, task_id="default", execution_target=None, *,
@@ -194,14 +197,6 @@ def _backend_v4a_patch(patch: str, task_id="default", execution_target=None, *,
                 _resolution=resolution) for raw in dict.fromkeys(headers[0])
         }
     return _rewrite_v4a_patch_paths_for_target(patch, path_to_resolved)
-
-
-def _is_blocked_device_path(path: str) -> bool:
-    """Return True for concrete device/fd/proc paths that can hang reads or leak process state."""
-    normalized = os.path.normpath(_expand_tilde(path))
-    if normalized in _BLOCKED_DEVICE_PATHS:
-        return True
-    return normalized.startswith("/proc/") and normalized.endswith(_BLOCKED_PROC_SUFFIXES)
 
 
 def _is_blocked_device(filepath: str, base_dir: str | Path | None = None) -> bool:
@@ -360,6 +355,15 @@ def _file_state_namespace(task_id="default", execution_target=None, *, _resoluti
     return f"{profile}{runtime}{resolution.backend}:{resolution.security_scope}"
 
 
+def _legacy_flow(resolution) -> bool:
+    """Whether the unrouted file bookkeeping applies as it stands: the host's own files, or a hosted agent's
+    sandbox, whose paths those helpers already send as written and never stat on this host."""
+    if resolution is None or resolution.backend == "local":
+        return True
+    from tools.environments.sandbox_scope import hosted_scope
+    return not resolution.named and hosted_scope() is not None
+
+
 def _backend_operation_path(original, resolved, task_id="default", execution_target=None, *, _resolution=None):
     from tools.execution_targets import resolve_execution_target
     resolution = _resolution or resolve_execution_target(execution_target)
@@ -512,7 +516,7 @@ def _get_file_ops(task_id: str = "default", target: str | None = None, *,
     with task_lock:
         # Double-check: another thread may have created it while we waited.
         with _env_lock:
-            terminal_env = _active_environments.get(task_id)
+            terminal_env = admit_env(_active_environments.get(task_id))
             if terminal_env is not None and _environment_matches_target(terminal_env, resolution):
                 _last_activity[task_id] = time.time()
             else:
@@ -666,7 +670,7 @@ def _read_extracted_document(path: str, _resolved, offset: int, limit: int, task
         # The whole document was shown, so a text-authorable format (.ipynb)
         # may later be overwritten by write_file; the binary-container guard
         # keeps refusing .docx/.xlsx/.pdf regardless of this baseline.
-        if resolution is None or resolution.backend == "local":
+        if _legacy_flow(resolution):
             state_key = resolution.file_coordination_key(task_id) if resolution else task_id
             namespace = (_file_state_namespace(task_id, resolution.target if resolution.named else None,
                                                  _resolution=resolution) if resolution else None)
@@ -749,17 +753,17 @@ def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_s
     with _read_tracker_lock:
         count, dedup = _note_read_served(task_data, dedup_key, path, offset, limit)
         task_data["read_history"].add((path, offset, limit))
-        count = _bump_consecutive(task_data, ("read", path, offset, limit))
         if host_mtime_tracking:
             try:
-                _mtime_now = os.path.getmtime(resolved_str)
-                task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
+                if _on_host(resolved_str):
+                    _mtime_now = os.path.getmtime(resolved_str)
+                    task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
             except OSError:
                 pass
         baselines = task_data["full_write_baselines"]
         if stable and version is not None and count < 4:
             if host_mtime_tracking:
-                task_data["dedup"][dedup_key] = version_before
+                dedup[dedup_key] = version_before
             # A narrower view does not undo knowledge of these same bytes. Do
             # not revive a baseline after a partial read of a different version.
             complete = baselines.get(resolved_str) == version
@@ -800,6 +804,20 @@ def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_s
     return count
 
 
+def _read_device_base(path: str, task_id: str, execution_target=None,
+                      resolution=None) -> tuple[Path | PurePosixPath | None, bool]:
+    """The base the device check anchors a relative read on, and whether the read is unanchored. In a hosted scope
+    with no known sandbox cwd the relative path is the sandbox's to anchor, sent as written (as search does)."""
+    try:
+        return (None if Path(path).expanduser().is_absolute() else _resolve_base_dir(
+            task_id, execution_target=execution_target, _resolution=resolution)), False
+    except ValueError:
+        from tools.environments.sandbox_scope import hosted_scope
+        if hosted_scope() is None:
+            raise
+        return None, True
+
+
 def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT,
                    task_id: str = "default", execution_target: str | None = None,
                    runtime_scope: str | None = None) -> str:
@@ -819,23 +837,22 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT,
             task_id, execution_target, runtime_scope,
         )
         selected_target = resolution.target if resolution.named else None
-        host_mtime_tracking = resolution.backend == "local"
+        host_mtime_tracking = _legacy_flow(resolution)
         state_task_id = resolution.file_coordination_key(task_id)
         state_namespace = _file_state_namespace(
             task_id, selected_target, _resolution=resolution,
         )
         offset, limit = normalize_read_pagination(offset, limit)
 
-        device_base = None if Path(path).expanduser().is_absolute() else _resolve_base_dir(
-            task_id, execution_target=selected_target, _resolution=resolution)
+        path = _hosted_tilde(path, task_id)  # a hosted read sends the path as given: ``~`` is the sandbox's home
+        device_base, unanchored = _read_device_base(path, task_id, selected_target, resolution)
         if _is_blocked_device(path, base_dir=device_base):
             return tool_error(
                 f"Cannot read '{path}': this is a device file that would "
                 "block or produce infinite output.")
 
-        _resolved = _resolve_path_for_task(
-                path, task_id, selected_target, _resolution=resolution,
-            )
+        _resolved = PurePosixPath(path) if unanchored else _resolve_path_for_task(
+            path, task_id, selected_target, _resolution=resolution)
         file_ops = pinned_file_ops or _file_ops_for_resolution(task_id, resolution)
 
         # A read on a FIFO/socket blocks until the exec timeout: a self-shipped DoS.
@@ -1035,7 +1052,7 @@ def _edit_warnings(paths: list[str], path_to_resolved: dict, task_id: str,
         r = path_to_resolved.get(p)
         key = resolution.file_coordination_key(task_id) if resolution else task_id
         w = (file_state.check_stale(key, r, namespace=namespace) if r else None)
-        if not w and (resolution is None or resolution.backend == "local"):
+        if not w and _legacy_flow(resolution):
             w = _check_file_staleness(p, task_id)
         if not w and r and (resolution is None or not resolution.named):
             w = _path_resolution_warning(p, Path(r), task_id)
@@ -1050,12 +1067,12 @@ def _note_edited(task_id: str, paths: list[str], path_to_resolved: dict,
     the read stamp (no false staleness on the next edit) and record the write."""
     _mark_verification_stale(task_id, [path_to_resolved.get(p) or p for p in paths], session_id=session_id)
     for p in paths:
-        if resolution is None or resolution.backend == "local":
+        if _legacy_flow(resolution):
             _update_read_timestamp(p, task_id)
         if path_to_resolved.get(p):
             key = resolution.file_coordination_key(task_id) if resolution else task_id
             file_state.note_write(key, path_to_resolved[p], namespace=namespace,
-                                  stat_path=resolution is None or resolution.backend == "local")
+                                  stat_path=_legacy_flow(resolution))
 
 
 # Whole-file rewrite hint: an overwrite of an existing file this large whose new content keeps at least
@@ -1175,12 +1192,12 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
             if _resolved:
                 result_dict["resolved_path"] = operation_path
             if result_dict.get("error"):
-                if resolution.backend == "local":
+                if _legacy_flow(resolution):
                     _update_read_timestamp(path, task_id)
             else:
                 if _resolved:
                     result_dict["files_modified"] = [operation_path]
-                    if resolution.backend == "local":
+                    if _legacy_flow(resolution):
                         _mark_full_write_baseline(
                             _resolved, state_task_id, getattr(result, "_content_sha256", None))
                     else:
@@ -1270,7 +1287,7 @@ def patch_tool(mode: str = "replace", path: str | None = None, old_string: str |
             stale_warnings = _edit_warnings(
                 _paths_to_check, _path_to_resolved, task_id, resolution, namespace)
             file_ops = _file_ops_for_resolution(task_id, resolution)
-            _known = _known_full_content_sha256(_path_to_resolved.values(), state_task_id) if resolution.backend == "local" else {}
+            _known = _known_full_content_sha256(_path_to_resolved.values(), state_task_id) if _legacy_flow(resolution) else {}
 
             # Hand the shell layer the RESOLVED targets so both layers agree on
             # which file is edited even when the shell's cwd differs.
@@ -1289,7 +1306,7 @@ def patch_tool(mode: str = "replace", path: str | None = None, old_string: str |
                 backend_paths = {_p: _backend_operation_path(_p, _r or _p, task_id,
                     selected_target, _resolution=resolution) for _p, _r in _path_to_resolved.items()}
                 result = file_ops.patch_v4a(_rewrite_v4a_patch_paths_for_host(
-                    patch, backend_paths, _path_to_entry, file_ops) if resolution.backend == "local"
+                    patch, backend_paths, _path_to_entry, file_ops, task_id) if _legacy_flow(resolution)
                     else _backend_v4a_patch(patch, task_id, selected_target,
                                             _resolution=resolution, path_to_resolved=backend_paths))
             else:
@@ -1308,7 +1325,7 @@ def patch_tool(mode: str = "replace", path: str | None = None, old_string: str |
                     result_dict["resolved_path"] = _resolved_modified[0]
                 _note_edited(task_id, _paths_to_check, _path_to_resolved,
                              session_id, resolution, namespace)
-                if resolution.backend == "local":
+                if _legacy_flow(resolution):
                     _carry_full_write_baselines(state_task_id, _known, getattr(result, "_writes", ()), _path_to_resolved)
                 # Clear failure counters so a future miss starts a fresh count.
                 _reset_patch_failures(state_task_id, [_r for _r in _path_to_resolved.values() if _r])
@@ -1396,7 +1413,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         # "Similar paths"); cache the miss so a retry skips both.
         cached_search_nf = _check_not_found_cache(
             "search", resolved_search_path, state_task_id,
-            check_host_filesystem=resolution.backend == "local")
+            check_host_filesystem=_legacy_flow(resolution))
         if cached_search_nf is not None:
             return cached_search_nf
 
@@ -1604,19 +1621,19 @@ _MACOS_SEARCH_NOTE = (" On macOS, broad searches above the user home automatical
 
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents. The target field selects search mode (content/files); execution_target separately selects the named terminal execution target." + _MACOS_SEARCH_NOTE + "\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls. Discovery order is the fast bounded default; exact global newest-first order is an explicit opt-in and may scan the full tree.",
+    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents. The target field selects search mode (content/files); execution_target separately selects the named terminal execution target." + _MACOS_SEARCH_NOTE,
     "parameters": {
         "type": "object",
         "properties": {
-            "pattern": {"type": "string", "description": "Regex pattern for content search, or glob pattern (e.g., '*.py') for file search"},
-            "target": {"type": "string", "enum": ["content", "files"], "description": "'content' searches inside file contents, 'files' searches for files by name", "default": "content"},
-            "path": {"type": "string", "description": "Directory or file to search in (default: current working directory)", "default": "."},
-            "file_glob": {"type": "string", "description": "Filter files by pattern in grep mode (e.g., '*.py' to only search Python files)"},
-            "limit": {"type": "integer", "description": "Maximum number of results to return (default: 50)", "default": 50},
-            "offset": {"type": "integer", "description": "Skip first N results for pagination (default: 0)", "default": 0},
-            "order": {"type": "string", "enum": ["discovery", "modified"], "description": "File-search order: 'discovery' is fast bounded traversal order; 'modified' is exact global newest-first and may scan the full tree; ignored for content", "default": "discovery"},
-            "output_mode": {"type": "string", "enum": ["content", "files_only", "count"], "description": "Output format for grep mode: 'content' shows matching lines with line numbers, 'files_only' lists file paths, 'count' shows match counts per file", "default": "content"},
-            "context": {"type": "integer", "description": "Number of context lines before and after each match (grep mode only)", "default": 0},
+            "pattern": {"type": "string", "description": "Regex for content search; glob (e.g. '*.py', '*config*') for file search."},
+            "target": {"type": "string", "enum": ["content", "files"], "description": "'content' searches inside files, 'files' finds files by name.", "default": "content"},
+            "path": {"type": "string", "description": "Directory or file to search in.", "default": "."},
+            "file_glob": {"type": "string", "description": "Content search only: filter files by pattern (e.g. '*.py')."},
+            "limit": {"type": "integer", "description": "Maximum number of results.", "default": 50},
+            "offset": {"type": "integer", "description": "Skip first N results for pagination.", "default": 0},
+            "order": {"type": "string", "enum": ["discovery", "modified"], "description": "File search only: 'discovery' is fast bounded traversal order; 'modified' is exact global newest-first and may scan the full tree.", "default": "discovery"},
+            "output_mode": {"type": "string", "enum": ["content", "files_only", "count"], "description": "Content search only: 'content' shows matching lines with line numbers, 'files_only' lists file paths, 'count' shows match counts per file.", "default": "content"},
+            "context": {"type": "integer", "description": "Content search only: lines of context before and after each match.", "default": 0},
             "execution_target": {"type": "string", "description": "Optional named execution target, for example 'local' or 'devbox'. This is separate from target, which selects content/files search mode."},
         },
         "required": ["pattern"]
@@ -1778,8 +1795,10 @@ def _patch_schema_overrides():
         return {}
 
 
-registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000, dynamic_schema_overrides=_patch_schema_overrides)
-registry.register(name="search_files", toolset="file", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000)
+registry.register(name="patch", toolset="file", schema=PATCH_SCHEMA, handler=_handle_patch, check_fn=_check_file_reqs, emoji="🔧", max_result_size_chars=100_000, dynamic_schema_overrides=_patch_schema_overrides,
+                  compat_args=("mode", "patch", "cross_profile"))
+registry.register(name="search_files", toolset="file", schema=SEARCH_FILES_SCHEMA, handler=_handle_search_files, check_fn=_check_file_reqs, emoji="🔎", max_result_size_chars=100_000,
+                  self_checked_args=("pattern",))  # a files listing takes none; the handler refuses a content search without one
 
 
 def _read_target_context(task_id, execution_target, runtime_scope):
@@ -1834,15 +1853,11 @@ def _raw_patch_path_error(mode, path, patch):
     return None
 
 
-
 def _read_dedup_state(state_task_id, dedup_key, host_mtime_tracking):
-    with _read_tracker_lock:
-        task_data = _task_data(state_task_id)
-        cached_version = task_data["dedup"].get(dedup_key) if host_mtime_tracking else None
-        # First unchanged read after a compaction boundary serves full content
-        # (the summary may have dropped exact bytes); later ones get the stub.
-        content_served_in_generation = dedup_key in task_data["dedup_generation_reads"]
-    return task_data, cached_version, content_served_in_generation
+    """``_dedup_lookup`` for a read; a host stat is no evidence about a file on another backend, so a
+    non-host read never has a cached version to compare."""
+    task_data, cached_version, served = _dedup_lookup(state_task_id, dedup_key)
+    return task_data, (cached_version if host_mtime_tracking else None), served
 
 
 def _patch_path_groups(mode, path, patch):

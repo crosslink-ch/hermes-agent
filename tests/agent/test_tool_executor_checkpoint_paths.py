@@ -175,8 +175,8 @@ def test_named_local_target_checkpoint_uses_target_cwd(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr(
-        "tools.checkpoint_manager.CHECKPOINT_BASE",
-        tmp_path / "checkpoints",
+        "tools.checkpoint_manager._resolve_checkpoint_base",
+        lambda: tmp_path / "checkpoints",
     )
     manager = CheckpointManager(enabled=True)
     agent = SimpleNamespace(_checkpoint_mgr=manager)

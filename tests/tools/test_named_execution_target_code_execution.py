@@ -61,7 +61,7 @@ def test_execute_code_inherits_target_and_rejects_nested_override(
     monkeypatch.setattr(
         code_mod, "_execute_remote",
         lambda code, task_id, enabled_tools, reset=False, target=None, mode="strict",
-        expected_target_scope=None, expected_target_config=None: (
+        expected_target_scope=None, expected_target_config=None, **_identity: (
             forwarded.update(
                 target=target, mode=mode, scope=expected_target_scope,
                 config=expected_target_config,
@@ -274,7 +274,7 @@ def test_remote_project_mode_executes_from_target_session_cwd(
         code_mod, "_get_or_create_env",
         lambda task_id, target=None, expected_target_scope=None: (env, "ssh"),
     )
-    monkeypatch.setattr(code_mod, "_ship_file_to_remote", lambda *args, **kwargs: None)
+    monkeypatch.setattr(code_mod, "_remote_write", lambda *args, **kwargs: None)
     monkeypatch.setattr(code_mod.threading, "Thread", DummyThread)
     monkeypatch.setattr(
         code_mod, "_load_config", lambda: {"timeout": 30, "max_tool_calls": 5},

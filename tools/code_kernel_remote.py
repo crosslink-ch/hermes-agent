@@ -301,6 +301,8 @@ def _acquire_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
                            idle_exit: int) -> tuple[Optional[RemoteKernel], bool, bool, bool]:
     """Find/respawn the owner's kernel: (kernel|None, reused, state_reset, state_lost); reaps
     idle-expired entries on the way in."""
+    from tools.environments.sandbox_scope import hosted_scope
+    owner_scope = hosted_scope()
     key = _kernel_key(owner, env_type, task_env_id, sandbox_tools, env=env)
     state_lost = state_reset = False
     with _REGISTRY.lock:
@@ -335,8 +337,9 @@ def _run_remote_cell(kernel: RemoteKernel, code: str, timeout: int, *, operation
     seq = f"{kernel.cell_seq:06d}"
     q_cells, q_res = shlex.quote(f"{kernel.kernel_dir}/cells"), shlex.quote(f"cell_res_{seq}.json")
     # One round-trip: tmp write + rename publishes the request atomically.
-    _ship_file_to_remote(kernel.env, f"{kernel.kernel_dir}/cells/cell_req_{seq}.json",
-                         json.dumps({"id": seq, "code": code, **({"cwd": operation_cwd} if operation_cwd else {})}, ensure_ascii=False), atomic=True)
+    _remote_write(kernel.env, f"{kernel.kernel_dir}/cells/cell_req_{seq}.json",
+                  json.dumps({"id": seq, "code": code, **({"cwd": operation_cwd} if operation_cwd else {})}, ensure_ascii=False),
+                  atomic=True, check=True)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -366,6 +369,7 @@ def execute_in_remote_kernel(
     code: str, *, env, env_type: str, task_env_id: str, sandbox_tools: frozenset,
     timeout: int, max_tool_calls: int, reset: bool, idle_exit: int = 1800,
     operation_cwd: str | None = None,
+    session_id: str | None = None, turn_id: str | None = None, conversation_id: str | None = None,
 ) -> Optional[dict[str, Any]]:
     """Run one cell in the owner's remote kernel. Returns the raw cell result dict (caller
     post-processes output), or ``None`` when no kernel could be spawned (caller falls open to
@@ -387,7 +391,8 @@ def execute_in_remote_kernel(
         return _run_attached_cell(kernel, key, code, env=env, task_env_id=task_env_id,
                                   sandbox_tools=sandbox_tools, timeout=timeout, max_tool_calls=max_tool_calls,
                                   reused=reused, state_reset=state_reset, state_lost=state_lost,
-                                  operation_cwd=operation_cwd)
+                                  operation_cwd=operation_cwd,
+                                  session_id=session_id, turn_id=turn_id, conversation_id=conversation_id)
     finally:
         with _REGISTRY.lock:
             kernel.attached -= 1
@@ -397,7 +402,9 @@ def execute_in_remote_kernel(
 def _run_attached_cell(kernel: RemoteKernel, key: tuple, code: str, *, env, task_env_id: str,
                        sandbox_tools: frozenset, timeout: int, max_tool_calls: int,
                        reused: bool, state_reset: bool, state_lost: bool,
-                       operation_cwd: str | None = None) -> dict[str, Any]:
+                       operation_cwd: str | None = None,
+                       session_id: str | None = None, turn_id: str | None = None,
+                       conversation_id: str | None = None) -> dict[str, Any]:
     from tools.code_execution_rpc import tool_errors_since
     from tools.code_execution_tool import _rpc_poll_loop
     from tools.thread_context import propagate_context_to_thread

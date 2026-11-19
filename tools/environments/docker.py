@@ -1698,6 +1698,7 @@ class DockerEnvironment(BaseEnvironment):
         existing_thread = getattr(self, "_cleanup_thread", None)
         if existing_thread is not None and existing_thread.is_alive():
             return
+        self.stop_all_processes()  # streams into the container: their host-side exec clients too
         container_id = self._container_id
         if not container_id:
             # Bind-mount dirs are still dropped in non-persistent mode.

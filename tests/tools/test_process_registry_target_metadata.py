@@ -44,7 +44,7 @@ def test_completion_notification_preserves_execution_target_metadata(registry):
 
 class TestCheckpoint:
     def test_write_checkpoint_includes_execution_target_metadata(self, registry, tmp_path):
-        with patch("tools.process_registry.CHECKPOINT_PATH", tmp_path / "procs.json"):
+        with patch("tools.process_registry._checkpoint_path", return_value=tmp_path / "procs.json"):
             s = _make_session()
             s.target = "alpha"
             s.backend = "local"
@@ -67,7 +67,7 @@ class TestCheckpoint:
             "pid": 999999999,  # almost certainly not running
             "task_id": "t1",
         }]))
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        with patch("tools.process_registry._checkpoint_path", return_value=checkpoint):
             recovered = registry.recover_from_checkpoint()
             assert recovered == 0
 
@@ -89,7 +89,7 @@ class TestCheckpoint:
             "backend": "local",
             "runtime_scope": "scope-v1",
         }]))
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        with patch("tools.process_registry._checkpoint_path", return_value=checkpoint):
             recovered = registry.recover_from_checkpoint()
             assert recovered == 1
             assert len(registry.pending_watchers) == 1
@@ -122,7 +122,7 @@ class TestCheckpoint:
         monkeypatch.setattr(registry, "_host_pid_is_ours", lambda *_args: False)
         monkeypatch.setattr(registry, "_is_host_pid_alive", lambda *_args: False)
 
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint), patch(
+        with patch("tools.process_registry._checkpoint_path", return_value=checkpoint), patch(
             "tools.process_registry._stop_systemd_unit", return_value=False
         ) as stop_unit:
             assert registry.recover_from_checkpoint() == 0
@@ -146,7 +146,7 @@ class TestCheckpoint:
         monkeypatch.setattr(registry, "_host_pid_is_ours", lambda *_args: False)
         monkeypatch.setattr(registry, "_is_host_pid_alive", lambda *_args: False)
 
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint), patch(
+        with patch("tools.process_registry._checkpoint_path", return_value=checkpoint), patch(
             "tools.process_registry._stop_systemd_unit", return_value=True
         ) as stop_unit:
             assert registry.recover_from_checkpoint() == 0
@@ -166,7 +166,7 @@ class TestCheckpoint:
         }]
         checkpoint.write_text(json.dumps(original))
 
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        with patch("tools.process_registry._checkpoint_path", return_value=checkpoint):
             recovered = registry.recover_from_checkpoint()
             assert recovered == 0
             assert registry.get("proc_remote") is None
@@ -180,7 +180,7 @@ class TestCheckpoint:
         redacted before write. Recovery only uses command for display/logging
         (the process is already running), so masking is lossless."""
         checkpoint = tmp_path / "procs.json"
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        with patch("tools.process_registry._checkpoint_path", return_value=checkpoint):
             secret = "sk-secret1234567890"
             command = f"curl -H 'Authorization: Bearer {secret}' http://x"
             s = _make_session(sid="proc_secret", command=command)

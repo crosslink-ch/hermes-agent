@@ -166,8 +166,10 @@ def _check_not_found_cache(op: str, resolved_str: str, task_id: str, *,
             return None
     # "check → create → read" is common, so never serve a stale miss for a path
     # that now exists. The stat runs OUTSIDE the tracker lock: a hung stat on a
-    # dead network mount must not stall every task.
-    if check_host_filesystem and os.path.exists(resolved_str):
+    # dead network mount must not stall every task. A sandbox path cannot be
+    # checked here, so its miss is never served from the cache; a named remote
+    # target's path is not on this host either, so no host stat is consulted for it.
+    if not _on_host(resolved_str) or (check_host_filesystem and os.path.exists(resolved_str)):
         with _read_tracker_lock:
             _pop_not_found(op, resolved_str, task_id)
         return None

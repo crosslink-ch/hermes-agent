@@ -207,6 +207,12 @@ def spawn_background_process(
             result_data["persist_on_release"] = True
         if resolution is not None:
             result_data.update(resolution.metadata(cwd=effective_cwd))
+        if env_type == "local" and effective_cwd:
+            from tools.environments.local import _msys_to_windows_path
+            from tools.terminal_tool_result import _cwd_fallback_note
+            used = getattr(proc_session, "cwd", None)  # spawn_local resolves a dead cwd itself
+            if used and used not in (effective_cwd, _msys_to_windows_path(effective_cwd)):
+                result_data["cwd_fallback"] = _cwd_fallback_note({"requested": effective_cwd, "used": used})
         if approval_note:
             result_data["approval"] = approval_note
         if pty_disabled_reason:

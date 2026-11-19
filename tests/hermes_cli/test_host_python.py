@@ -49,8 +49,8 @@ def test_module_and_code_forms(tmp_path):
 # The source launcher runs ``python -I -c <bootstrap>`` (isolated: safe_path on, PYTHONPATH ignored) and drops
 # the invoking directory from sys.path before dispatching; reproduce that so the CPython path[0] contract is
 # tested where it actually breaks.
-_LAUNCHER = ("import sys; sys.path[:] = [p for p in sys.path if p]; sys.path.insert(0, %r); "
-             "from hermes_cli.host_python import main; raise SystemExit(main(sys.argv[1:]))" % _REPO)
+_LAUNCHER = (f"import sys; sys.path[:] = [p for p in sys.path if p]; sys.path.insert(0, {_REPO!r}); "
+             "from hermes_cli.host_python import main; raise SystemExit(main(sys.argv[1:]))")
 
 
 def _run_launched(cwd, *argv):

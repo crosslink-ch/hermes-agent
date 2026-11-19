@@ -1063,7 +1063,7 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
     verdict = (
         _target_smart_verdict(command, description, pattern_key, pattern_keys,
                               session_key, execution_target, execution_backend)
-        if execution_target else
+        if execution_target and execution_target != "default" else
         _smart_verdict(command, description, pattern_key, pattern_keys, session_key)
     )
     if verdict == "approve":
@@ -1176,8 +1176,8 @@ def _human_decision(spec: _GateSpec, *, command: str, description: str,
             data = {
                 "command": display_command, "pattern_key": pattern_key,
                 "pattern_keys": pattern_keys, "description": display_description,
-                "allow_permanent": not smart_denied,
-                "allow_session": not smart_denied,
+                "allow_permanent": not one_shot,
+                "allow_session": not one_shot,
                 "target": execution_target, "backend": execution_backend,
             }
             if smart_denied:
@@ -1557,7 +1557,11 @@ def check_all_command_guards(command: str, env_type: str,
         _COMMAND_GATE, command=command, description=description,
         pattern_key=keys[0], pattern_keys=keys,
         session_key=session_key, approval_callback=approval_callback,
-        is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask, smart=approval_mode == "smart",
+        # The guardian LLM never approves a command the scanners could not read to the end: a person must.
+        # Key on the finding too (as _approval_scope does), so a detection-budget trip on a command the
+        # hardline scan finished still reaches a human.
+        is_cli=is_cli, is_gateway=is_gateway, is_ask=is_ask,
+        smart=approval_mode == "smart" and not unread and _SCAN_INCOMPLETE_DESCRIPTION not in keys,
         execution_target=execution_target, execution_backend=execution_backend,
     )
 

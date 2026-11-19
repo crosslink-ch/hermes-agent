@@ -538,15 +538,6 @@ def _frozen_target_config(resolution):
     return frozen
 
 
-def _ship_file_to_remote(env, remote_path: str, content: str, *, atomic: bool = False) -> None:
-    """Write *content* owner-only to *remote_path*; the payload rides
-    ``stdin_data``, never an ``echo`` argv (see _remote_write). Raises on write
-    failure: the caller ships secrets and code into dirs it believes are locked
-    down, so a silent failure would run the next step against a missing or
-    half-written file."""
-    _remote_write(env, remote_path, content, atomic=atomic, check=True)
-
-
 def _ship_env_file_and_launch(env, remote_dir: str, env_name: str, launch: str, *,
                               rpc_dir: str, rpc_token: str, **extra_env: str) -> str:
     """Ship the sandbox env (RPC dir + token, PYTHONDONTWRITEBYTECODE, the routed
@@ -687,10 +678,11 @@ def _sandbox_tools_for(enabled_tools: Optional[list[str]]) -> frozenset:
 
 
 def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
-                          sandbox_tools: frozenset, *, timeout: int, max_tool_calls: int,
-                          exec_start: float, operation_cwd: str | None = None,
-                          execution_target=None, execution_target_scope=None,
-                          execution_target_config=None) -> str:
+                         sandbox_tools: frozenset, *, timeout: int, max_tool_calls: int,
+                         exec_start: float, operation_cwd: str | None = None,
+                         execution_target=None, execution_target_scope=None,
+                         execution_target_config=None, session_id: Optional[str] = None,
+                         turn_id: Optional[str] = None, conversation_id: Optional[str] = None) -> str:
     """Per-call script ship: stage hermes_tools.py + script.py in a fresh remote sandbox dir,
     serve file-RPC from a polling thread, run, clean up."""
     sandbox_dir = f"{_env_temp_dir(env)}/hermes_exec_{uuid.uuid4().hex[:12]}"
@@ -712,7 +704,7 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         rpc_thread = threading.Thread(
             target=propagate_context_to_thread(_rpc_poll_loop), daemon=True,
             args=(env, f"{sandbox_dir}/rpc", effective_task_id, tool_call_log, tool_call_counter,
-                  max_tool_calls, sandbox_tools, stop_event, rpc_token,
+                  max_tool_calls, sandbox_tools, stop_event, rpc_token, session_id, turn_id, conversation_id,
                   execution_target, execution_target_scope, execution_target_config))
         rpc_thread.start()
         # The token travels in a sourced env file, never in argv. No umask on
@@ -744,7 +736,7 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
             logger.debug("Failed to clean up remote sandbox %s", sandbox_dir)
     result = _remote_result(status, stdout_text, exec_start,
                             {"exit_code": exit_code, "tool_calls_made": tool_call_counter[0],
-                             **({"cwd": operation_cwd} if operation_cwd else {})})
+                             **({"cwd": operation_cwd} if operation_cwd else {})}, env=env)
     tool_errors = tool_errors_since(tool_call_log)
     if tool_errors:
         result["tool_errors"] = tool_errors
@@ -763,7 +755,8 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
 def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[list[str]],
                     reset: bool = False, *, target: str | None = None, mode: str = "strict",
                     expected_target_scope: str | None = None,
-                    expected_target_config: dict | None = None) -> str:
+                    expected_target_config: dict | None = None, session_id: Optional[str] = None,
+                    turn_id: Optional[str] = None, conversation_id: Optional[str] = None) -> str:
     """Run code on the remote terminal backend: the owner's persistent remote session kernel
     (tools/code_kernel_remote.py) first, else the per-call script ship — the fail-open route when
     a kernel cannot be spawned and the only route for hosts that cannot sustain a background process."""
@@ -801,6 +794,7 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[l
                     max_tool_calls=max_tool_calls, reset=bool(reset),
                     idle_exit=int(_cfg.get("kernel_idle_timeout", 1800)),
                     **({"operation_cwd": operation_cwd} if operation_cwd else {}),
+                    session_id=session_id, turn_id=turn_id, conversation_id=conversation_id,
                 )
             except Exception:
                 logger.warning("remote session-kernel path failed; falling back to per-call", exc_info=True)
@@ -808,7 +802,7 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[l
             if kernel_result is not None:
                 if operation_cwd:
                     kernel_result["cwd"] = operation_cwd
-                return _finish_remote_kernel_result(kernel_result, timeout=timeout, exec_start=exec_start)
+                return _finish_remote_kernel_result(kernel_result, timeout=timeout, exec_start=exec_start, env=env)
             logger.info("remote session kernel unavailable on %s; using per-call path", env_type)
         except Exception as exc:
             return _remote_failure(exc, exec_start, 0)
@@ -816,7 +810,8 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[l
                                     timeout=timeout, max_tool_calls=max_tool_calls, exec_start=exec_start,
                                     operation_cwd=operation_cwd, execution_target=target,
                                     execution_target_scope=expected_target_scope,
-                                    execution_target_config=expected_target_config)
+                                    execution_target_config=expected_target_config,
+                                    session_id=session_id, turn_id=turn_id, conversation_id=conversation_id)
 
 
 # ---- Main entry point ----
@@ -828,6 +823,9 @@ def execute_code(
     enabled_tools: Optional[list[str]] = None,
     reset: bool = False,
     execution_target: Optional[str] = None,
+    session_id: Optional[str] = None,
+    turn_id: Optional[str] = None,
+    conversation_id: Optional[str] = None,
 ) -> str:
     """Run Python in the session's persistent kernel (local) or on the remote terminal backend,
     with RPC access to a subset of Hermes tools; returns the JSON result string. "Sandbox" means
@@ -866,20 +864,9 @@ def execute_code(
             "(process-identity probe wedged); the code was not run. Retry the call."
         )
     if _probe.value:
-        from cron.lifecycle_guard import (
-            HOST_INTERPRETER_KILL_REJECTION,
-            contains_gateway_lifecycle_command,
-            contains_host_interpreter_kill,
-        )
-        if contains_gateway_lifecycle_command(code):
-            if contains_host_interpreter_kill(code):
-                return tool_error(HOST_INTERPRETER_KILL_REJECTION)
-            return tool_error(
-                "Blocked: cannot restart or stop the gateway from inside the "
-                "gateway process. The gateway would kill this script before "
-                "it could complete (SIGTERM propagates to child processes). "
-                "Run the lifecycle command from a shell outside the gateway."
-            )
+        from tools.code_execution_lifecycle import lifecycle_guard_rejection
+        if (_rejection := lifecycle_guard_rejection(code)) is not None:
+            return tool_error(_rejection)
     from tools.execution_targets import resolve_execution_target
     try:
         resolution = resolve_execution_target(execution_target)
@@ -914,22 +901,27 @@ def execute_code(
         from tools.interrupt import clear_current_thread_interrupt
         clear_current_thread_interrupt()
     from contextlib import nullcontext
+    from hermes_cli.observability.shared_metrics_loop import record_execution_backend
+    from tools.environments.sandbox_scope import hosted_scope
     from tools.execution_targets import execution_target_config_scope
     scope = (execution_target_config_scope(_frozen_target_config(resolution))
              if resolution.named else nullcontext())
     with scope:
         token = _bound_code_target.set(resolution.target if resolution.named else None)
         try:
-            if env_type != "local":
-                result = _execute_remote(
+            # A hosted agent's code runs only in its sandbox, never in a kernel on this host.
+            if env_type != "local" or hosted_scope() is not None:
+                result = record_execution_backend("code", "remote", _execute_remote(
                     code, task_id, enabled_tools, reset=bool(reset),
                     target=resolution.target if resolution.named else None,
                     mode=_get_execution_mode(),
                     expected_target_scope=(resolution.security_scope if resolution.named else None),
                     expected_target_config=(_frozen_target_config(resolution) if resolution.named else None),
-                )
+                    session_id=session_id, turn_id=turn_id, conversation_id=conversation_id,
+                ))
             else:
-                result = _execute_local(code, task_id, enabled_tools, reset, resolution)
+                result = _execute_local(code, task_id, enabled_tools, reset, resolution, session_id=session_id,
+                                        turn_id=turn_id, conversation_id=conversation_id)
         finally:
             _bound_code_target.reset(token)
     if resolution.named:
@@ -942,7 +934,8 @@ def execute_code(
     return result
 
 
-def _execute_local(code, task_id, enabled_tools, reset, resolution):
+def _execute_local(code, task_id, enabled_tools, reset, resolution, *, session_id=None, turn_id=None,
+                   conversation_id=None):
     from tools.interrupt import is_interrupted as _is_interrupted
     # Session kernels are always on locally (one interpreter per conversation); the guards above
     # already ran for this cell, and the kernel path shares env builder, RPC server and redaction.
@@ -1107,7 +1100,9 @@ def _execute_code_handler(args: dict, **kwargs) -> str:
                           "requires Python source as a string. Retry as execute_code(code=\"...\").")
     return execute_code(code=code or "", task_id=kwargs.get("task_id"),
                         enabled_tools=kwargs.get("enabled_tools"), reset=bool(args.get("reset", False)),
-                        execution_target=args.get("execution_target"))
+                        execution_target=args.get("execution_target"),
+                        session_id=kwargs.get("session_id"), turn_id=kwargs.get("turn_id"),
+                        conversation_id=kwargs.get("conversation_id"))
 
 
 registry.register(
